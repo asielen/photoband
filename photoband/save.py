@@ -378,8 +378,10 @@ def save_preview(src: str, saving: Dict, fields: Optional[Dict], template_name: 
     the new one's name; None with backups off); backupKind: "original" when that file is the
     untouched original, "current" when it is this already-captioned file as it is now;
     backupExists: the original is already backed up there. pixelSource: "backup" when saving takes
-    the photo from the verified original backup (originalBackup). captioned: the file has a
-    Photoband record."""
+    the photo from the verified original backup (originalBackup). captioned: the file is this app's
+    output: it has a Photoband record, or (metadata stripped) the analysis made when it was opened
+    found the hidden marker. Without the record nothing about its original is known, so a backup
+    made now holds the captioned file as it is ("current"), never "the untouched original"."""
     real = os.path.realpath(src)
     out: Dict[str, Any] = {"overwrite": src, "copyExists": False, "copyError": ""}
     try:
@@ -392,7 +394,8 @@ def save_preview(src: str, saving: Dict, fields: Optional[Dict], template_name: 
     # the backup and the pixel source are decided by the same code the save runs (plan_backup,
     # find_original_backup), with hashes cached per file version so a preview stays cheap
     rec = _record_of(real)
-    out["captioned"] = bool(rec)
+    captioned = bool(rec) or photoband_output_without_record(real)
+    out["captioned"] = captioned
     if saving.get("backupOriginals", True):
         try:
             plan = plan_backup(real, saving, rec, sha_fn=_cached_sha256)
@@ -403,12 +406,12 @@ def save_preview(src: str, saving: Dict, fields: Optional[Dict], template_name: 
         elif plan.reuse:
             # an existing backup is kept: the untouched original, or a copy identical to the file now
             out["backup"] = plan.reuse
-            out["backupKind"] = "original" if plan.original or not rec else "current"
+            out["backupKind"] = "original" if plan.original or not captioned else "current"
         else:
             out["backup"] = _next_versioned(plan.base)
             # a new backup holds the file as it is now: for a photo Photoband already captioned in
             # place that is not the untouched original
-            out["backupKind"] = "current" if rec else "original"
+            out["backupKind"] = "current" if captioned else "original"
     else:
         out["backup"], out["backupKind"] = None, ""
     out["backupExists"] = out["backupKind"] == "original" and bool(out["backup"]) and os.path.exists(out["backup"])
@@ -587,8 +590,11 @@ def _backup_candidates(real: str, saving: Dict) -> List[str]:
 
 def find_original_backup(real: str, saving: Dict, rec: Optional[Dict],
                          sha_fn: Callable[[str], str] = file_sha256) -> Optional[str]:
-    """The backup holding the record's ``originalFile`` (same size and SHA-256)."""
+    """The backup holding the record's ``originalFile`` (same size and SHA-256), when that is the
+    untouched original (not a backup of an already captioned file, ``captioned``)."""
     of = (rec or {}).get("originalFile") or {}
+    if of.get("captioned"):
+        return None
     try:
         size = int(of.get("size", -1))
     except (TypeError, ValueError):
@@ -621,6 +627,8 @@ def original_photo(real: str, saving: Dict, rec: Optional[Dict], arr: np.ndarray
     record's photoHash, and sample format and channels agree."""
     if not rec or not rec.get("originalFile"):
         return None, "no original recorded"
+    if isinstance(rec["originalFile"], dict) and rec["originalFile"].get("captioned"):
+        return None, "the backup holds an earlier captioned version, not the untouched original"
     bk = find_original_backup(real, saving, rec)
     if not bk:
         return None, "the backup is missing or was changed"
@@ -687,7 +695,9 @@ def plan_backup(src: str, saving: Dict, prev_rec: Optional[Dict] = None,
                 try:
                     if os.path.getsize(v) == int(of.get("size", -1)) > 0 and \
                             (known[1] if known and same_file(v, known[0]) else sha_fn(v)) == of["sha256"]:
-                        return BackupPlan(base, of["sha256"], int(of["size"]), reuse=v, original=True)
+                        # a backup recorded as already captioned is reused, but is not "the original"
+                        return BackupPlan(base, of["sha256"], int(of["size"]), reuse=v,
+                                          original=not of.get("captioned"))
                 except OSError:
                     continue
         elif versions and os.path.basename(versions[0]).lower() in {os.path.basename(b).lower() for b in (base, legacy) if b} \
@@ -911,9 +921,15 @@ _PAYLOAD_LAYOUT_KEYS = ("version", "mode", "sourceRect", "canvas", "photoRect", 
 
 
 def payload_for_marker(rec: Dict) -> bytes:
-    """What the fragile payload carries: only what is printed plus layout.
+    """What the fragile payload carries: only what is printed plus layout, and how the file was
+    saved (``saveMode``: a copy or the photo captioned in place), which decides whether a batch may
+    caption the file again (existing.provenance) and must not change when the metadata is stripped.
     Never originalText or other metadata. Block text is kept only for blocks
-    that were actually laid out (have runs); any other block is stored empty."""
+    that were actually laid out (have runs); any other block is stored empty.
+
+    The JSON is additive: readers ignore keys they don't know, and a payload without a key (one
+    written before it existed) reads as "unknown". See photoband/record.py for every record field
+    and whether it survives metadata stripping."""
     lay_in = rec.get("layout") or {}
     lay = {k: lay_in[k] for k in _PAYLOAD_LAYOUT_KEYS if k in lay_in}
     runs = lay_in.get("runs")
@@ -930,6 +946,8 @@ def payload_for_marker(rec: Dict) -> bytes:
          "overrides": rec.get("overrides"), "layout": lay,
          "originalSize": rec.get("originalSize"), "photoOffset": rec.get("photoOffset"),
          "canvas": rec.get("canvas"), "photoHash": rec.get("photoHash")}
+    if rec.get("saveMode") in ("copy", "overwrite"):
+        p["saveMode"] = rec["saveMode"]
     return zlib.compress(json.dumps(p, separators=(",", ":"), ensure_ascii=False).encode("utf-8"), 9)
 
 
@@ -959,22 +977,36 @@ def _permission_error(e: PermissionError, target: str) -> SaveError:
     return SaveError("Permission denied while writing the file. Your edits are kept.", code="denied")
 
 
-def cached_case(path: str, info: Optional[ImageInfo] = None) -> Optional[str]:
-    """The existing-text case (A/B/C/D/None) of ``path`` from the analysis the app already made
-    when the photo was opened or pre-flighted (memory or disk cache); "" when none is cached."""
+def cached_existing(path: str, info: Optional[ImageInfo] = None) -> Optional[Dict]:
+    """The existing-text analysis the app already made of ``path`` when the photo was opened or
+    pre-flighted (memory or disk cache, this version of the file only); None when none is cached."""
     try:
         from . import photos
         info = info or probe(path)
         with photos._lock:
             hit = photos._cache.get(photos._key(path, info))
         if hit and hit.get("existing") is not None:
-            return hit["existing"].get("case")
+            return hit["existing"]
         res, _ = photos._load_existing(path, info, False)
-        if res is not None:
-            return res.get("case")
+        if isinstance(res, dict):
+            return res
     except Exception:
         log.debug("no cached analysis for %s", path, exc_info=True)
-    return ""
+    return None
+
+
+def cached_case(path: str, info: Optional[ImageInfo] = None) -> Optional[str]:
+    """The existing-text case (A/B/C/D/None) of ``path`` from the analysis the app already made
+    when the photo was opened or pre-flighted (memory or disk cache); "" when none is cached."""
+    ex = cached_existing(path, info)
+    return ex.get("case") if ex is not None else ""
+
+
+def photoband_output_without_record(path: str) -> bool:
+    """True when the cached analysis of ``path`` found this app's hidden marker although the file
+    has no record (its metadata was stripped): it IS a captioned file, only its record is gone."""
+    ex = cached_existing(path)
+    return bool(ex) and ex.get("source") in ("marker", "marker+payload")
 
 
 def detect_case(path: str, info: ImageInfo, md: Dict, arr: np.ndarray) -> Optional[str]:
@@ -1248,6 +1280,11 @@ def save(req: SaveRequest) -> SaveResult:
             if saving.get("backupOriginals", True):
                 plan = plan_backup(real, saving, prev, known=(orig.path, orig.sha) if orig else None)
                 rec["originalFile"] = {"sha256": plan.sha, "size": plan.size}
+                if not plan.original and (md_rec is not None or photoband_output_without_record(real)):
+                    # the backup holds this file as it is, already captioned by this app (its untouched
+                    # original wasn't found, it was changed elsewhere, or its record was stripped): say
+                    # so, so no later save or preview takes it for the untouched original
+                    rec["originalFile"]["captioned"] = True
             elif prev and prev.get("originalFile"):
                 rec["originalFile"] = prev["originalFile"]
             # where the new photo region sits in that original, when it is all original pixels

@@ -2,6 +2,12 @@
 
 Read order on open (spec): photoband metadata record, then hidden marker plus
 payload, then marker only (exact edge, OCR for text), then plain detection.
+
+Every decision the result feeds (the editor's starting state, the batch plan) must
+mean the same thing whichever of these sources it came from: a file whose
+metadata was stripped is still the file Photoband wrote. See photoband/record.py
+for which record fields the marker payload carries and what each path does when
+a field is missing (provenance: :func:`provenance`).
 """
 from __future__ import annotations
 
@@ -166,6 +172,43 @@ def _erase_inputs_for_record(arr: np.ndarray, rect) -> Dict[str, Any]:
     return {"band": band.to_json(), "blocks": [b.to_json() for b in blocks]}
 
 
+SAVE_MODES = ("copy", "overwrite")
+
+
+def provenance(rec: Optional[Dict[str, Any]], payload: Optional[Dict[str, Any]], marker: bool) -> Dict[str, Any]:
+    """How a Photoband output was saved, from whatever survived: the record's ``saveMode``, else
+    the marker payload's (the same value, written since payloads carry it), else, for records
+    from before ``saveMode``, ``originalFile`` (only an in-place save records the original it
+    replaced). A file that is Photoband's output (record or hidden marker) but says neither, e.g. a
+    JPEG whose metadata was stripped (its marker has no payload), is of UNKNOWN provenance.
+
+    Returns ``{"isCopy": True}`` for a known copy, ``{"isCopy": False}`` for a known in-place save,
+    ``{"isCopy": False, "copyUnknown": True}`` when it can't be told (callers must not treat that
+    file as an ordinary photo: it may be a copy), and ``{}`` for a file that isn't Photoband's.
+    Payload values come from the file and are untrusted: only the exact strings count."""
+    for src in (rec, payload):
+        m = (src or {}).get("saveMode")
+        if m in SAVE_MODES:
+            return {"isCopy": m == "copy"}
+    if rec and rec.get("originalFile"):
+        return {"isCopy": False}
+    if rec or payload or marker:
+        return {"isCopy": False, "copyUnknown": True}
+    return {}
+
+
+def _record_from_payload(p: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``record`` summary the editor reads (``mode`` decides erase-in-place vs rebuild), from a
+    marker payload, with the fields a payload doesn't carry (appVersion, saved, originalText) None."""
+    lay = p.get("layout") if isinstance(p.get("layout"), dict) else {}
+    tpl = p.get("template") if isinstance(p.get("template"), dict) else {}
+    mode = lay.get("mode")
+    return {"appVersion": None, "saved": None, "templateId": tpl.get("id"),
+            "originalSize": p.get("originalSize"), "photoOffset": p.get("photoOffset"), "canvas": p.get("canvas"),
+            "originalText": None, "mode": mode if mode in ("band", "rebuild", "erase") else "band",
+            "fromPayload": True}
+
+
 def analyze_existing(arr: np.ndarray, info: ImageInfo, md: Dict[str, Any], run_ocr: bool = True) -> Dict[str, Any]:
     """Decide the case for an opened photo. ``arr`` is upright full resolution."""
     H, W = arr.shape[:2]
@@ -173,6 +216,9 @@ def analyze_existing(arr: np.ndarray, info: ImageInfo, md: Dict[str, Any], run_o
 
     # 1. metadata record
     rec = _record.from_metadata(md)
+    # how the file was saved is a fact about the FILE, not about its pixels: it holds even when
+    # the photo was changed in another app since (the detection fallback below)
+    out.update(provenance(rec, None, False))
     if rec:
         out["record"] = {k: rec.get(k) for k in ("appVersion", "saved", "templateId", "originalSize",
                                                    "photoOffset", "canvas", "originalText", "mode")}
@@ -191,10 +237,9 @@ def analyze_existing(arr: np.ndarray, info: ImageInfo, md: Dict[str, Any], run_o
                        state={"template": rec.get("template"), "templateId": rec.get("templateId"),
                               "overrides": rec.get("overrides"), "blocks": rec.get("blocks")},
                        originalText=rec.get("originalText"),
-                       lossyRecaption=info.format == "JPEG",
-                       # a captioned copy Photoband saved (copies now sit next to their originals):
-                       # a batch over the folder must not caption it again
-                       isCopy=rec.get("saveMode") == "copy")
+                       lossyRecaption=info.format == "JPEG")
+            # isCopy (set above): a captioned copy Photoband saved (copies sit next to their
+            # originals), which a batch over the folder must not caption again
             if rec.get("mode") == "erase":
                 # re-editing an erase-in-place save keeps the original paper band: provide the band
                 # and the text this app drew there, so the editor can erase it again
@@ -217,10 +262,16 @@ def analyze_existing(arr: np.ndarray, info: ImageInfo, md: Dict[str, Any], run_o
         if mk.payload is not None:
             from .save import decode_marker_payload
             p = decode_marker_payload(mk.payload)
+            p = p if isinstance(p, dict) else None
             x, y, w, h = mk.photo_rect
             if p and x >= 0 and y >= 0 and x + w <= W and y + h <= H:
                 crop_h = pixel_hash(arr[y:y + h, x:x + w])
                 hash_ok = crop_h[:16] == mk.short_hash and p.get("photoHash", "")[:16] == mk.short_hash
+        # the payload is bound to this marker (salt and CRC over its hash), so its saveMode holds even
+        # when the photo itself no longer matches; with no record and no payload it is unknown
+        for k in ("isCopy", "copyUnknown"):
+            out.pop(k, None)
+        out.update(provenance(rec, p, True))
         if rect_ok or hash_ok:
             # exact rect from the marker; bands re-measured around it (detection may
             # have failed entirely on a high-key photo)
@@ -229,7 +280,10 @@ def analyze_existing(arr: np.ndarray, info: ImageInfo, md: Dict[str, Any], run_o
             out.update(case="A", source="marker+payload", confidence=1.0, sourceRect=list(mk.photo_rect),
                        state={"template": p.get("template"), "templateId": (p.get("template") or {}).get("id"),
                               "overrides": p.get("overrides"), "blocks": p.get("blocks")},
-                       band=band.to_json())
+                       band=band.to_json(), lossyRecaption=info.format == "JPEG")
+            if not rec:
+                # what the record path gives the editor (mode: erase in place keeps the paper band)
+                out["record"] = _record_from_payload(p)
             if (p.get("layout") or {}).get("mode") == "erase":
                 # same as the record path: an erase-in-place save keeps the original paper band, so
                 # provide the band and the text this app drew there for the editor to erase again
