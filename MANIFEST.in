@@ -1,7 +1,0 @@
-# sdist contents beyond the Python packages: the built UI and bundled fonts are copied into
-# the wheel by setup.py, so an sdist must carry them.
-graft ui/dist
-graft fonts
-include README.md THIRD_PARTY_NOTICES.md CHANGELOG.md
-recursive-include packages/captiontokens *.py *.toml
-global-exclude __pycache__ *.py[cod]

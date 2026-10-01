@@ -1,6 +1,7 @@
 // User actions shared by the toolbar, menus and keyboard shortcuts.
 import { post } from './api'
 import { dialogs } from './dialogs.svelte'
+import { savePreview } from './savepreview.svelte'
 import { app, type PhotoSession } from './store.svelte'
 
 const JPEG_NOTE = 'Saving a JPEG always re-compresses the photo, which loses a little quality each time. TIFF and PNG are saved losslessly.'
@@ -108,9 +109,14 @@ async function overwrite(): Promise<boolean> {
   if (!(await existingBandCheck(s))) return false
   const jpeg = outputIsJpeg(s, s.path) && !app.settings.session.jpegWarned
   if (!app.overwriteConfirmed) {
-    const backup = app.settings.saving.backupOriginals
-      ? `The untouched file is copied to ${app.settings.saving.backupFolder || 'an “_originals” folder next to it'} first.`
-      : 'Backups are turned OFF: the original cannot be recovered.'
+    // the exact backup, as the save will decide it (the save preview runs the same code)
+    const pv = savePreview.path === s.path ? savePreview.pv : null
+    const backup = !app.settings.saving.backupOriginals
+      ? 'Backups are turned OFF: the file cannot be recovered.'
+      : !pv?.backup ? 'A backup copy is kept first.'
+      : pv.backupKind === 'original'
+        ? (pv.backupExists ? `Its untouched original is already backed up as ${pv.backup}.` : `The untouched original is copied to ${pv.backup} first.`)
+        : `This file was captioned before and its untouched original wasn’t found, so the file as it is now is copied to ${pv.backup} first.`
     // one dialog: the JPEG note joins the confirmation instead of following it
     const r = await dialogs.ask('Overwrite the original?', `${s.meta.name} will be replaced by the captioned version. ${backup}${jpeg ? `\n\n${JPEG_NOTE}` : ''}`, [
       { id: 'cancel', label: 'Cancel' },

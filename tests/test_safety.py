@@ -465,7 +465,7 @@ def test_overwrite_through_symlink_replaces_the_target(tmp_path, symlink):
     assert r.ok, r.error
     assert os.path.islink(ln) and os.path.realpath(ln) == os.path.realpath(p)
     assert _sha(p) != before
-    assert r.backup_path == os.path.join(os.path.dirname(os.path.realpath(p)), "_originals", "scan.tif")
+    assert r.backup_path == os.path.join(os.path.dirname(os.path.realpath(p)), "_originals", "scan-original.tif")
     assert _sha(r.backup_path) == before
     assert not os.path.exists(tmp_path / "links" / "_originals")
 

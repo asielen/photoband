@@ -206,3 +206,54 @@ def test_original_rect_candidates_for_erase_records():
     assert savemod._original_rects(band, 100, 80) == [(0, 0, 100, 80)]
     band["originalRect"] = [5, 5, 100, 80]
     assert savemod._original_rects(band, 120, 90) == [(5, 5, 100, 80), (0, 0, 100, 80)]
+
+
+# ---- the preview names what the save will really do (Codex review: preview vs actual)
+
+def test_preview_backup_is_the_file_the_save_keeps(tmp_path):
+    # a new photo: the backup will be <stem>-original, and it holds the untouched original
+    p = _jpg(str(tmp_path / "scan.jpg"))
+    s = _settings()["saving"]
+    pv = save_preview(p, s, None, "")
+    assert pv["backup"] == backup_path_for(p, {}) and pv["backupKind"] == "original" and not pv["backupExists"]
+    r = _save(p)
+    assert r.ok and r.backup_path == pv["backup"]
+    # re-captioning: the verified original is reused, and the preview says so
+    pv = save_preview(p, s, None, "")
+    assert pv["backup"] == r.backup_path and pv["backupKind"] == "original" and pv["backupExists"]
+    r2 = _save(p, text="Again")
+    assert r2.ok and r2.backup_path == pv["backup"]
+
+
+def test_preview_follows_a_legacy_backup_and_a_taken_name(tmp_path):
+    # an older backup under the photo's own name is reused: the preview shows that file
+    p = _jpg(str(tmp_path / "a.jpg"))
+    os.makedirs(tmp_path / "_originals")
+    legacy = tmp_path / "_originals" / "a.jpg"
+    shutil.copy2(p, legacy)
+    s = _settings()["saving"]
+    pv = save_preview(p, s, None, "")
+    assert pv["backup"] == str(legacy) and pv["backupKind"] == "original"
+    r = _save(p)
+    assert r.ok and r.backup_path == pv["backup"]
+    # the new name is taken by other content: the new backup gets -2, and the preview says -2
+    q = _jpg(str(tmp_path / "b.jpg"), seed=2)
+    (tmp_path / "_originals" / "b-original.jpg").write_bytes(b"something else")
+    pv = save_preview(q, s, None, "")
+    assert pv["backup"].endswith("b-original-2.jpg")
+    r = _save(q)
+    assert r.ok and r.backup_path == pv["backup"]
+
+
+def test_preview_never_promises_a_tampered_backup(tmp_path):
+    # same size, other content: the save will not use it, so the preview must not promise it
+    p = _jpg(str(tmp_path / "scan.jpg"))
+    assert _save(p).ok
+    bk = backup_path_for(p, {})
+    data = bytearray(open(bk, "rb").read())
+    data[-3] ^= 0xFF
+    open(bk, "wb").write(bytes(data))
+    pv = save_preview(p, _settings()["saving"], None, "")
+    assert pv["pixelSource"] == "file" and pv["originalBackup"] is None
+    # the file was captioned and its original is gone: the backup will hold this version
+    assert pv["captioned"] and pv["backupKind"] == "current" and not pv["backupExists"]

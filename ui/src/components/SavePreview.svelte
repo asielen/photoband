@@ -13,11 +13,15 @@
     return t?.fromFile?.name ?? t?.name ?? ''
   })
 
+  // a string: an effect keyed on it re-runs only when a Saving setting really changes (saveSettings
+  // replaces the whole settings object on any change, e.g. the last template or a dismissed hint)
+  const savingKey = $derived(JSON.stringify(app.settings.saving))
+
   $effect(() => {
     // refresh for another photo, other Saving settings, another template (file-name pattern) and after each save
     const path = s.path
     const body = { path, fields: s.meta?.fields, templateName: tplName }
-    void JSON.stringify(app.settings.saving)
+    void savingKey
     if (app.saving || !s.meta) return
     let stale = false
     const t = setTimeout(() => {
@@ -42,11 +46,11 @@
       {#if pv.copyError}<span class="err">{pv.copyError}</span>
       {:else}<span class="path">{rel(pv.copy)}</span><span class="faint">{dirOf(pv.copy) === dirOf(s.path) ? 'next to the original' : 'new file'}{pv.copyExists ? ' (that name exists: you’ll be asked)' : ''}</span>{/if}
     </span>
-    <span class="item row" class:nobackup={!backups} data-tip={backups && pv.backup ? `Original backed up to ${pv.backup}` : 'Backups are off: the original is replaced and can’t be recovered.'}>
+    <span class="item row" class:nobackup={!backups} data-tip={!backups || !pv.backup ? 'Backups are off: the file is replaced and can’t be recovered.' : pv.backupKind === 'original' ? `The untouched original is kept in ${pv.backup}` : `This file was captioned before and its untouched original wasn’t found: the file as it is now is kept in ${pv.backup}`}>
       <Icon name={backups ? 'overwrite' : 'warn'} size={13} />
       <span class="k">Overwrite:</span>
       <span class="path">{name}</span><span class="faint">replaced;</span>
-      {#if backups && pv.backup}<span class="faint">original kept as</span><span class="path">{rel(pv.backup)}</span>{#if pv.backupExists}<span class="faint">(a backup is already there)</span>{/if}
+      {#if backups && pv.backup}<span class="faint">{pv.backupKind === 'original' ? (pv.backupExists ? 'original already kept as' : 'original kept as') : 'this version kept as'}</span><span class="path">{rel(pv.backup)}</span>
       {:else}<span class="warn">no backup, can’t be undone</span>{/if}
     </span>
   </div>

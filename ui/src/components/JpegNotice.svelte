@@ -9,7 +9,8 @@
   const outJpeg = $derived(app.settings.saving.outputFormat === 'jpeg' || (app.settings.saving.outputFormat === 'same' && srcJpeg))
   const backups = $derived(!!app.settings.saving.backupOriginals)
   // saving takes the photo from the untouched original backup (save preview, fetched by SavePreview)
-  const original = $derived(srcJpeg && savePreview.path === s.path && savePreview.pv?.pixelSource === 'backup' ? savePreview.pv.originalBackup ?? null : null)
+  const pv = $derived(savePreview.path === s.path ? savePreview.pv : null)
+  const original = $derived(srcJpeg && pv?.pixelSource === 'backup' ? pv.originalBackup ?? null : null)
 
   function turnOn() {
     app.saveSettings({ saving: { backupOriginals: true } }).then(() => app.toast('success', 'Backups are on.')).catch((e) => app.toast('error', e.message))
@@ -21,12 +22,13 @@
     <Icon name={backups ? 'info' : 'warn'} size={14} />
     <span class="grow">
       {#if original}An untouched original backup was found (<span class="path">{relToPhoto(s.path, original)}</span>): saving uses it, so quality doesn’t drop further.
-      {:else if srcJpeg}No original backup found: each save re-compresses this JPEG and may reduce quality a little.
+      {:else if srcJpeg && pv?.captioned}This JPEG was captioned before and its untouched original backup wasn’t found: each save re-compresses it and may reduce quality a little.
+      {:else if srcJpeg}Each save re-compresses this JPEG and may reduce quality a little.
       {:else}Copies are saved as JPEG, which re-compresses the photo and loses a little quality.{/if}
       {#if !backups}<b>Backups are off: we highly recommend turning them on</b> so an overwritten original can be restored.
-      {:else if !original}Backups are on, so Overwrite keeps the untouched original.{/if}
+      {:else if !original && pv?.backupKind === 'original'}Backups are on, so Overwrite keeps the untouched original.{/if}
     </span>
-    {#if !backups}<button class="btn sm" data-tip="Before each overwrite, copy the untouched original to an “_originals” folder (Settings › Saving)" onclick={turnOn}>Turn on backups</button>{/if}
+    {#if !backups}<button class="btn sm" disabled={app.saving} data-tip={app.saving ? 'Wait until the save finishes.' : 'Before each overwrite, copy the photo to the backup folder first (Settings › Saving)'} onclick={turnOn}>Turn on backups</button>{/if}
   </div>
 {/if}
 

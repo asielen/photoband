@@ -14,12 +14,12 @@
   const saveTip = $derived(app.saving ? 'Saving…' : blocked || 'Save a captioned copy, then go to the next photo. Your original file is not changed.')
   const backups = $derived(!!app.settings.saving.backupOriginals)
   const backupTip = $derived(backups
-    ? 'Backup is on: before Overwrite replaces a photo, the untouched original is copied to an “_originals” subfolder as name-original. Click to turn off.'
-    : 'Backup is off: Overwrite replaces the photo and the original can’t be recovered. Click to turn on (recommended).')
+    ? 'Backup is on: before Overwrite replaces a photo, the photo is first copied to the backup folder (the strip below shows the exact file). Click to turn off.'
+    : 'Backup is off: Overwrite replaces the photo and it can’t be recovered. Click to turn on (recommended).')
   function toggleBackups() {
     app.saveSettings({ saving: { backupOriginals: !backups } }).catch((e) => app.toast('error', e.message))
   }
-  const overwriteTip = $derived(app.saving ? 'Saving…' : caseC || blocked || (app.settings.saving.backupOriginals ? 'Replace the original file with the captioned version, then go to the next photo. A backup copy of the original is kept.' : 'Replace the original file with the captioned version, then go to the next photo. Backups are turned off in Settings.'))
+  const overwriteTip = $derived(app.saving ? 'Saving…' : caseC || blocked || (app.settings.saving.backupOriginals ? 'Replace the file with the captioned version, then go to the next photo. A backup copy is kept first (the strip below shows where).' : 'Replace the file with the captioned version, then go to the next photo. Backups are off: it can’t be recovered.'))
 </script>
 
 <header class="tb">
@@ -72,7 +72,7 @@
       {#if app.savingMode === 'overwrite'}<span class="spin dark" aria-hidden="true"></span> Saving…{:else}<Icon name={backups ? 'overwrite' : 'warn'} /><span class="lbl long">Overwrite &amp; next</span><span class="lbl short">Overwrite</span><Icon name="next" />{/if}
     </button>
     <!-- backups only matter for Overwrite: shown beside it so the pair reads as one decision -->
-    <button class="btn ghost backup" class:off={!backups} role="switch" aria-checked={backups} aria-label="Back up originals before overwriting" data-tip={backupTip} onclick={toggleBackups}><Icon name={backups ? 'shieldcheck' : 'shield'} /><span class="lbl">Backup {backups ? 'on' : 'off'}</span></button>
+    <button class="btn ghost backup" class:off={!backups} role="switch" aria-checked={backups} aria-label="Back up photos before overwriting" disabled={app.saving} data-tip={app.saving ? 'Wait until the save finishes: it already uses the current setting.' : backupTip} onclick={toggleBackups}><Icon name={backups ? 'shieldcheck' : 'shield'} /><span class="lbl">Backup {backups ? 'on' : 'off'}</span></button>
   </div>
   {/if}
   <span class="sep"></span>

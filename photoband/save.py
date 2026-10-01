@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import threading
+from collections import OrderedDict
 import json
 import logging
 import math
@@ -369,12 +371,15 @@ def backup_path_for(src: str, saving: Dict) -> str:
 
 
 def save_preview(src: str, saving: Dict, fields: Optional[Dict], template_name: str) -> Dict[str, Any]:
-    """Where each kind of save would write, for the UI. Nothing is written or hashed.
+    """Where each kind of save would write, for the UI. Nothing is written; hashes are cached.
 
     copy: the copy's path (as Save copy would name it now); copyExists: the name is taken and the
-    user will be asked. backup: where Overwrite keeps the original (None with backups off);
-    backupExists: a backup of this photo is already there (it is reused when it still holds this
-    original, otherwise the new one gets a -2, -3 ... name)."""
+    user will be asked. backup: the exact file Overwrite keeps (an existing backup it reuses, or
+    the new one's name; None with backups off); backupKind: "original" when that file is the
+    untouched original, "current" when it is this already-captioned file as it is now;
+    backupExists: the original is already backed up there. pixelSource: "backup" when saving takes
+    the photo from the verified original backup (originalBackup). captioned: the file has a
+    Photoband record."""
     real = os.path.realpath(src)
     out: Dict[str, Any] = {"overwrite": src, "copyExists": False, "copyError": ""}
     try:
@@ -384,18 +389,60 @@ def save_preview(src: str, saving: Dict, fields: Optional[Dict], template_name: 
             out["copy"], out["copyExists"] = str(e), True
         else:
             out["copy"], out["copyError"] = "", str(e)
+    # the backup and the pixel source are decided by the same code the save runs (plan_backup,
+    # find_original_backup), with hashes cached per file version so a preview stays cheap
+    rec = _record_of(real)
+    out["captioned"] = bool(rec)
     if saving.get("backupOriginals", True):
-        base = backup_path_for(real, saving)
-        legacy = _legacy_backup_base(real, saving)
-        out["backup"] = base
-        out["backupExists"] = bool(backup_versions(base) or (legacy and backup_versions(legacy)))
+        try:
+            plan = plan_backup(real, saving, rec, sha_fn=_cached_sha256)
+        except OSError:
+            plan = None
+        if plan is None:
+            out["backup"], out["backupKind"] = None, ""
+        elif plan.reuse:
+            # an existing backup is kept: the untouched original, or a copy identical to the file now
+            out["backup"] = plan.reuse
+            out["backupKind"] = "original" if plan.original or not rec else "current"
+        else:
+            out["backup"] = _next_versioned(plan.base)
+            # a new backup holds the file as it is now: for a photo Photoband already captioned in
+            # place that is not the untouched original
+            out["backupKind"] = "current" if rec else "original"
     else:
-        out["backup"], out["backupExists"] = None, False
-    # pixelSource: "backup" when saving takes the photo from the untouched original (checked by
-    # size here; save() verifies the hash and the pixels and falls back to the file otherwise)
-    bk = find_original_backup(real, saving, _record_of(real), verify=False)
+        out["backup"], out["backupKind"] = None, ""
+    out["backupExists"] = out["backupKind"] == "original" and bool(out["backup"]) and os.path.exists(out["backup"])
+    bk = find_original_backup(real, saving, rec, sha_fn=_cached_sha256) if rec else None
     out["pixelSource"], out["originalBackup"] = ("backup", bk) if bk else ("file", None)
     return out
+
+
+_SHA_CACHE: "OrderedDict[Tuple[str, int, int], str]" = OrderedDict()
+_SHA_LOCK = threading.Lock()
+
+
+def _cached_sha256(path: str) -> str:
+    """SHA-256 of a file, remembered per (file, size, mtime) for previews."""
+    st = os.stat(path)
+    key = (canonical_path(path), st.st_size, st.st_mtime_ns)
+    with _SHA_LOCK:
+        if key in _SHA_CACHE:
+            _SHA_CACHE.move_to_end(key)
+            return _SHA_CACHE[key]
+    sha = file_sha256(path)
+    with _SHA_LOCK:
+        _SHA_CACHE[key] = sha
+        while len(_SHA_CACHE) > 256:
+            _SHA_CACHE.popitem(last=False)
+    return sha
+
+
+def _next_versioned(base: str) -> str:
+    """The name store_copy gives a new backup: base, or base-2, base-3 ... when taken."""
+    i = 1
+    while os.path.exists(_versioned(base, i)):
+        i += 1
+    return _versioned(base, i)
 
 
 def _legacy_backup_base(src: str, saving: Dict) -> Optional[str]:
@@ -505,8 +552,9 @@ def _backup_candidates(real: str, saving: Dict) -> List[str]:
     return (backup_versions(legacy) if legacy else []) + backup_versions(base)
 
 
-def find_original_backup(real: str, saving: Dict, rec: Optional[Dict], verify: bool = True) -> Optional[str]:
-    """The backup holding the record's ``originalFile`` (size, and SHA-256 when ``verify``)."""
+def find_original_backup(real: str, saving: Dict, rec: Optional[Dict],
+                         sha_fn: Callable[[str], str] = file_sha256) -> Optional[str]:
+    """The backup holding the record's ``originalFile`` (same size and SHA-256)."""
     of = (rec or {}).get("originalFile") or {}
     try:
         size = int(of.get("size", -1))
@@ -516,7 +564,7 @@ def find_original_backup(real: str, saving: Dict, rec: Optional[Dict], verify: b
         return None
     for v in reversed(_backup_candidates(real, saving)):
         try:
-            if os.path.getsize(v) == size and (not verify or file_sha256(v) == of["sha256"]):
+            if os.path.getsize(v) == size and sha_fn(v) == of["sha256"]:
                 return v
         except OSError:
             continue
@@ -580,17 +628,19 @@ class BackupPlan:
     sha: str
     size: int
     reuse: Optional[str] = None
+    original: bool = False        # reuse holds the record's untouched original
 
 
 def plan_backup(src: str, saving: Dict, prev_rec: Optional[Dict] = None,
-                known: Optional[Tuple[str, str]] = None) -> BackupPlan:
+                known: Optional[Tuple[str, str]] = None, sha_fn: Callable[[str], str] = file_sha256) -> BackupPlan:
     """Decide whether an existing backup already holds this file's original.
 
     ``prev_rec`` is the source's photoband record, passed only when the source was verified to
     be this app's output (is_app_output). Then the backup whose SHA-256 matches the record's
     ``originalFile`` is reused. Otherwise an existing backup is reused only if it is
     byte-identical to the current file; anything else gets a new versioned backup.
-    ``known``: (path, sha256) of a backup hashed moments ago (original_photo), not hashed again."""
+    ``known``: (path, sha256) of a backup hashed moments ago (original_photo), not hashed again.
+    ``sha_fn``: how files are hashed (save_preview passes a cached one; saves always hash afresh)."""
     real = os.path.realpath(src)
     base = backup_path_for(real, saving)
     # older backups of this file count as existing ones, so an original is never backed up twice
@@ -603,18 +653,18 @@ def plan_backup(src: str, saving: Dict, prev_rec: Optional[Dict] = None,
             for v in reversed(versions):
                 try:
                     if os.path.getsize(v) == int(of.get("size", -1)) > 0 and \
-                            (known[1] if known and same_file(v, known[0]) else file_sha256(v)) == of["sha256"]:
-                        return BackupPlan(base, of["sha256"], int(of["size"]), reuse=v)
+                            (known[1] if known and same_file(v, known[0]) else sha_fn(v)) == of["sha256"]:
+                        return BackupPlan(base, of["sha256"], int(of["size"]), reuse=v, original=True)
                 except OSError:
                     continue
         elif versions and os.path.basename(versions[0]).lower() in {os.path.basename(b).lower() for b in (base, legacy) if b} \
                 and os.path.getsize(versions[0]) > 0 and _legacy_backup_matches(prev_rec, versions[0]):
             v = versions[0]
-            return BackupPlan(base, file_sha256(v), os.path.getsize(v), reuse=v)
-    sha = file_sha256(real)
+            return BackupPlan(base, sha_fn(v), os.path.getsize(v), reuse=v, original=True)
+    sha = sha_fn(real)
     for v in reversed(versions):
         try:
-            if os.path.getsize(v) == size > 0 and file_sha256(v) == sha:
+            if os.path.getsize(v) == size > 0 and sha_fn(v) == sha:
                 return BackupPlan(base, sha, size, reuse=v)
         except OSError:
             continue

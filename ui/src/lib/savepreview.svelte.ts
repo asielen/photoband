@@ -5,8 +5,14 @@ export type SavePreviewInfo = {
   copyExists: boolean
   copyError: string
   overwrite: string
+  /** the exact file Overwrite keeps: an existing backup it reuses, or the new one's name */
   backup: string | null
+  /** 'original': that file is the untouched original; 'current': it is this already-captioned file as it is now */
+  backupKind: 'original' | 'current' | ''
+  /** the untouched original is already backed up there */
   backupExists: boolean
+  /** the file has a Photoband record (it was captioned in place before) */
+  captioned: boolean
   /** 'backup': saving takes the photo from the untouched original backup (no further JPEG loss) */
   pixelSource?: 'backup' | 'file'
   originalBackup?: string | null
