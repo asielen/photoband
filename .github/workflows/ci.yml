@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test-linux:
+    name: Lint + tests (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # the minimum supported version
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: System tools (ExifTool, Tesseract)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libimage-exiftool-perl tesseract-ocr
+      - name: Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements/dev.lock
+          python -m pip install --no-deps -e .
+      - name: Ruff
+        run: ruff check .
+      - name: UI build, type check, unit tests
+        working-directory: ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          npm run check
+          npx vitest run
+      - name: Backend tests (non-e2e)
+        run: python -m pytest -q --ignore=tests/e2e
+
+  build:
+    name: Tests + frozen app (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            exe: dist/Photoband/Photoband.exe
+          - os: macos-14   # arm64
+            exe: dist/Photoband.app/Contents/MacOS/Photoband
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      # The pinned ExifTool checksum in scripts/vendor.lock.json is not filled in yet, so CI
+      # uses a system ExifTool (on PATH) instead of bundling one. Remove once it is pinned and
+      # run `python scripts/fetch_vendor.py` before the build instead.
+      PHOTOBAND_ALLOW_NO_EXIFTOOL: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: ExifTool (Windows)
+        if: runner.os == 'Windows'
+        run: choco install exiftool -y --no-progress
+      - name: ExifTool (macOS)
+        if: runner.os == 'macOS'
+        run: brew install exiftool
+      - name: Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements/build.lock
+          python -m pip install -r requirements/dev.lock
+          python -m pip install --no-deps -e .
+      - name: UI build
+        working-directory: ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Backend tests (non-e2e)
+        run: python -m pytest -q --ignore=tests/e2e
+      - name: PyInstaller build
+        run: python -m PyInstaller packaging/photoband.spec --noconfirm --clean
+      - name: Smoke test the frozen app
+        run: python scripts/smoke_frozen.py "${{ matrix.exe }}" --expect-exiftool
+      - name: Upload the app on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: photoband-${{ matrix.os }}
+          path: dist/
+          retention-days: 5

@@ -1,0 +1,12 @@
+{
+  "_comment": "Pinned third-party downloads for scripts/fetch_vendor.py. To bump: change the version and file names, run `python scripts/fetch_vendor.py --no-verify` on each OS (it prints the SHA-256 it got), check the files against https://exiftool.org/checksums.txt, and paste the hashes here. While a sha256 is 'TBD-verify', fetch_vendor.py refuses to run without --no-verify.",
+  "exiftool": {
+    "version": "13.25",
+    "unix": {"file": "Image-ExifTool-13.25.tar.gz", "sha256": "TBD-verify"},
+    "win64": {"file": "exiftool-13.25_64.zip", "sha256": "TBD-verify"},
+    "mirrors": [
+      "https://exiftool.org/{file}",
+      "https://sourceforge.net/projects/exiftool/files/{file}/download"
+    ]
+  }
+}
