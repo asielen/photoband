@@ -24,6 +24,7 @@
     usesDraft?: boolean
     onCopy?: boolean // case C in an overwrite batch: the server erases on a copy and keeps the original
     isCopy?: boolean // a captioned copy Photoband made: always left alone
+    maybeCopy?: boolean // probably a Photoband copy whose metadata was stripped: left alone too
     draftHash?: string | null // the stored draft this plan started from (cleared after the batch saves it)
     size?: number
     before?: { status: Plan['status']; reasons: string[] } // state before "Exclude" in review
@@ -259,7 +260,9 @@
     if (copyWhy) {
       p.status = 'skipped'
       p.action = 'skip'
-      p.isCopy = true
+      // say which: a known copy, or a stripped file that may be one
+      p.isCopy = ex?.isCopy === true
+      p.maybeCopy = !p.isCopy
       p.reasons = [copyWhy]
       return p
     }
@@ -915,9 +918,11 @@
         : `${plural(fl, 'photo has', 'photos have')} a warning but will be saved anyway.`)
     }
     const copiesN = plans.filter((p) => p.isCopy).length
-    const optSkipped = (counts.skipped || 0) - copiesN
+    const maybeN = plans.filter((p) => p.maybeCopy).length
+    const optSkipped = (counts.skipped || 0) - copiesN - maybeN
     if (optSkipped) out.push(`${plural(optSkipped, 'photo is', 'photos are')} skipped, as set in More options.`)
     if (copiesN) out.push(`${plural(copiesN, 'photo is a captioned copy', 'photos are captioned copies')} Photoband made earlier, so ${copiesN === 1 ? 'it is' : 'they are'} left as ${copiesN === 1 ? 'it is' : 'they are'}.`)
+    if (maybeN) out.push(`${plural(maybeN, 'photo looks', 'photos look')} like a captioned copy whose photo information was removed, so ${maybeN === 1 ? 'it is' : 'they are'} left as ${maybeN === 1 ? 'it is' : 'they are'}. Open ${maybeN === 1 ? 'it' : 'them'} in the editor to caption again.`)
     const bad = (counts.blocked || 0) + (counts.error || 0)
     if (bad) out.push(`${plural(bad, 'photo', 'photos')} can’t be saved by Photoband.`)
     if (counts.unchecked) out.push(`${plural(counts.unchecked, 'photo was', 'photos were')} not checked because you stopped checking, so ${counts.unchecked === 1 ? 'it' : 'they'} won’t be saved. Go Back and check again to include ${counts.unchecked === 1 ? 'it' : 'them'}.`)
@@ -1110,7 +1115,7 @@
         <div class="plist scroll">
           {#each plans as p (p.path)}
             <div class="prow row">
-              <span class="pill {p.status}" data-tip={p.isCopy ? 'A captioned copy Photoband made: left as it is.' : pillTips[p.status]}>{labels[p.status]}</span>
+              <span class="pill {p.status}" data-tip={p.isCopy ? 'A captioned copy Photoband made: left as it is.' : p.maybeCopy ? 'Probably a captioned copy whose photo information was removed: left as it is. Open it to caption it again.' : pillTips[p.status]}>{labels[p.status]}</span>
               <span class="name" data-tip={p.path}>{p.name}</span>
               <span class="reasons" data-tip={[p.action !== 'band' && p.status !== 'skipped' ? (p.action === 'rebuild' ? 'Replaces the existing band.' : p.onCopy ? 'Erases the old caption on a copy; the original is kept.' : 'Erases the old caption in place.') : '', ...p.reasons].filter(Boolean).join('\n') || undefined}>{#if p.usesDraft && p.status !== 'skipped'}<span class="tag">uses your edits</span>{/if}{[p.action !== 'band' && p.status !== 'skipped' ? (p.action === 'rebuild' ? 'replace band' : p.onCopy ? 'erase on a copy (original kept)' : 'erase in place') : '', ...p.reasons, p.reviewed ? 'reviewed' : ''].filter(Boolean).join(' · ')}</span>
             </div>
