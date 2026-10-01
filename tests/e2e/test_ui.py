@@ -291,3 +291,20 @@ def test_batch(page, server):
     failed = int(re.search(r"(\d+)\s+failed", txt).group(1))
     assert saved >= 5 and failed == 0, txt
     assert not [e for e in pg.errors if "favicon" not in e], pg.errors
+    # a second batch over the same folder lists the copies the first one made (they sit next to
+    # the originals): it leaves every one of them alone instead of captioning a copy of a copy
+    pg.click("button:has-text('New batch')")
+    pg.wait_for_timeout(800)
+    pg.click("button:has-text('Check photos')")
+    pg.wait_for_selector("text=ready", timeout=30000)
+    pg.wait_for_function("() => !document.body.innerText.includes('Checking…')", timeout=180000)
+    pg.wait_for_timeout(500)
+    shot(pg, "25_batch_second_run_skips_copies")
+    rows = pg.locator(".prow", has_text="a captioned copy Photoband made")
+    # this batch's copies and the one an earlier test saved in the same folder
+    copies = [n for n in os.listdir(server["work"]) if "-captioned" in n]
+    assert rows.count() == len(copies) >= saved, pg.inner_text(".batch")
+    for i in range(rows.count()):
+        assert "-captioned" in rows.nth(i).inner_text()
+    pg.click("button:has-text('Back')")
+    assert not [e for e in pg.errors if "favicon" not in e], pg.errors

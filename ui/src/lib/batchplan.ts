@@ -21,3 +21,12 @@ export function caseCOverwriteRefused(mode: PhotoDraft['mode'], bs: BatchSetting
   if (bs.saveMode !== 'overwrite' || mode === 'erase' || allowOverwriteHandwritten) return null
   return 'caption on the scan: overwriting it is off (Settings › Saving)'
 }
+
+/** The reason a batch leaves a photo alone because it is itself a captioned copy Photoband made
+ *  (copies can sit next to their originals, so a later batch over the folder lists them):
+ *  captioning it again would only add a copy of a copy on every run. Whatever the options for
+ *  photos Photoband captioned, and not something that needs a look. Null for anything else. */
+export const COPY_REASON = 'a captioned copy Photoband made'
+export function copySkipReason(ex: { case?: unknown; isCopy?: boolean } | null | undefined): string | null {
+  return ex?.isCopy === true ? COPY_REASON : null
+}

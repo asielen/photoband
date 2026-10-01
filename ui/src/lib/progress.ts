@@ -37,13 +37,36 @@ export function progressLine(done: number, total: number, elapsed: number, left:
   return parts.join(' · ')
 }
 
+/** The value text of a progress bar and the words a screen reader is told: no elapsed time or
+ *  estimate, which change every second (a live region bound to a ticking value is re-announced
+ *  on every tick). */
+export function progressValueText(done: number, total: number): string {
+  const pct = total > 0 ? Math.floor((Math.min(done, total) / total) * 100) : 0
+  return `${pct}% · ${Math.min(done, total)} of ${total} photo${total === 1 ? '' : 's'}`
+}
+
+/** What a polite live region announces about a long run: only at each tenth of the way (and at
+ *  the end), so it stays quiet between milestones however often the screen updates. */
+export function progressAnnouncement(verb: string, done: number, total: number): string {
+  if (total <= 0) return ''
+  const d = Math.min(done, total)
+  if (d >= total) return `${verb} ${total} of ${total} photo${total === 1 ? '' : 's'}.`
+  const step = Math.floor((d / total) * 10) * 10
+  return `${verb} ${step}%.`
+}
+
 /** Tracks one run. Call `update` on every poll or tick; photos already done when it is first
  *  called (a resumed batch) don't count towards the speed. Photos may finish several at a time
- *  (parallel workers): the speed is photos completed per second of the whole run. Between
- *  completions the estimate counts down; each completion blends in a fresh estimate. */
+ *  (parallel workers): the speed is photos completed per second since counting started. Between
+ *  completions the estimate counts down; each completion blends in a fresh estimate.
+ *
+ *  The speed is measured from the moment counting (re)started, never from `start` (which is only
+ *  for the elapsed time): when the count drops (failed photos queued again) and when `rebase` is
+ *  called (the photos start saving only now, after being prepared again for a retry or resume). */
 export class ProgressClock {
   readonly start: number
   private base: number | null = null
+  private baseT = 0
   private last = 0
   private lastT = 0
   private etaAt: number | null = null
@@ -52,11 +75,17 @@ export class ProgressClock {
     this.start = now
   }
 
+  /** Count from the next update on: the time before it doesn't belong to the photos counted. */
+  rebase() {
+    this.base = null
+  }
+
   update(done: number, total: number, now = Date.now()): { elapsed: number; left: number | null } {
     const elapsed = Math.max(0, (now - this.start) / 1000)
     if (this.base === null || done < this.base) {
-      // first call, or fewer done than before (failed photos queued again): count from here
+      // first call, rebased, or fewer done than before (failed photos queued again): count from here
       this.base = done
+      this.baseT = now
       this.last = done
       this.lastT = now
       this.etaAt = null
@@ -64,7 +93,8 @@ export class ProgressClock {
     if (done > this.last) {
       const n = done - this.base
       if (n >= MIN_DONE) {
-        const raw = (Math.max(0, total - done) * elapsed) / n
+        const spent = Math.max(0, (now - this.baseT) / 1000)
+        const raw = (Math.max(0, total - done) * spent) / n
         const prev = this.etaAt === null ? null : Math.max(0, this.etaAt - (now - this.lastT) / 1000)
         this.etaAt = prev === null ? raw : SMOOTH * raw + (1 - SMOOTH) * prev
       }
