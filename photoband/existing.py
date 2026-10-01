@@ -191,7 +191,10 @@ def analyze_existing(arr: np.ndarray, info: ImageInfo, md: Dict[str, Any], run_o
                        state={"template": rec.get("template"), "templateId": rec.get("templateId"),
                               "overrides": rec.get("overrides"), "blocks": rec.get("blocks")},
                        originalText=rec.get("originalText"),
-                       lossyRecaption=info.format == "JPEG")
+                       lossyRecaption=info.format == "JPEG",
+                       # a captioned copy Photoband saved (copies now sit next to their originals):
+                       # a batch over the folder must not caption it again
+                       isCopy=rec.get("saveMode") == "copy")
             if rec.get("mode") == "erase":
                 # re-editing an erase-in-place save keeps the original paper band: provide the band
                 # and the text this app drew there, so the editor can erase it again

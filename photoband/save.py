@@ -412,8 +412,15 @@ def save_preview(src: str, saving: Dict, fields: Optional[Dict], template_name: 
     else:
         out["backup"], out["backupKind"] = None, ""
     out["backupExists"] = out["backupKind"] == "original" and bool(out["backup"]) and os.path.exists(out["backup"])
+    # the save also requires the file to still be this app's output (its photo region unchanged):
+    # check that on the pixels the editor already holds; without them it is only "probably"
     bk = find_original_backup(real, saving, rec, sha_fn=_cached_sha256) if rec else None
-    out["pixelSource"], out["originalBackup"] = ("backup", bk) if bk else ("file", None)
+    source = "file"
+    if bk:
+        from .photos import _peek_full
+        arr, _ = _peek_full(real, probe(real))
+        source = "unverified" if arr is None else "backup" if is_app_output(rec, arr) else "file"
+    out["pixelSource"], out["originalBackup"] = source, (bk if source != "file" else None)
     return out
 
 
@@ -435,6 +442,32 @@ def _cached_sha256(path: str) -> str:
         while len(_SHA_CACHE) > 256:
             _SHA_CACHE.popitem(last=False)
     return sha
+
+
+def opened_full_hash(path: str, size: int, mtime_ns: int) -> Optional[str]:
+    """The full SHA-256 of ``path`` as it was at (size, mtime_ns), if it was hashed then."""
+    with _SHA_LOCK:
+        return _SHA_CACHE.get((canonical_path(path), size, mtime_ns))
+
+
+_OPEN_HASHER = None
+
+
+def hash_in_background(path: str) -> None:
+    """Hash an opened photo once, off the request thread, so a later save can tell a
+    modified-time touch from a real edit by its whole content. One worker: flipping through a
+    folder queues the photos instead of reading them all at once."""
+    global _OPEN_HASHER
+    if _OPEN_HASHER is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _OPEN_HASHER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pb-open-hash")
+
+    def run():
+        try:
+            _cached_sha256(path)
+        except OSError:
+            pass
+    _OPEN_HASHER.submit(run)
 
 
 def _next_versioned(base: str) -> str:
@@ -597,7 +630,7 @@ def original_photo(real: str, saving: Dict, rec: Optional[Dict], arr: np.ndarray
         st2 = os.stat(bk)
         if (st2.st_size, st2.st_mtime_ns) != (st.st_size, st.st_mtime_ns):
             return None, "the backup changed while it was read"
-    except (ImageError, OSError) as e:
+    except Exception as e:  # an optional speed-up: any failure (also MemoryError) falls back to the file
         return None, f"the backup could not be read: {e}"
     rect = _rect(list(rec.get("photoOffset") or []) + list(rec.get("originalSize") or []))
     if not rect:
@@ -758,13 +791,18 @@ def ensure_backup(src: str, saving: Dict, plan: Optional[BackupPlan] = None) -> 
     return store_copy(real, plan.base, expect_sha=plan.sha)
 
 
+def labelled_backup_base(path: str, saving: Dict, label: str) -> str:
+    """<backups>/<stem>-<label><ext>: a copy kept beside the backups that is not the original
+    (one name rule for every such copy: replaced, before-batch, before-restore)."""
+    stem, ext = os.path.splitext(backup_path_for(path, saving))
+    stem = stem[:-len(BACKUP_SUFFIX)] if stem.endswith(BACKUP_SUFFIX) else stem
+    return f"{stem}-{label}{ext}"
+
+
 def keep_aside(path: str, saving: Dict, label: str = "replaced") -> str:
     """Keep a copy of a file that is about to be replaced (not a Photoband output) next to the
     backups: <backups>/<stem>-<label><ext>."""
-    base = backup_path_for(path, saving)
-    stem, ext = os.path.splitext(base)
-    stem = stem[:-len(BACKUP_SUFFIX)] if stem.endswith(BACKUP_SUFFIX) else stem
-    return store_copy(os.path.realpath(path), f"{stem}-{label}{ext}")
+    return store_copy(os.path.realpath(path), labelled_backup_base(path, saving, label))
 
 
 # metadata writing lives in metawrite.py
@@ -1007,13 +1045,21 @@ def keep_creation_time(path: str, src_stat: os.stat_result) -> bool:
 
 def _unchanged(path: str, size: int, mtime_ns: int, want: Tuple, opened_hash: Optional[str]) -> bool:
     """Is the file still the one opened as ``want`` (size, mtime_ns[, quick_hash])? Same size and
-    modified time: yes, without reading it. Otherwise the content decides, so a sync, backup or
-    antivirus tool that only touched the modified time doesn't block the save."""
+    modified time: yes, without reading it (the owner's choice). Otherwise the content decides,
+    so a sync, backup or antivirus tool that only touched the modified time doesn't block the save:
+    the whole file against its full hash from when it was opened (taken in the background when the
+    photo opens), or, before that hash exists, the quick hash (first and last MB)."""
     vals = list(want)
-    if (size, mtime_ns) == (int(vals[0]), int(vals[1])):
+    size0, mtime0 = int(vals[0]), int(vals[1])
+    if (size, mtime_ns) == (size0, mtime0):
         return True
+    if size != size0:
+        return False
+    full = opened_full_hash(path, size0, mtime0)
+    if full:
+        return file_sha256(path) == full
     h = (str(vals[2]) if len(vals) > 2 and vals[2] else None) or opened_hash
-    return size == int(vals[0]) and bool(h) and quick_hash(path) == h
+    return bool(h) and quick_hash(path) == h
 
 
 def _check_expected(req: SaveRequest, real: str, info: ImageInfo) -> None:
@@ -1355,8 +1401,8 @@ def save(req: SaveRequest) -> SaveResult:
                     # caption); the batch must be able to put back the file as it is NOW
                     cur_sha = file_sha256(real)
                     if cur_sha != plan.sha:
-                        b0, e0 = os.path.splitext(plan.base)
-                        restore = store_copy(real, f"{b0}-before-batch{e0}", expect_sha=cur_sha)
+                        restore = store_copy(real, labelled_backup_base(real, saving, "before-batch"),
+                                             expect_sha=cur_sha)
                         res.restore_path = restore
                 if req.on_backup:
                     req.on_backup(restore)
@@ -1461,7 +1507,10 @@ def _erase_inputs(arr: np.ndarray, erase: Dict[str, Any]):
     if erase.get("photoRect"):
         band.photo_rect = tuple(int(v) for v in erase["photoRect"])
     blocks = blocks_from_json(erase.get("blocks") or [])
-    add = decode_mask_png(erase.get("brushAdd"))
-    rem = decode_mask_png(erase.get("brushRemove"))
+    try:
+        add = decode_mask_png(erase.get("brushAdd"))
+        rem = decode_mask_png(erase.get("brushRemove"))
+    except ValueError as e:   # an oversized brush mask: a clear refusal, not an "unexpected error"
+        raise SaveError(str(e), code="mask")
     mask = build_mask(arr, band, blocks, grow=int(erase.get("grow", 2)), add_mask=add, remove_mask=rem)
     return mask, band

@@ -186,6 +186,12 @@ def test_save_preview_reports_pixel_source(tmp_path):
     pv = save_preview(p, s, None, "")
     assert pv["pixelSource"] == "file" and pv["originalBackup"] is None
     assert _save(p).ok
+    # the pixels aren't held yet: the backup matches, but the file itself isn't checked
+    pv = save_preview(p, s, None, "")
+    assert pv["pixelSource"] == "unverified" and pv["originalBackup"] == backup_path_for(p, {})
+    # once the editor holds the photo (the caption check reads it), it is confirmed
+    from photoband import photos
+    photos.full_array(p)
     pv = save_preview(p, s, None, "")
     assert pv["pixelSource"] == "backup" and pv["originalBackup"] == backup_path_for(p, {})
     # backups off: an existing verified original is still used
@@ -257,3 +263,23 @@ def test_preview_never_promises_a_tampered_backup(tmp_path):
     assert pv["pixelSource"] == "file" and pv["originalBackup"] is None
     # the file was captioned and its original is gone: the backup will hold this version
     assert pv["captioned"] and pv["backupKind"] == "current" and not pv["backupExists"]
+
+
+def test_preview_does_not_promise_the_backup_for_a_file_edited_elsewhere(tmp_path):
+    # the backup still matches, but the photo was retouched in another app that kept the XMP
+    # record: the save will take the file's pixels, so the preview must not promise the backup
+    p = _jpg(str(tmp_path / "scan.jpg"))
+    assert _save(p).ok
+    keep = str(tmp_path / "keep.jpg")
+    shutil.copy2(p, keep)
+    a, _ = load_upright(p)
+    a = a.copy()
+    a[40:80, 40:80] = 255 - a[40:80, 40:80]
+    Image.fromarray(a).save(p, quality=95)
+    et_get().write(p, ["-tagsFromFile", keep, "-xmp:all"], require_change=False)
+    from photoband import photos
+    photos.full_array(p)
+    pv = save_preview(p, _settings()["saving"], None, "")
+    assert pv["pixelSource"] == "file" and pv["originalBackup"] is None
+    r = _save(p, text="Again")
+    assert r.ok and any("not used" in n for n in r.notes)

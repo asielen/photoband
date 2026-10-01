@@ -171,13 +171,14 @@
 
   // refit when the photo or canvas size changes
   let lastKey = ''
+  let lastPath: string | undefined
   $effect(() => {
     const k = s?.path + '|' + lay?.canvas.join('x') + '|' + lay?.mode
     if (k !== lastKey) {
       lastKey = k
-      if (fitMode || !lastKey.startsWith(s?.path ?? '')) {
-        fitMode = true
-      }
+      // another photo always opens fitted; the same photo keeps its zoom unless it was fitted
+      if (fitMode || s?.path !== lastPath) fitMode = true
+      lastPath = s?.path
       measure()
     }
   })

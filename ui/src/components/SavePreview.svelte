@@ -6,7 +6,8 @@
   let { s }: { s: PhotoSession } = $props()
 
   // Where each save button writes, under the toolbar, so the choice is obvious before clicking.
-  let pv = $state<SavePreviewInfo | null>(null)
+  // only the answer for this photo: switching photos (or a save) must not show the last one's paths
+  const pv = $derived(savePreview.path === s.path ? savePreview.pv : null)
 
   const tplName = $derived.by(() => {
     const t = app.template(s.draft.templateId)
@@ -22,11 +23,13 @@
     const path = s.path
     const body = { path, fields: s.meta?.fields, templateName: tplName }
     void savingKey
+    // once the caption check has read the photo, the server can confirm the original backup applies
+    void s.existingLoading
     if (app.saving || !s.meta) return
     let stale = false
     const t = setTimeout(() => {
       // shared with JpegNotice (whether saving uses the original backup)
-      const done = (r: SavePreviewInfo | null) => { if (!stale) { pv = r; savePreview.path = path; savePreview.pv = r } }
+      const done = (r: SavePreviewInfo | null) => { if (!stale) { savePreview.path = path; savePreview.pv = r } }
       post<SavePreviewInfo>('/api/save/preview', body).then(done).catch(() => done(null))
     }, 150)
     return () => { stale = true; clearTimeout(t) }

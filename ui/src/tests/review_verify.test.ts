@@ -98,7 +98,7 @@ async function open(saving: any = {}) {
   app.photos = [{ path: '/p/a.tif', name: 'a.tif', status: 'untouched' }]
   app.current = -1
   app.toasts = []
-  app.overwriteConfirmed = true
+  app.overwriteConfirmed = app.settings.saving.backupOriginals ? 'backup' : 'nobackup'
   await app.select(0)
   await app.existingReady(app.session!)
   return { app, s: app.session! }
@@ -109,6 +109,21 @@ describe('verified review findings', () => {
   afterEach(() => {
     for (const s of lastApp?.sessions.values() ?? []) clearTimeout(s.draftTimer)
     lastApp = null
+  })
+
+  // ---- "Don't ask again" holds only for the backup setting it was given under
+  it('turning backups off asks again before the next overwrite', async () => {
+    const { app } = await open({ backupOriginals: true })
+    app.overwriteConfirmed = 'backup'
+    app.settings.saving.backupOriginals = false   // one click on the toolbar switch
+    const { dialogs } = await import('../lib/dialogs.svelte')
+    const ask = vi.spyOn(dialogs, 'ask').mockResolvedValue({ id: 'cancel' } as any)
+    const { actions } = await import('../lib/actions')
+    expect(await actions.overwrite()).toBe(false)
+    expect(ask).toHaveBeenCalledTimes(1)
+    expect(String(ask.mock.calls[0][1])).toMatch(/Backups are turned OFF/)
+    expect(server.saves).toBe(0)
+    ask.mockRestore()
   })
 
   // ---- 1. case C: Overwrite is off in every mode

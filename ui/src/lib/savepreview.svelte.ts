@@ -14,7 +14,8 @@ export type SavePreviewInfo = {
   /** the file has a Photoband record (it was captioned in place before) */
   captioned: boolean
   /** 'backup': saving takes the photo from the untouched original backup (no further JPEG loss) */
-  pixelSource?: 'backup' | 'file'
+  /** 'unverified': the original backup matches, but this file's pixels weren't checked yet */
+  pixelSource?: 'backup' | 'unverified' | 'file'
   originalBackup?: string | null
 }
 
@@ -25,5 +26,6 @@ const dirOf = (p: string) => p.slice(0, Math.max(p.lastIndexOf('/'), p.lastIndex
 /** `p` relative to the folder of `photo` when it is inside it (“_originals\scan-original.tif”). */
 export function relToPhoto(photo: string, p: string): string {
   const d = dirOf(photo)
-  return d && p.toLowerCase().startsWith(d.toLowerCase() + p.charAt(d.length)) ? p.slice(d.length + 1) : p
+  // inside only when the folder is followed by a separator ("D:\Scans2" is not inside "D:\Scans")
+  return d && p.toLowerCase().startsWith(d.toLowerCase()) && '/\\'.includes(p.charAt(d.length)) ? p.slice(d.length + 1) : p
 }

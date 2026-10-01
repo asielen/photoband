@@ -10,7 +10,7 @@
   const backups = $derived(!!app.settings.saving.backupOriginals)
   // saving takes the photo from the untouched original backup (save preview, fetched by SavePreview)
   const pv = $derived(savePreview.path === s.path ? savePreview.pv : null)
-  const original = $derived(srcJpeg && pv?.pixelSource === 'backup' ? pv.originalBackup ?? null : null)
+  const original = $derived(srcJpeg && (pv?.pixelSource === 'backup' || pv?.pixelSource === 'unverified') ? pv.originalBackup ?? null : null)
 
   function turnOn() {
     app.saveSettings({ saving: { backupOriginals: true } }).then(() => app.toast('success', 'Backups are on.')).catch((e) => app.toast('error', e.message))
@@ -21,7 +21,7 @@
   <div class="jn row" class:warn={!backups} role="note" aria-label="JPEG quality">
     <Icon name={backups ? 'info' : 'warn'} size={14} />
     <span class="grow">
-      {#if original}An untouched original backup was found (<span class="path">{relToPhoto(s.path, original)}</span>): saving uses it, so quality doesn’t drop further.
+      {#if original}An untouched original backup was found (<span class="path">{relToPhoto(s.path, original)}</span>): saving uses it{pv?.pixelSource === 'unverified' ? ' unless this file was edited in another app' : ''}, so quality doesn’t drop further.
       {:else if srcJpeg && pv?.captioned}This JPEG was captioned before and its untouched original backup wasn’t found: each save re-compresses it and may reduce quality a little.
       {:else if srcJpeg}Each save re-compresses this JPEG and may reduce quality a little.
       {:else}Copies are saved as JPEG, which re-compresses the photo and loses a little quality.{/if}

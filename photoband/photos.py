@@ -80,6 +80,9 @@ def meta(path: str) -> Dict[str, Any]:
         _cache.move_to_end(k)
         while len(_cache) > CACHE_MAX:
             _cache.popitem(last=False)
+    # the whole-file hash a save compares against if the modified time changes meanwhile
+    from .save import hash_in_background
+    hash_in_background(path)
     return res
 
 
@@ -355,7 +358,11 @@ def erase_preview_webp(path: str, erase: Dict[str, Any], long_edge: int = 2560) 
     from .save import _erase_inputs
     from .erase import INPAINT_RADIUS, erase_in_place, shift_band
     arr, info = full_array(path)
-    mask, band = _erase_inputs(arr, erase)
+    from .save import SaveError
+    try:
+        mask, band = _erase_inputs(arr, erase)
+    except SaveError as e:   # e.g. an oversized brush mask: the endpoint answers 400
+        raise ValueError(str(e))
     ys, xs = np.nonzero(mask)
     out = arr
     if len(ys):

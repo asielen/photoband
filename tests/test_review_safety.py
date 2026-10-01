@@ -588,3 +588,17 @@ def test_sweep_keeps_temp_files_of_a_running_save(tmp_path):
     assert live.exists()
     assert not dead.exists() and not legacy.exists()
     assert sorted(removed) == sorted([str(dead), str(legacy)])
+
+
+def test_sweep_keeps_another_computers_running_save(tmp_path):
+    # a network folder shared by two computers: the other one's process can't be checked from here
+    from photoband.util import _host_tag, sweep_temp
+    old = time.time() - 3600
+    other = "0000" if _host_tag() != "0000" else "ffff"
+    theirs = tmp_path / f".pbtmp-p1234h{other}-abc.tif"
+    ancient = tmp_path / f".pbtmp-p1234h{other}-old.tif"
+    for f, t in ((theirs, old), (ancient, time.time() - 2 * 86400)):
+        f.write_bytes(b"x")
+        os.utime(f, (t, t))
+    sweep_temp([str(tmp_path)])
+    assert theirs.exists() and not ancient.exists()

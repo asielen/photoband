@@ -60,7 +60,7 @@
         <b>Captioned by Photoband.</b>
         {#if active}Editing the saved caption: saving replaces the band instead of adding a second one.{:else}This photo already has a Photoband band.{/if}
         {#if ex.source === 'marker+payload'}<span class="faint" data-tip="The file's metadata had been removed, so the caption was read back from data hidden in the band."> Restored from the band itself.</span>{/if}
-        {#if ex.lossyRecaption && active}<span class="faint" data-tip="JPEG files lose a little quality every time they are saved. TIFF and PNG don't."> JPEG: the photo is re-encoded on save.</span>{/if}
+        <!-- JPEG quality is explained above the photo (JpegNotice: it knows whether the original backup is used) -->
       </div>
       {#if active}
         <button class="btn sm" data-tip="Replace the saved caption text with the template's text" onclick={() => app.resetAllBlocks(s)}>Start from template</button>

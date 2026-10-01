@@ -426,28 +426,38 @@ def _litter_age(p: str, name: str, now: float) -> float:
     return now - os.lstat(p).st_mtime
 
 
+def _host_tag() -> str:
+    import hashlib
+    import socket
+    return hashlib.sha1(socket.gethostname().lower().encode("utf-8", "replace")).hexdigest()[:4]
+
+
 def temp_prefix(kind: str) -> str:
-    """``.pbtmp-p<pid>-`` etc.: the process that owns a temp file is in its name, so a sweep never
-    removes the file of a save that is still running (a multi-GB save to a slow share can take
-    longer than the sweep's age limit)."""
-    return f"{kind}p{os.getpid()}-"
+    """``.pbtmp-p<pid>h<host>-`` etc.: the process (and computer) that owns a temp file is in its
+    name, so a sweep never removes the file of a save that is still running, here or on another
+    computer writing to the same network folder (a multi-GB save to a slow share can take longer
+    than the sweep's age limit)."""
+    return f"{kind}p{os.getpid()}h{_host_tag()}-"
 
 
 _OWNER_RE = None
 
 
 def _owner_running(name: str, age: float) -> bool:
-    """The temp file's owning process (from its name) is still running. Never trusted after a
-    day, so a reused process id can't keep litter forever."""
+    """The temp file's owning process (from its name) is still running. Another computer's
+    process can't be checked from here, so its files are kept as if running. Never trusted after
+    a day, so a reused process id or a crashed computer can't keep litter forever."""
     global _OWNER_RE
     if age > 86400:
         return False
     if _OWNER_RE is None:
         import re
-        _OWNER_RE = re.compile(r"^\.pb(?:tmp|bak|restore)-p(\d{1,10})-")
+        _OWNER_RE = re.compile(r"^\.pb(?:tmp|bak|restore)-p(\d{1,10})(?:h([0-9a-f]{4}))?-")
     m = _OWNER_RE.match(name)
     if not m:
         return False
+    if m.group(2) and m.group(2) != _host_tag():
+        return True
     pid = int(m.group(1))
     return pid == os.getpid() or _pid_alive(pid)
 

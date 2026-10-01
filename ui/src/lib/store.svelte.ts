@@ -153,7 +153,8 @@ class AppStore {
   session = $state<PhotoSession | null>(null)
   toasts = $state<Toast[]>([])
   view = $state<'editor' | 'batch'>('editor')
-  overwriteConfirmed = false
+  /** "Don't ask again" for Overwrite this session, and the backup setting it was given under */
+  overwriteConfirmed: false | 'backup' | 'nobackup' = false
   saving = $state(false)
   /** which kind of save is running, for the toolbar's spinner */
   savingMode = $state<'copy' | 'overwrite' | null>(null)

@@ -125,15 +125,15 @@
       app.paletteOpen = true
       return
     }
-    if (m && k === 's') {
+    // saving moves on to the next photo: a held key (repeat) must not save photo after photo,
+    // and the hidden editor photo is never saved from the Batch view
+    if (m && (k === 's' || k === 'enter')) {
       e.preventDefault()
-      if (e.shiftKey) actions.saveCopyAs()
-      else actions.saveAndNext()
-      return
-    }
-    if (m && k === 'enter') {
-      e.preventDefault()
-      if (e.shiftKey) actions.overwriteAndNext()
+      if (e.repeat || app.view !== 'editor') return
+      if (k === 's') {
+        if (e.shiftKey) actions.saveCopyAs()
+        else actions.saveAndNext()
+      } else if (e.shiftKey) actions.overwriteAndNext()
       else actions.saveAndNext()
       return
     }

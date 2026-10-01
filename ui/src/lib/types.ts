@@ -162,6 +162,8 @@ export interface ExistingAnalysis {
   source: 'record' | 'marker+payload' | 'marker' | 'detection' | null
   confidence?: number
   sourceRect?: Rect
+  /** a captioned copy Photoband saved (not an original captioned in place) */
+  isCopy?: boolean
   state?: { template: Template | null; templateId: string | null; overrides: Overrides | null; blocks: BlockState[] | null }
   originalText?: any
   band?: BandInfo

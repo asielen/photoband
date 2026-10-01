@@ -108,7 +108,9 @@ async function overwrite(): Promise<boolean> {
   }
   if (!(await existingBandCheck(s))) return false
   const jpeg = outputIsJpeg(s, s.path) && !app.settings.session.jpegWarned
-  if (!app.overwriteConfirmed) {
+  // "Don't ask again" holds only for the backup setting it was given under: turning backups off
+  // (one click on the toolbar switch) asks again
+  if (app.overwriteConfirmed !== (app.settings.saving.backupOriginals ? 'backup' : 'nobackup')) {
     // the exact backup, as the save will decide it (the save preview runs the same code)
     const pv = savePreview.path === s.path ? savePreview.pv : null
     const backup = !app.settings.saving.backupOriginals
@@ -124,7 +126,7 @@ async function overwrite(): Promise<boolean> {
     ], "Don't ask again this session")
     if (jpeg) app.saveSettings({ session: { jpegWarned: true } }).catch(() => {})
     if (r.id !== 'ok') return false
-    if (r.checked) app.overwriteConfirmed = true
+    if (r.checked) app.overwriteConfirmed = app.settings.saving.backupOriginals ? 'backup' : 'nobackup'
   }
   const res = await app.save(s, 'overwrite')
   return !!res?.ok
@@ -145,6 +147,32 @@ async function goToNext(saved: string, blk: string | null) {
   if (blk && eff) {
     app.inspectorTab = 'text'
     app.focusBlock = eff.blocks.some((b) => b.id === blk) ? blk : eff.blocks[0]?.id ?? null
+  }
+}
+
+/** A save-and-next is running (from its save to the next photo opening): a second press waits. */
+let nexting = false
+/** Sessions saved with no edit since: pressing save again on the last photo does nothing new. */
+const savedUnchanged = new WeakSet<PhotoSession>()
+
+async function saveThenNext(save: () => Promise<boolean>) {
+  const s = app.session
+  if (nexting || !s) return
+  if (savedUnchanged.has(s) && !s.dirty && app.current >= app.photos.length - 1) {
+    app.toast('info', 'Already saved. That was the last photo.')
+    return
+  }
+  nexting = true
+  try {
+    const blk = focusedBlock()
+    const saved = s.path
+    if (await save()) {
+      // after an overwrite the photo has a fresh session: that one is the saved state now
+      if (app.session && app.session.path === saved) savedUnchanged.add(app.session)
+      await goToNext(saved, blk)
+    }
+  } finally {
+    nexting = false
   }
 }
 
@@ -205,17 +233,9 @@ export const actions = {
   },
   overwrite: () => overwrite(),
   /** Save a copy, then go to the next photo (Mod+Enter). */
-  async saveAndNext() {
-    const blk = focusedBlock()
-    const saved = app.session?.path
-    if (saved && (await saveCopy())) await goToNext(saved, blk)
-  },
+  saveAndNext: () => saveThenNext(saveCopy),
   /** Overwrite the original, then go to the next photo (Mod+Shift+Enter). */
-  async overwriteAndNext() {
-    const blk = focusedBlock()
-    const saved = app.session?.path
-    if (saved && (await overwrite())) await goToNext(saved, blk)
-  },
+  overwriteAndNext: () => saveThenNext(overwrite),
   /** E / Enter: jump into the first caption block. */
   focusFirstBlock() {
     const s = app.session

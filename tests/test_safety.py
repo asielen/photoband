@@ -432,7 +432,10 @@ def test_drafts_survive_mtime_touch_and_stale_drafts_are_listed(tmp_path):
     drafts.save_draft(p, {"blocks": {"people": {"text": "Grandpa Robert, 1944"}}})
     os.utime(p, None)
     assert drafts.load_draft(p) is not None
+    t0 = os.stat(p).st_mtime_ns
     _retouch(p)
+    # a real edit gets its own modified time (here it could land in the same clock tick)
+    os.utime(p, ns=(t0, t0 + 2_000_000_000))
     assert drafts.load_draft(p) is None
     ent = [x for x in drafts.list_drafts() if x["path"] == os.path.abspath(p)][0]
     assert ent["exists"] and not ent["valid"]
@@ -522,3 +525,29 @@ def test_changed_mtime_is_checked_by_content(tmp_path):
     # a changed modified time with no fingerprint to compare against: refused
     r = _save(q, "overwrite", expected_stat=(st.st_size, st.st_mtime_ns))
     assert not r.ok and r.code == "changed"
+
+
+def test_middle_edit_with_new_mtime_is_caught_by_the_full_hash(tmp_path):
+    # the quick hash reads only the first and last MB: an edit in the middle of a big file with a
+    # new modified time is caught by the whole-file hash taken when the photo was opened
+    from photoband.save import _cached_sha256, _unchanged
+    p = tmp_path / "big.tif"
+    p.write_bytes(bytes(3 * 1024 * 1024))
+    st = os.stat(p)
+    qh = quick_hash(str(p))
+    _cached_sha256(str(p))                      # what opening the photo does in the background
+    with open(p, "r+b") as fh:
+        fh.seek(1536 * 1024)
+        fh.write(b"edited")
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    now = os.stat(p)
+    assert quick_hash(str(p)) == qh             # the quick hash alone would miss it
+    assert not _unchanged(str(p), now.st_size, now.st_mtime_ns, (st.st_size, st.st_mtime_ns, qh), None)
+    # only the modified time moved: still fine
+    q = tmp_path / "touched.tif"
+    q.write_bytes(bytes(3 * 1024 * 1024))
+    st = os.stat(q)
+    _cached_sha256(str(q))
+    os.utime(q, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    now = os.stat(q)
+    assert _unchanged(str(q), now.st_size, now.st_mtime_ns, (st.st_size, st.st_mtime_ns, quick_hash(str(q))), None)
