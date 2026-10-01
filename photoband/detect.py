@@ -1062,6 +1062,56 @@ def _photo_masks(band: BandResult, x0: int, y0: int, w: int, h: int):
     return hard, strip
 
 
+def _frag_pairs(bb: np.ndarray, frags: np.ndarray, tgts: np.ndarray) -> np.ndarray:
+    """``[i, j]``: line ``frags[i]`` is a fragment of line ``tgts[j]`` (boxes x0, y0, x1, y1):
+    at most half its height, at most 0.8 of its height wide, inside its x-extent, and
+    vertically touching or overlapping it (a gap of at most 4 % of its height, >= 1 px)."""
+    f, t = bb[frags], bb[tgts]
+    fh, fw = f[:, 3] - f[:, 1], f[:, 2] - f[:, 0]
+    th = t[:, 3] - t[:, 1]
+    slack = 0.1 * th[None]
+    vgap = np.maximum(f[:, None, 1], t[None, :, 1]) - np.minimum(f[:, None, 3], t[None, :, 3])
+    out = ((fh[:, None] <= 0.5 * th[None]) & (fw[:, None] <= 0.8 * th[None])
+           & (f[:, None, 0] >= t[None, :, 0] - slack) & (f[:, None, 2] <= t[None, :, 2] + slack)
+           & (vgap <= np.maximum(1.0, 0.04 * th[None])))
+    out &= frags[:, None] != tgts[None, :]
+    return out
+
+
+def _merge_fragments(lines: List[List[int]], bb: np.ndarray) -> List[List[int]]:
+    """Step 3b of :func:`_group_lines`: repeatedly merge the first line that is a fragment
+    of another (:func:`_frag_pairs`) into the nearest such line. ``bb`` holds the lines'
+    boxes. The fragment relation is kept as a matrix and only the merged line's row and
+    column are recomputed after a merge, so this is O(lines^2) overall instead of
+    recomputing every pair after every merge."""
+    n = len(lines)
+    if n < 2:
+        return lines
+    lines = [list(g) for g in lines]
+    bb = np.asarray(bb, np.float64).copy()
+    idx = np.arange(n)
+    alive = np.ones(n, bool)
+    F = _frag_pairs(bb, idx, idx)
+    while True:
+        cand = np.flatnonzero(F.any(axis=1))
+        if cand.size == 0:
+            break
+        s = int(cand[0])
+        tgt = np.flatnonzero(F[s])
+        vg = np.maximum(bb[s, 1], bb[tgt, 1]) - np.minimum(bb[s, 3], bb[tgt, 3])
+        b = int(tgt[np.argmin(vg)])
+        lines[b] = lines[b] + lines[s]
+        bb[b, :2] = np.minimum(bb[b, :2], bb[s, :2])
+        bb[b, 2:] = np.maximum(bb[b, 2:], bb[s, 2:])
+        alive[s] = False
+        F[s, :] = False
+        F[:, s] = False
+        live = np.flatnonzero(alive)
+        F[b, live] = _frag_pairs(bb, np.array([b]), live)[0]
+        F[live, b] = _frag_pairs(bb, live, np.array([b]))[:, 0]
+    return [g for g, a in zip(lines, alive) if a]
+
+
 def _group_lines(boxes: np.ndarray) -> List[List[int]]:
     """Group component boxes (N x 4: x, y, w, h) into lines.
 
@@ -1074,8 +1124,8 @@ def _group_lines(boxes: np.ndarray) -> List[List[int]]:
        face " - " is three full cells wide.
     3. A group nested in / mostly overlapping another merges into it
        (apostrophes, i-dots, accents grouped on their own).
-    3b. A tiny group just below / above a line, within its x-extent, joins it
-       (a comma tail under a line without descenders).
+    3b. A tiny group touching a line from below / above, within its x-extent, joins
+       it (a comma tail under a line without descenders); see :func:`_merge_fragments`.
     4. Small components (dots, commas, hyphens, accents) attach only within the
        line's x-extent (+ a little for trailing punctuation) and close to it
        vertically, so dust specks do not stretch line boxes."""
@@ -1133,60 +1183,68 @@ def _group_lines(boxes: np.ndarray) -> List[List[int]]:
             edge = max(edge, a1)
         return max(widest, hi - edge)
 
-    merged = True
-    while merged and len(lines) > 1:
-        merged = False
-        boxes_g = [gb(g) for g in lines]
-        for a in range(len(lines)):
-            for b in range(a + 1, len(lines)):
-                ax0, ay0, ax1, ay1, ah = boxes_g[a]
-                bx0, by0, bx1, by1, bh = boxes_g[b]
-                ha, hb = ay1 - ay0, by1 - by0
-                ov = min(ay1, by1) - max(ay0, by0)
-                gap = max(ax0, bx0) - min(ax1, bx1)
-                xh = 0.75 * min(ah, bh)
-                row_like = ov >= 0.5 * min(ha, hb) and max(ah, bh) <= 2.0 * min(ah, bh) + 2
-                same_row = row_like and (gap <= 3.0 * xh or (
-                    gap <= 6.0 * xh
-                    and bridged_gap(min(ax1, bx1), max(ax0, bx0), max(ay0, by0), min(ay1, by1)) <= 3.0 * xh))
-                iw = min(ax1, bx1) - max(ax0, bx0)
-                inter = max(0.0, iw) * max(0.0, ov)
-                small_area = min((ax1 - ax0) * ha, (bx1 - bx0) * hb)
-                if (ax1 - ax0) * ha <= (bx1 - bx0) * hb:
-                    cx, cy, big = (ax0 + ax1) / 2, (ay0 + ay1) / 2, (bx0, by0, bx1, by1)
-                else:
-                    cx, cy, big = (bx0 + bx1) / 2, (by0 + by1) / 2, (ax0, ay0, ax1, ay1)
-                nested = (small_area > 0 and inter >= 0.5 * small_area) or \
-                    (big[0] <= cx <= big[2] and big[1] <= cy <= big[3])
-                if same_row or nested:
-                    lines[a] = lines[a] + lines[b]
-                    del lines[b]
-                    merged = True
-                    break
-            if merged:
+    # steps 2 and 3: repeatedly merge the first pair (in list order) that lies on one
+    # row or is nested. The pair relation is a matrix; after a merge only the merged
+    # group's row and column are recomputed (O(groups^2) overall, not per merge).
+    nG = len(lines)
+    if nG > 1:
+        G = np.array([gb(g) for g in lines], np.float64)
+        alive = np.ones(nG, bool)
+
+        def pairs(A, B):
+            """Merge test for groups A[k] < B[k] (index arrays of one shape)."""
+            ax0, ay0, ax1, ay1, ah = (G[A, i] for i in range(5))
+            bx0, by0, bx1, by1, bh = (G[B, i] for i in range(5))
+            ha, hb = ay1 - ay0, by1 - by0
+            ov = np.minimum(ay1, by1) - np.maximum(ay0, by0)
+            gap = np.maximum(ax0, bx0) - np.minimum(ax1, bx1)
+            xh = 0.75 * np.minimum(ah, bh)
+            row_like = (ov >= 0.5 * np.minimum(ha, hb)) & (np.maximum(ah, bh) <= 2.0 * np.minimum(ah, bh) + 2)
+            same_row = row_like & (gap <= 3.0 * xh)
+            iw = np.minimum(ax1, bx1) - np.maximum(ax0, bx0)
+            inter = np.maximum(0.0, iw) * np.maximum(0.0, ov)
+            area_a, area_b = (ax1 - ax0) * ha, (bx1 - bx0) * hb
+            small_area = np.minimum(area_a, area_b)
+            a_small = area_a <= area_b
+            cx = np.where(a_small, (ax0 + ax1) / 2, (bx0 + bx1) / 2)
+            cy = np.where(a_small, (ay0 + ay1) / 2, (by0 + by1) / 2)
+            big0x, big0y = np.where(a_small, bx0, ax0), np.where(a_small, by0, ay0)
+            big1x, big1y = np.where(a_small, bx1, ax1), np.where(a_small, by1, ay1)
+            nested = ((small_area > 0) & (inter >= 0.5 * small_area)) |                 ((big0x <= cx) & (cx <= big1x) & (big0y <= cy) & (cy <= big1y))
+            out = same_row | nested
+            # a wider gap bridged by small marks: rare, checked pair by pair
+            maybe = row_like & ~out & (gap <= 6.0 * xh)
+            for k in zip(*np.nonzero(maybe)):
+                if bridged_gap(min(ax1[k], bx1[k]), max(ax0[k], bx0[k]),
+                               max(ay0[k], by0[k]), min(ay1[k], by1[k])) <= 3.0 * xh[k]:
+                    out[k] = True
+            return out
+
+        idx = np.arange(nG)
+        M = np.triu(pairs(np.minimum(idx[:, None], idx[None]), np.maximum(idx[:, None], idx[None])), 1)
+        while True:
+            hit = np.flatnonzero(M.any(axis=1))
+            if hit.size == 0:
                 break
+            a = int(hit[0])
+            b = int(np.flatnonzero(M[a])[0])
+            lines[a] = lines[a] + lines[b]
+            G[a] = gb(lines[a])
+            alive[b] = False
+            M[b, :] = False
+            M[:, b] = False
+            lo, hi = np.flatnonzero(alive[:a]), np.flatnonzero(alive[a + 1:]) + a + 1
+            if lo.size:
+                M[lo, a] = pairs(lo, np.full(lo.size, a))
+            if hi.size:
+                M[a, hi] = pairs(np.full(hi.size, a), hi)
+        lines = [g for g, al in zip(lines, alive) if al]
 
     # a fragment split off a line: a comma tail hanging below a descender-free
     # line, an accent / apostrophe just above.  Tiny relative to the line, within
-    # its x-extent, touching or nearly touching it; joins the nearest such line.
-    merged = True
-    while merged and len(lines) > 1:
-        merged = False
-        bb = np.array([gb(g)[:4] for g in lines])
-        gh, gw = bb[:, 3] - bb[:, 1], bb[:, 2] - bb[:, 0]
-        cx = (bb[:, 0] + bb[:, 2]) / 2
-        vgap = np.maximum(bb[:, None, 1], bb[None, :, 1]) - np.minimum(bb[:, None, 3], bb[None, :, 3])
-        frag = ((gh[:, None] <= 0.5 * gh[None]) & (gw[:, None] <= 0.8 * gh[None])
-                & (cx[:, None] >= bb[None, :, 0]) & (cx[:, None] <= bb[None, :, 2])
-                & (vgap <= 0.2 * gh[None]))
-        np.fill_diagonal(frag, False)
-        for s in np.flatnonzero(frag.any(axis=1)):
-            tgt = np.flatnonzero(frag[s])
-            b = int(tgt[np.argmin(vgap[s, tgt])])
-            lines[b] = lines[b] + lines[s]
-            del lines[s]
-            merged = True
-            break
+    # its x-extent, touching it vertically (a separate small label a few px below a
+    # line is not part of it); joins the nearest such line.
+    lines = _merge_fragments(lines, np.array([gb(g)[:4] for g in lines]) if lines else np.zeros((0, 4)))
 
     # attach small components (dots, commas, hyphens, accents); line extents come
     # from the primary members only, so attached specks cannot chain-grow a line

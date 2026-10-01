@@ -47,7 +47,9 @@ def test_dates_partial():
     assert r("{date:mmm yy}").text == "Jun 52"
     assert r("{today:yyyy-mm-dd}").text == "2026-09-30"
     assert parse_date("0000:00:00") is None
-    assert format_date(parse_date("1952:02:30"), "d mmmm yyyy") == "February 1952"
+    # a day that does not exist is no date (it prints as written), never truncated to its month
+    assert parse_date("1952:02:30") is None
+    assert r("{date:d mmmm yyyy}", date="1952:02:30").text == "1952:02:30"
 
 
 def test_optional_groups():

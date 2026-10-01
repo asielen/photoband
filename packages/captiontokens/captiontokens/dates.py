@@ -10,7 +10,10 @@ names ("June 14, 1952", "14 Jun 1952") and numeric dates whose day/month order
 is certain ("06/14/1952", "14.06.1952"). A day/month order that could go either
 way ("03/04/1962") is never guessed. ``render_date`` prints anything else that
 names a year ("1950s", "circa 1950", "Summer 1962", "03/04/1962") as written,
-so an approximate date is neither dropped nor shown as an exact one.
+so an approximate date is neither dropped nor shown as an exact one. The same goes
+for a value that is no real date: a month over 12 ("1950-55" is a range), a day the
+month does not have ("1952-02-30"), a weekday that contradicts the date, or a year
+outside 1000..next year. Every parse path checks these in one place (``_checked``).
 """
 from __future__ import annotations
 
@@ -31,9 +34,24 @@ _FIELD_PART = {"yyyy": "y", "yy": "y", "mmmm": "m", "mmm": "m", "mm": "m", "m": 
 
 @dataclass(frozen=True)
 class PartialDate:
+    """A year with an optional month and day. A missing part is None, never 0: a 0 month
+    or day (EXIF's "1952:06:00") is stored as None, and so is a day without a month, so
+    every formatter can test ``is None``. A month or day that does not exist raises."""
     year: int
     month: Optional[int] = None
     day: Optional[int] = None
+
+    def __post_init__(self):
+        month = self.month or None
+        day = (self.day or None) if month else None
+        object.__setattr__(self, "month", month)
+        object.__setattr__(self, "day", day)
+        if not 1 <= self.year <= 9999:
+            raise ValueError(f"year out of range: {self.year}")
+        if month is not None and not 1 <= month <= 12:
+            raise ValueError(f"month out of range: {month}")
+        if day is not None:
+            _dt.date(self.year, month, day)  # ValueError for June 31 or February 29, 1953
 
     def iso(self) -> str:
         s = f"{self.year:04d}"
@@ -60,7 +78,8 @@ _TAIL_RE = re.compile(r"[\s:]*$|\s+\d{1,2}:\d{2}|T\d{1,2}:?\d{2}")
 
 _MONTH_WORDS = {**{n.lower(): i + 1 for i, n in enumerate(MONTHS)},
                 **{n[:3].lower(): i + 1 for i, n in enumerate(MONTHS)}, "sept": 9}
-_WEEKDAY = r"(?:(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:day)?\.?,?\s+)?"
+_WEEKDAY = r"(?:(?P<wd>mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:day)?\.?,?\s+)?"
+_WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 _ORD = r"(?:st|nd|rd|th)?"
 # English month names: "June 14, 1952", "14 June 1952", "14th of June, 1952", "14-Jun-1952", "June 1952"
 _HUMAN_RES = [re.compile(p, re.IGNORECASE) for p in (
@@ -78,9 +97,11 @@ def parse_date(value) -> Optional[PartialDate]:
     ``1952-06-05T10:00:00+02:00``, ``19520605``; English month names (``June 14, 1952``,
     ``14 Jun 1952``, ``June 1952``); and numeric dates whose order is certain
     (``06/14/1952``, ``14.06.1952``, ``05/05/1962``, ``06/1952``). Zero months/days
-    (``1952:00:00``) count as missing; a zero or unreadable year, a decade or range
-    (``1950s``, ``1950-1955``), an approximate date (``circa 1950``) or a day/month
-    order that could go either way (``03/04/1962``) gives None."""
+    (``1952:00:00``) count as missing in ExifTool's forms; a zero, implausible or
+    unreadable year, a decade or range (``1950s``, ``1950-1955``, ``1950-55``), a month
+    or day that does not exist (``1952-13``, ``1952-02-30``, ``June 0, 1952``), a
+    weekday that contradicts the date, an approximate date (``circa 1950``) or a
+    day/month order that could go either way (``03/04/1962``) gives None."""
     if value is None:
         return None
     if isinstance(value, PartialDate):
@@ -95,20 +116,33 @@ def parse_date(value) -> Optional[PartialDate]:
         return _parse_human(s)
     if not _TAIL_RE.match(s, m.end()):
         return None
-    y = int(m.group("y"))
-    if y <= 0:
+    return _checked(int(m.group("y")), int(m.group("m") or 0), int(m.group("d")) if m.group("d") else None,
+                    zero_is_missing=True)
+
+
+# A year outside [1000, next year] is no photo's date but a typo or a placeholder
+# ("0952", "2999", "9999:12:31"): nothing is photographed more than a year from now, and
+# a three-digit year is a dropped digit. The lower bound is loose on purpose (a scan of
+# an old painting or document may carry its own early date); a value outside the range
+# is printed as written, never dropped and never reformatted as if it were exact.
+_MIN_YEAR = 1000
+
+
+def _checked(y: int, mo: int, d: Optional[int], zero_is_missing: bool) -> Optional[PartialDate]:
+    """The date that year/month/day (None: not written) name, or None when it is no real date: a month over
+    12, a day the month does not have, a year out of range. Both parse paths use this,
+    so they agree. ``zero_is_missing``: ExifTool writes an unknown month or day as 0
+    ("1952:06:00" is June 1952); a person writing "June 0, 1952" made a typo."""
+    if not _MIN_YEAR <= y <= _dt.date.today().year + 1:
         return None
-    mo = int(m.group("m")) if m.group("m") else None
-    d = int(m.group("d")) if m.group("d") else None
-    if not mo or not (1 <= mo <= 12):
-        return PartialDate(y)
-    if not d or not (1 <= d <= 31):
-        return PartialDate(y, mo)
+    if (mo == 0 or d == 0) and not zero_is_missing:
+        return None
+    if mo == 0:
+        d = None  # "1952:00:14": a day without its month says nothing more than the year
     try:
-        _dt.date(y, mo, d)
+        return PartialDate(y, mo, d)
     except ValueError:
-        return PartialDate(y, mo)
-    return PartialDate(y, mo, d)
+        return None
 
 
 def _parse_human(s: str) -> Optional[PartialDate]:
@@ -116,8 +150,13 @@ def _parse_human(s: str) -> Optional[PartialDate]:
     for rx in _HUMAN_RES:
         m = rx.match(s)
         if m and m.group("mon").lower() in _MONTH_WORDS:
-            return _exact(s, m, int(m.group("y")), _MONTH_WORDS[m.group("mon").lower()],
-                          int(m.group("d")) if "d" in m.groupdict() and m.group("d") else None)
+            day = m.groupdict().get("d")
+            d = _exact(s, m, int(m.group("y")), _MONTH_WORDS[m.group("mon").lower()],
+                       int(day) if day is not None else None)
+            wd = m.groupdict().get("wd")
+            if d is not None and wd and _WEEKDAYS.index(wd[:3].lower()) != _dt.date(d.year, d.month, d.day).weekday():
+                return None  # "Monday, June 14, 1952" was a Saturday: one of the two is wrong
+            return d
     m = _NUMERIC_DMY_RE.match(s)
     if m:
         a, b = int(m.group("a")), int(m.group("b"))
@@ -137,29 +176,29 @@ def _parse_human(s: str) -> Optional[PartialDate]:
 def _exact(s: str, m, y: int, mo: int, d: Optional[int]) -> Optional[PartialDate]:
     """The date a human-format match names, or None when anything else follows it or it
     does not exist (``June 31, 1952``): a typed date is taken whole or not at all."""
-    if not _TAIL_RE.match(s, m.end()) or y <= 0:
+    if not _TAIL_RE.match(s, m.end()):
         return None
-    try:
-        _dt.date(y, mo, d or 1)
-    except ValueError:
-        return None
-    return PartialDate(y, mo, d)
+    return _checked(y, mo, d, zero_is_missing=False)
 
 
 # A year that is certain although the date is not exact: a day/month order that could go
 # either way ("03/04/1962"), or a season or part of the year ("Summer 1962", "early 1962").
-_YEAR_OF_AMBIGUOUS_RE = re.compile(r"^\s*(?P<a>\d{1,2})(?P<sep>[-/.])(?P<b>\d{1,2})(?P=sep)(?P<y>\d{4})\s*$")
+# Like the exact forms, either may be followed by a time ("03/04/1962 10:00").
+_YEAR_OF_AMBIGUOUS_RE = re.compile(r"^\s*(?P<a>\d{1,2})(?P<sep>[-/.])(?P<b>\d{1,2})(?P=sep)(?P<y>\d{4})(?!\d)")
 _YEAR_OF_PART_RE = re.compile(
     r"^\s*(?:(?:early|mid|late|spring|summer|autumn|fall|winter|" + "|".join(_MONTH_WORDS) +
-    r")\.?[\s,-]+)+(?:of\s+)?(?P<y>\d{4})\s*$", re.IGNORECASE)
+    r")\.?[\s,-]+)+(?:of\s+)?(?P<y>\d{4})(?!\d)", re.IGNORECASE)
 
 
 def _certain_year(s: str) -> Optional[int]:
     m = _YEAR_OF_AMBIGUOUS_RE.match(s)
-    if m and 1 <= int(m.group("a")) <= 12 and 1 <= int(m.group("b")) <= 12:
-        return int(m.group("y")) or None
-    m = _YEAR_OF_PART_RE.match(s)
-    return (int(m.group("y")) or None) if m else None
+    if m and not (1 <= int(m.group("a")) <= 12 and 1 <= int(m.group("b")) <= 12):
+        m = None
+    m = m or _YEAR_OF_PART_RE.match(s)
+    if not m or not _TAIL_RE.match(s, m.end()):
+        return None
+    d = _checked(int(m.group("y")), 0, None, zero_is_missing=True)
+    return d.year if d else None
 
 
 def approximate_text(value) -> str:

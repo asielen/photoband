@@ -112,3 +112,85 @@ def test_values_without_a_date_stay_empty(value):
 
 def test_approximate_digitized_date_also_prints_as_written():
     assert text("{digitized:yyyy-mm-dd}", digitized="2023?") == "2023?"
+
+
+# -- impossible components are rejected the same way on every parse path -------------
+
+@pytest.mark.parametrize("value", [
+    # a second number after the year is a range or a typo, not a month
+    "1950-55", "1939-45", "1952/53", "1950-59", "1952-13", "1952:13:01",
+    # a day the month does not have is not truncated to the month
+    "1952-02-30", "1953-02-29", "1952-6-31", "1952:06:31 10:00:00", "19520230",
+    # the human-format path agrees
+    "June 31, 1952", "Feb 29, 1953", "13/1952", "31/02/1952",
+])
+def test_out_of_range_month_or_day_is_no_date(value):
+    assert parse_date(value) is None
+    assert text("{date}", date=value) == value
+    assert text("{date:yyyy}", date=value) == value
+
+
+@pytest.mark.parametrize("value,iso", [
+    ("1952:06:00", "1952-06"), ("1952:00:00", "1952"), ("1952-06-00 00:00:00", "1952-06"),
+    ("1952:00:14", "1952"), ("1952-02-29", "1952-02-29"), ("29.02.2000", "2000-02-29"),
+])
+def test_exiftool_zero_still_means_missing(value, iso):
+    assert parse_date(value).iso() == iso
+
+
+@pytest.mark.parametrize("value", ["June 0, 1952", "0 June 1952", "00-Jun-1952", "00/1952", "0/1952",
+                                   "00/00/1952", "13/00/1952"])
+def test_a_typed_zero_day_or_month_is_no_date(value):
+    # ExifTool writes an unknown part as 0; a person writing it made a typo
+    assert parse_date(value) is None
+    assert text("{date}", date=value) == value
+
+
+def test_partial_date_stores_missing_parts_as_none():
+    from captiontokens import PartialDate, format_date
+    d = PartialDate(1952, 6, 0)
+    assert d == PartialDate(1952, 6) and d.day is None
+    assert d.iso() == "1952-06"
+    assert format_date(d, "d mmmm yyyy") == "June 1952"
+    assert format_date(d, "auto") == "June 1952"
+    assert PartialDate(1952, 0, 14) == PartialDate(1952)  # a day without its month
+    assert format_date(PartialDate(1952, None, 14), "auto") == "1952"
+    for bad in [(1952, 13), (1952, 2, 30), (1953, 2, 29), (0,), (1952, -1)]:
+        with pytest.raises(ValueError):
+            PartialDate(*bad)
+
+
+@pytest.mark.parametrize("value", ["Monday, June 14, 1952", "Sun 14 June 1952", "Fri June 14th, 1952"])
+def test_weekday_that_contradicts_the_date_is_doubtful(value):
+    assert parse_date(value) is None
+    assert text("{date}", date=value) == value
+
+
+@pytest.mark.parametrize("value,iso", [("Saturday, June 14, 1952", "1952-06-14"), ("Wed. 18 June 1952", "1952-06-18"),
+                                       ("Thurs June 19 1952", "1952-06-19"), ("Tuesday 17th of June, 1952", "1952-06-17")])
+def test_weekday_that_matches_the_date_is_fine(value, iso):
+    assert parse_date(value).iso() == iso
+
+
+@pytest.mark.parametrize("value", ["0952", "0952-06-14", "June 14, 0952", "2999", "9999:12:31", "03/04/0962",
+                                   "Summer 0962", f"{dt.date.today().year + 2}"])
+def test_implausible_year_prints_as_written(value):
+    assert parse_date(value) is None
+    assert text("{date}", date=value) == value
+    assert text("{date:yyyy}", date=value) == value
+
+
+def test_plausible_year_bounds():
+    assert parse_date("1000").iso() == "1000"
+    assert parse_date("1839").iso() == "1839"
+    assert parse_date(str(dt.date.today().year + 1)) is not None
+
+
+@pytest.mark.parametrize("value", ["03/04/1962 10:00", "03/04/1962 10:00:00", "3.4.1962T10:00", "Summer 1962 10:00"])
+def test_certain_year_ignores_a_trailing_time(value):
+    assert text("{date:yyyy}", date=value) == "1962"
+    assert text("{date}", date=value) == value
+
+
+def test_certain_year_needs_the_whole_value():
+    assert text("{date:yyyy}", date="03/04/1962 or so") == "03/04/1962 or so"

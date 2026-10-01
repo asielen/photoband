@@ -10,6 +10,7 @@
   import { dialogs } from '../lib/dialogs.svelte'
   import { actions } from '../lib/actions'
   import { post } from '../lib/api'
+  import { dateRowText } from '../lib/datetext'
 
   let { s }: { s: PhotoSession } = $props()
 
@@ -162,8 +163,8 @@
     return [
       ['Title', f.title, src.title],
       ['Caption', f.caption, src.caption],
-      ['Date', dateText && dateText !== f.date ? `${dateText} (${f.date})` : f.date, src.date],
-      ['Scan date', scanText && scanText !== f.digitized ? `${scanText} (${f.digitized})` : f.digitized, src.digitized],
+      ['Date', dateRowText(dateText, f.date), src.date],
+      ['Scan date', dateRowText(scanText, f.digitized), src.digitized],
       ['Creator', f.creator, src.creator],
       ['Location', [f.sublocation, f.city, f.state, f.country].filter(Boolean).join(', '), src.city || src.sublocation],
       ['Keywords', (f.keywords || []).join(', '), ''],
