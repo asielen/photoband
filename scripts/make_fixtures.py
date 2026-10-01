@@ -123,15 +123,15 @@ def prophoto_icc() -> bytes:
     return hdr + struct.pack(">I", n) + table + data
 
 
-def font(size, prefer=("DejaVuSerif.ttf", "DejaVuSans.ttf", "LiberationSerif-Regular.ttf")):
-    for root in ("/usr/share/fonts", "/Library/Fonts", "C:/Windows/Fonts"):
-        for dp, _, fs in os.walk(root):
-            for p in prefer:
-                if p in fs:
-                    return ImageFont.truetype(os.path.join(dp, p), size)
-    # No DejaVu (Windows, stock macOS): Pillow's built-in scalable font at the asked
-    # size.  The size-less bitmap default is ~10 px whatever ``size`` says, which
-    # left e.g. the 70 px date stamp of fixture 13 too small to be a stamp.
+def font(size, bundled=None):
+    """A font that is the same on every OS, so fixtures (and what the tests see in
+    them) do not depend on what the machine has installed.
+
+    ``bundled`` is a path under the repo's fonts/ folder.  Without it: Pillow's
+    built-in scalable font (Aileron) at the asked size, a font the app does not
+    ship (the size-less bitmap default is ~10 px whatever ``size`` says)."""
+    if bundled:
+        return ImageFont.truetype(os.path.join(ROOT, "fonts", bundled), size)
     return ImageFont.load_default(size)
 
 
@@ -259,9 +259,9 @@ def main(out: str, big: bool = False) -> None:
     canvas[H:] = (42, 77, 143)
     pil = Image.fromarray(canvas)
     d = ImageDraw.Draw(pil)
-    f = font(64, ("DejaVuSans-Bold.ttf", "DejaVuSans.ttf"))
+    f = font(64)
     d.text((60, H + 50), "Aunt Rosa and Uncle Tom", font=f, fill=(255, 255, 255))
-    d.text((60, H + 140), "Lake Tahoe 1974", font=font(48, ("DejaVuSans.ttf",)), fill=(230, 230, 230))
+    d.text((60, H + 140), "Lake Tahoe 1974", font=font(48), fill=(230, 230, 230))
     p = os.path.join(out, "11_other_tool_colored_band.png")
     pil.save(p)
     made.append(p)
@@ -276,7 +276,7 @@ def main(out: str, big: bool = False) -> None:
     paper[y0:y0 + H, x0:x0 + W] = natural(W, H, 14)
     pil = Image.fromarray(to_dtype(np.clip(paper, 0, 1), 8))
     d = ImageDraw.Draw(pil)
-    hf = font(72, ("DejaVuSerif-Italic.ttf", "DejaVuSans-Oblique.ttf", "DejaVuSerif.ttf"))
+    hf = font(72, "noto-serif/NotoSerif-Italic[wdth,wght].ttf")
     d.text((260, y0 + H + 60), "Mom & Dad, Yosemite '71", font=hf, fill=(40, 45, 110))
     p = os.path.join(out, "12_scanned_polaroid_handwriting.tif")
     tifffile.imwrite(p, np.asarray(pil), photometric="rgb", compression="lzw", metadata=None,
@@ -287,7 +287,7 @@ def main(out: str, big: bool = False) -> None:
     img = to_dtype(natural(2000, 1500, 15), 8)
     pil = Image.fromarray(img)
     d = ImageDraw.Draw(pil)
-    sf = font(70, ("DejaVuSansMono-Bold.ttf", "DejaVuSans-Bold.ttf"))
+    sf = font(70, "courier-prime/CourierPrime-Bold.ttf")
     d.text((1480, 1360), "'98 6 14", font=sf, fill=(255, 140, 20))
     p = os.path.join(out, "13_date_stamp.jpg")
     pil.save(p, quality=92)

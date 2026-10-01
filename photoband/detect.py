@@ -1068,7 +1068,10 @@ def _group_lines(boxes: np.ndarray) -> List[List[int]]:
     1. Primary components (>= 35 % of the typical height) linked by union-find:
        vertical overlap, gap <= 1.5 x height, similar heights.
     2. Groups on the same row merge across a gap <= 3 x-heights (a caption split
-       around punctuation: "SUMMER 1978 - LAKE MERCED").
+       around punctuation: "SUMMER 1978 - LAKE MERCED").  A wider gap (up to 6
+       x-heights) still merges when small marks inside it (a hyphen, dash, dot)
+       bridge it into pieces of <= 3 x-heights each: in a monospaced / typewriter
+       face " - " is three full cells wide.
     3. A group nested in / mostly overlapping another merges into it
        (apostrophes, i-dots, accents grouped on their own).
     3b. A tiny group just below / above a line, within its x-extent, joins it
@@ -1113,6 +1116,23 @@ def _group_lines(boxes: np.ndarray) -> List[List[int]]:
                 max(x[m] + w[m] for m in g), max(y[m] + h[m] for m in g),
                 float(np.median([h[m] for m in g])))
 
+    sidx = np.flatnonzero(~primary)
+
+    def bridged_gap(lo, hi, top, bot):
+        """The widest piece of the gap lo..hi left once small marks lying in it,
+        vertically inside top..bot, are counted as ink."""
+        if sidx.size == 0:
+            return hi - lo
+        sx0, sx1 = x[sidx], x[sidx] + w[sidx]
+        scy = y[sidx] + h[sidx] / 2
+        inside = (sx0 >= lo) & (sx1 <= hi) & (scy >= top) & (scy <= bot)
+        widest, edge = 0.0, lo
+        for k in np.argsort(sx0[inside]):
+            a0, a1 = sx0[inside][k], sx1[inside][k]
+            widest = max(widest, a0 - edge)
+            edge = max(edge, a1)
+        return max(widest, hi - edge)
+
     merged = True
     while merged and len(lines) > 1:
         merged = False
@@ -1125,7 +1145,10 @@ def _group_lines(boxes: np.ndarray) -> List[List[int]]:
                 ov = min(ay1, by1) - max(ay0, by0)
                 gap = max(ax0, bx0) - min(ax1, bx1)
                 xh = 0.75 * min(ah, bh)
-                same_row = ov >= 0.5 * min(ha, hb) and max(ah, bh) <= 2.0 * min(ah, bh) + 2 and gap <= 3.0 * xh
+                row_like = ov >= 0.5 * min(ha, hb) and max(ah, bh) <= 2.0 * min(ah, bh) + 2
+                same_row = row_like and (gap <= 3.0 * xh or (
+                    gap <= 6.0 * xh
+                    and bridged_gap(min(ax1, bx1), max(ax0, bx0), max(ay0, by0), min(ay1, by1)) <= 3.0 * xh))
                 iw = min(ax1, bx1) - max(ax0, bx0)
                 inter = max(0.0, iw) * max(0.0, ov)
                 small_area = min((ax1 - ax0) * ha, (bx1 - bx0) * hb)

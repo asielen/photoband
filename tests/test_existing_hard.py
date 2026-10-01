@@ -15,7 +15,7 @@ import pytest
 from photoband import detect, erase
 from photoband.existing import analyze_existing
 
-from test_detect import HAS_TESS, SANS_BOLD, analyze, draw_lines, framed, lines_of, make_photo
+from test_detect import HAS_TESS, MONO, SANS_BOLD, analyze, draw_lines, framed, lines_of, make_photo
 
 
 def _paper(h, w, color, grain, seed):
@@ -264,11 +264,15 @@ def test_dust_does_not_stretch_lines():
 # 5. caption split around punctuation
 # =============================================================================
 
-def test_punctuation_split_is_one_line_and_hyphen_is_erased():
+@pytest.mark.parametrize("font", [SANS_BOLD, MONO], ids=["sans-bold", "typewriter"])
+def test_punctuation_split_is_one_line_and_hyphen_is_erased(font):
+    # typewriter: in a monospaced face " - " is three full cells (~1.8 em) wide,
+    # beyond the plain same-row gap; the hyphen inside it must bridge the two
+    # halves (macOS CI drew this caption in a Courier and got two lines)
     photo = make_photo(1100, 900, seed=41)
     img, truth = framed(photo, (255, 255, 255), (150, 30, 30, 30), [], font_px=56)
     draw_lines(img, (0, 0, img.shape[1], 150), ["SUMMER 1978 - LAKE MERCED"], 56, (20, 20, 20),
-               font_path=SANS_BOLD)
+               font_path=font)
     band = detect.detect_band(img)
     assert band.photo_rect == truth
     blocks = detect.find_text(img, band)
