@@ -1854,6 +1854,8 @@ def _stamp_groups(mask: np.ndarray, ph: int) -> List[Tuple[int, int, int, int]]:
     return [_union_box([st[i, :4] for i in g]) for g in gl if len(g) >= 3]
 
 
+# Searched for anywhere in an OCR word on purpose (a scan, not a validation): a word that
+# merely contains a date-like run ("'87", "1987.", "12/25") is enough to keep it a candidate.
 _DATE_RE = __import__("re").compile(r"\d{4}|\d{1,2}[ './-]\d{1,2}|'\d{2}")
 GENERAL_TEXT_TIMEOUT = 4.0   # s; retried once with 3x on timeout, then reported in ``status``
 

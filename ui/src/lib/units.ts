@@ -50,3 +50,12 @@ export function round(v: number, digits = 2): number {
   const f = Math.pow(10, digits)
   return Math.round(v * f) / f
 }
+
+/** A number typed into a number field, or NaN. The whole text must be the number (a decimal
+ * comma is fine), optionally followed by the field's own unit ("12", "-1,5", "12 %", "3mm"):
+ * parseFloat alone reads a prefix, so "12abc" or "1.2.3" would silently become 12 or 1.2. */
+export function parseNumberInput(text: string, unit = ''): number {
+  const m = /^\s*([-+]?(?:\d+(?:[.,]\d*)?|[.,]\d+))\s*(.*?)\s*$/.exec(text)
+  if (!m || (m[2] && m[2].toLowerCase() !== unit.trim().toLowerCase())) return NaN
+  return Number(m[1].replace(',', '.'))
+}

@@ -216,7 +216,9 @@ def redeem_pick(pid: str) -> Tuple[str, bool]:
 
 
 _BAD_NAME = re.compile(r'[\x00-\x1f<>:"/\\|?*]')
-_WIN_RESERVED = re.compile(r"^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$", re.I)
+# Matched with fullmatch and DOTALL: "$" alone also matches before a final newline, and "."
+# would stop at one, so the whole name must be the device name (plus any extension).
+_WIN_RESERVED = re.compile(r"(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?", re.I | re.S)
 
 
 def plain_file_name(name: str) -> str:
@@ -225,7 +227,7 @@ def plain_file_name(name: str) -> str:
         raise UserError("Invalid file name")
     n = name.strip()
     if (not n or n in (".", "..") or len(n) > 255 or _BAD_NAME.search(n) or n.endswith((".", " "))
-            or _WIN_RESERVED.match(n)):
+            or _WIN_RESERVED.fullmatch(n)):
         raise UserError("Please enter a plain file name (no folders or special characters).")
     return n
 

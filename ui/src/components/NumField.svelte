@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { fromDisplay, round, toDisplay, type DisplayUnit } from '../lib/units'
+  import { fromDisplay, parseNumberInput, round, toDisplay, type DisplayUnit } from '../lib/units'
   import type { ScaleMode } from '../lib/types'
   let {
     value, onchange, kind = 'plain', unit = '', mode = 'relative', displayUnit = '%', photoW = 1000, dpi = null,
@@ -31,7 +31,7 @@
   })
   function commit() {
     editing = false
-    const v = parseFloat(text.replace(',', '.'))
+    const v = parseNumberInput(text, suffix)
     if (!isFinite(v)) {
       text = String(round(shown, 2))
       return

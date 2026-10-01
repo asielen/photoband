@@ -419,6 +419,8 @@ def _litter_age(p: str, name: str, now: float) -> float:
     if name.startswith(SRC_LINK_PREFIX) or name.startswith("src-"):
         import re
         if _SRC_LINK_RE is None:
+            # A prefix match on purpose: only the leading creation time is read; a random
+            # suffix and the extension follow it.
             _SRC_LINK_RE = re.compile(r"^(?:\.pbtmp-)?src-(\d{9,11})-")
         m = _SRC_LINK_RE.match(name)
         if m:
@@ -452,6 +454,7 @@ def _owner_running(name: str, age: float) -> bool:
         return False
     if _OWNER_RE is None:
         import re
+        # A prefix match on purpose: only the owner tag at the start is read; the file name follows.
         _OWNER_RE = re.compile(r"^\.pb(?:tmp|bak|restore)-p(\d{1,10})(?:h([0-9a-f]{4}))?-")
     m = _OWNER_RE.match(name)
     if not m:

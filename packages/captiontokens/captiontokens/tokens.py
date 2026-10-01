@@ -141,6 +141,13 @@ def _int(v) -> int:
     return max(0, n)
 
 
+def _max_chars(v) -> Optional[int]:
+    """The ``max=N`` option's N: a whole number in ASCII digits, or None. The check and the
+    renderer both use this, so they agree; ``isdigit`` let "²" through to ``int``, which raised."""
+    m = re.fullmatch(r"\s*([0-9]+)\s*", v) if isinstance(v, str) else None
+    return int(m.group(1)) if m else None
+
+
 def _apply_text_options(value: str, opts: Dict[str, str]) -> str:
     case = opts.get("case", "").lower()
     if case == "upper":
@@ -149,14 +156,9 @@ def _apply_text_options(value: str, opts: Dict[str, str]) -> str:
         value = value.lower()
     elif case == "title":
         value = " ".join(w[:1].upper() + w[1:] for w in value.split(" "))
-    mx = opts.get("max")
-    if mx:
-        try:
-            n = int(mx)
-        except ValueError:
-            n = 0
-        if n > 0 and len(value) > n:
-            value = value[:1] if n == 1 else value[: n - 1].rstrip() + "…"
+    n = _max_chars(opts.get("max"))
+    if n and len(value) > n:
+        value = value[:1] if n == 1 else value[: n - 1].rstrip() + "…"
     return value
 
 
@@ -245,7 +247,7 @@ def check_token(tok: Token) -> List[Issue]:
                 bad(f"{{{tok.name}}} takes no options (\"{k}\")")
         elif k in _OPTION_VALUES and v.lower() not in _OPTION_VALUES[k]:
             bad(f"Unknown {k}=\"{v}\" (use {', '.join(_OPTION_VALUES[k])})")
-        elif k == "max" and not (v.strip().isdigit() and int(v) > 0):
+        elif k == "max" and not _max_chars(v):
             bad(f"max must be a positive whole number (\"{v}\")")
     return out
 

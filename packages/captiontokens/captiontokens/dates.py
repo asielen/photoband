@@ -66,14 +66,48 @@ class PartialDate:
         return cls(d.year, d.month, d.day)
 
 
+# The date patterns below match only the date at the start of the value (re.match, no end
+# anchor) on purpose: ``_tail_ok`` then requires everything after it to be a whole time.
 _DATE_RE = re.compile(
     r"^\s*(?P<y>\d{4})(?!\d)(?:(?P<sep>[-:/.])(?P<m>\d{1,2})(?!\d)(?:(?P=sep)(?P<d>\d{1,2})(?!\d))?)?"
 )
 # Compact YYYYMMDD (optionally followed by a time, e.g. 19520614T100000).
 _COMPACT_RE = re.compile(r"^\s*(?P<y>\d{4})(?P<m>\d{2})(?P<d>\d{2})(?!\d)")
-# What may follow the date: nothing (or EXIF's blank "  :  :  " parts) or a time. Anything
-# else ("1950s", "1950-1955", "1952?") is a decade, range or guess, not this exact date.
-_TAIL_RE = re.compile(r"[\s:]*$|\s+\d{1,2}:\d{2}|T\d{1,2}:?\d{2}")
+# What may follow the date: nothing (or EXIF's blank "  :  :  " parts) or one whole, valid
+# time. Anything else ("1950s", "1950-1955", "1952?", "1952-06-14 12:34 approximate") is a
+# decade, range, guess or note, not this exact date. Each is matched with ``fullmatch`` so a
+# time that merely starts the rest ("12:34 nonsense") is not enough.
+_BLANK_TAIL_RE = re.compile(r"[\s:]*")
+# A UTC offset as ExifTool and ISO write it: Z, +02:00, -0500, +02.
+_TZ = r"(?:\s*(?:(?P<z>Z)|(?P<tzs>[+-])(?P<tzh>\d{2})(?::?(?P<tzm>\d{2}))?))?"
+# " 12:34", " 12:34:56", " 12:34:56.78+02:00", "T10:00Z", " 10:30 AM".
+_TIME_RE = re.compile(
+    r"(?:\s+|T)(?P<h>\d{1,2}):(?P<mi>\d{2})(?::(?P<s>\d{2})(?:[.,]\d+)?)?"
+    r"(?:\s*(?P<ampm>[ap])\.?m\.?)?" + _TZ + r"\s*", re.IGNORECASE)
+# ISO basic form: "T1000", "T100000", "T100000.5+0200".
+_COMPACT_TIME_RE = re.compile(
+    r"T(?P<h>\d{2})(?P<mi>\d{2})(?:(?P<s>\d{2})(?:[.,]\d+)?)?" + _TZ + r"\s*", re.IGNORECASE)
+
+
+def _tail_ok(s: str, pos: int) -> bool:
+    """``s[pos:]`` is nothing (or EXIF's blank time) or one whole time of day that exists:
+    hours 0-23 (1-12 with AM/PM), minutes and seconds 0-59, an offset of at most 14:59."""
+    if _BLANK_TAIL_RE.fullmatch(s, pos):
+        return True
+    m = _TIME_RE.fullmatch(s, pos) or _COMPACT_TIME_RE.fullmatch(s, pos)
+    if not m:
+        return False
+    h, mi = int(m.group("h")), int(m.group("mi"))
+    if m.groupdict().get("ampm"):
+        if not 1 <= h <= 12:
+            return False
+    elif h > 23:
+        return False
+    if mi > 59 or (m.group("s") is not None and int(m.group("s")) > 59):
+        return False
+    if m.group("tzh") is not None and (int(m.group("tzh")) > 14 or int(m.group("tzm") or 0) > 59):
+        return False
+    return True
 
 
 _MONTH_WORDS = {**{n.lower(): i + 1 for i, n in enumerate(MONTHS)},
@@ -114,7 +148,7 @@ def parse_date(value) -> Optional[PartialDate]:
     m = _COMPACT_RE.match(s) or _DATE_RE.match(s)
     if not m:
         return _parse_human(s)
-    if not _TAIL_RE.match(s, m.end()):
+    if not _tail_ok(s, m.end()):
         return None
     return _checked(int(m.group("y")), int(m.group("m") or 0), int(m.group("d")) if m.group("d") else None,
                     zero_is_missing=True)
@@ -176,7 +210,7 @@ def _parse_human(s: str) -> Optional[PartialDate]:
 def _exact(s: str, m, y: int, mo: int, d: Optional[int]) -> Optional[PartialDate]:
     """The date a human-format match names, or None when anything else follows it or it
     does not exist (``June 31, 1952``): a typed date is taken whole or not at all."""
-    if not _TAIL_RE.match(s, m.end()):
+    if not _tail_ok(s, m.end()):
         return None
     return _checked(y, mo, d, zero_is_missing=False)
 
@@ -195,7 +229,7 @@ def _certain_year(s: str) -> Optional[int]:
     if m and not (1 <= int(m.group("a")) <= 12 and 1 <= int(m.group("b")) <= 12):
         m = None
     m = m or _YEAR_OF_PART_RE.match(s)
-    if not m or not _TAIL_RE.match(s, m.end()):
+    if not m or not _tail_ok(s, m.end()):
         return None
     d = _checked(int(m.group("y")), 0, None, zero_is_missing=True)
     return d.year if d else None
