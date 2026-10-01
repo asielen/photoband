@@ -830,13 +830,17 @@ LOG_ROTATE_BYTES = 10 * 1024 * 1024
 def _append_rotating(name: str, text: str) -> None:
     """Append to logs/<name>; past 10 MB the file is first moved to <name>.1 (one old file kept)."""
     p = os.path.join(paths.sub("logs"), name)
-    try:
-        if os.path.exists(p) and os.path.getsize(p) > LOG_ROTATE_BYTES:
-            os.replace(p, p + ".1")
-        with open(p, "a", encoding="utf-8") as fh:
-            fh.write(text)
-    except OSError:
-        log.debug("could not write %s", p, exc_info=True)
+    from .shared_state import interprocess_lock
+    # two windows: without the lock both could rotate (the second move replaces the first's .1)
+    # or one could append to the file the other is moving
+    with interprocess_lock(p + ".lock"):
+        try:
+            if os.path.exists(p) and os.path.getsize(p) > LOG_ROTATE_BYTES:
+                os.replace(p, p + ".1")
+            with open(p, "a", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError:
+            log.debug("could not write %s", p, exc_info=True)
 
 
 def append_log(entry: Dict) -> None:

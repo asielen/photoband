@@ -348,3 +348,36 @@ def test_token_and_host_patterns_match_whole_strings_only():
     assert server._HOST_RE.fullmatch("127.0.0.1:8765") and server._HOST_RE.fullmatch("localhost")
     for bad in ("localhost\n", "localhost:8765\n", "localhost.evil.com", "127.0.0.1:123456"):
         assert not server._HOST_RE.fullmatch(bad), bad
+
+
+def test_save_log_rotation_is_not_raced_by_two_processes(tmp_path, monkeypatch):
+    # both windows past the size limit at once: only one rotates, nothing is lost
+    import multiprocessing as mp
+    from photoband import save as savemod
+    monkeypatch.setattr(savemod, "LOG_ROTATE_BYTES", 2000)
+    ctx = mp.get_context("spawn")
+    procs = [ctx.Process(target=_log_lines, args=(os.environ["PHOTOBAND_HOME"], k, 200)) for k in range(2)]
+    for pr in procs:
+        pr.start()
+    for pr in procs:
+        pr.join(60)
+        assert pr.exitcode == 0
+    from photoband import paths
+    d = paths.sub("logs")
+    lines = []
+    for n in ("save.log", "save.log.1"):
+        f = os.path.join(d, n)
+        if os.path.exists(f):
+            lines += open(f, encoding="utf-8").read().splitlines()
+    # every line is whole (no interleaving); the newest lines of both writers survive
+    assert all(ln.startswith("{") and ln.endswith("}") for ln in lines)
+    assert any('"w": 0' in ln and '"i": 199' in ln for ln in lines)
+    assert any('"w": 1' in ln and '"i": 199' in ln for ln in lines)
+
+
+def _log_lines(home, w, n):
+    os.environ["PHOTOBAND_HOME"] = home
+    from photoband import save as savemod
+    savemod.LOG_ROTATE_BYTES = 2000
+    for i in range(n):
+        savemod.append_log({"w": w, "i": i, "pad": "x" * 40})
