@@ -25,8 +25,12 @@ _locks: Dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
 
 
-def cache_key(path: str, size: int, mtime_ns: int) -> str:
-    return hashlib.sha1(f"{os.path.abspath(path)}|{size}|{mtime_ns}|v{PROXY_VERSION}".encode("utf-8")).hexdigest()
+def cache_key(path: str, size: int, mtime_ns: int, file_id: int = 0) -> str:
+    """Key of a photo's cached proxy/analysis: shared by every Photoband process, so it names the
+    file's version: size, modified time and file id (a replaced file with the same size and
+    modified time is a new file id)."""
+    fid = f"|{file_id}" if file_id else ""
+    return hashlib.sha1(f"{os.path.abspath(path)}|{size}|{mtime_ns}{fid}|v{PROXY_VERSION}".encode("utf-8")).hexdigest()
 
 
 def _lock_for(key: str) -> threading.Lock:
@@ -74,7 +78,7 @@ def _cached(ppath: str, tpath: str) -> Optional[Tuple[str, str, Tuple[int, int]]
 
 def cached_proxy(path: str, info: ImageInfo) -> Optional[Tuple[str, str, Tuple[int, int]]]:
     """The cached (proxy_path, thumb_path, size), or None when it has to be built."""
-    return _cached(*_paths(cache_key(path, info.size_bytes, info.mtime_ns)))
+    return _cached(*_paths(cache_key(path, info.size_bytes, info.mtime_ns, info.file_id)))
 
 
 def get_proxy(path: str, info: Optional[ImageInfo] = None, arr: Optional[np.ndarray] = None,
@@ -82,7 +86,7 @@ def get_proxy(path: str, info: Optional[ImageInfo] = None, arr: Optional[np.ndar
     """Return (proxy_path, thumb_path, (proxy_w, proxy_h)), building them if needed.
     A full decode (when ``arr`` is not given) waits for a decode slot at ``prio``."""
     info = info or probe(path)
-    key = cache_key(path, info.size_bytes, info.mtime_ns)
+    key = cache_key(path, info.size_bytes, info.mtime_ns, info.file_id)
     ppath, tpath = _paths(key)
     with _lock_for(key):
         hit = _cached(ppath, tpath)

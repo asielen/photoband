@@ -60,6 +60,10 @@ class ImageInfo:
     bigtiff: bool = False
     size_bytes: int = 0
     mtime_ns: int = 0
+    # the file's id (inode): with size and mtime, what caches of this file are keyed by. A save
+    # replaces the file (a new id) and can keep its modified time and size (a copy re-saved with
+    # the source's dates, a caption of the same length in an uncompressed TIFF)
+    file_id: int = 0
     save_blocked: Optional[str] = None     # reason saving is not possible
     notes: List[str] = field(default_factory=list)   # shown when the file is opened
     # source details that saving changes (reported in the save log by write_image)
@@ -186,6 +190,7 @@ def probe(path: str) -> ImageInfo:
             _probe_cache.move_to_end(key)
             return copy.deepcopy(hit)
     info = _probe(path, size, mtime)
+    info.file_id = st.st_ino
     with _probe_lock:
         _probe_cache[key] = copy.deepcopy(info)
         while len(_probe_cache) > _PROBE_CACHE_SIZE:

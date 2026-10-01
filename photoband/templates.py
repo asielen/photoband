@@ -14,7 +14,8 @@ import uuid
 from typing import Dict, List, Optional
 
 from . import paths
-from .util import atomic_write_json, read_json
+from .shared_state import interprocess_lock, write_json
+from .util import read_json
 
 SCHEMA = 1
 
@@ -160,15 +161,18 @@ def save_template(t: Dict, new: bool = False) -> Dict:
     if t.get("id") is not None and not isinstance(t.get("id"), str):
         raise ValueError("Invalid template id")
     t = copy.deepcopy(t)
-    if new or not t.get("id") or t["id"] in BUILTIN_IDS:
-        t["id"] = "u-" + uuid.uuid4().hex[:12]
-        t["name"] = _unique_name(t.get("name") or "Untitled template")
-    _safe_id(t["id"])
-    t["builtin"] = False
-    t["schema"] = SCHEMA
-    t["updated"] = int(time.time())
-    validate_template(t)
-    atomic_write_json(os.path.join(_dir(), t["id"] + ".json"), t)
+    # a new template's name is checked against the templates on disk and written under a lock
+    # shared with other Photoband windows: two windows never both take the same free name
+    with interprocess_lock(os.path.join(_dir(), ".templates.lock")):
+        if new or not t.get("id") or t["id"] in BUILTIN_IDS:
+            t["id"] = "u-" + uuid.uuid4().hex[:12]
+            t["name"] = _unique_name(t.get("name") or "Untitled template")
+        _safe_id(t["id"])
+        t["builtin"] = False
+        t["schema"] = SCHEMA
+        t["updated"] = int(time.time())
+        validate_template(t)
+        write_json(os.path.join(_dir(), t["id"] + ".json"), t)
     return t
 
 

@@ -115,10 +115,11 @@ def _sweep_async(folders: List[str]) -> None:
 
 
 # GET routes that may take the token as ?t= (images, fonts, downloads); everything else needs the header.
+# Both are used with fullmatch: "$" would also accept a trailing newline (a path ending in %0A).
 _QUERY_TOKEN_RE = re.compile(
-    r"^/(api/photo/(proxy|crop)|fonts/file/[^/]+|files/.*|api/templates/[^/]+/export|api/batch/[^/]+/report\.csv)$")
+    r"/(api/photo/(proxy|crop)|fonts/file/[^/]+|files/.*|api/templates/[^/]+/export|api/batch/[^/]+/report\.csv)")
 
-_HOST_RE = re.compile(r"^(127\.0\.0\.1|localhost)(:\d{1,5})?$")
+_HOST_RE = re.compile(r"(127\.0\.0\.1|localhost)(:\d{1,5})?")
 
 CSP = ("default-src 'self'; img-src 'self' blob: data:; "
        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
@@ -237,12 +238,12 @@ def create_app() -> FastAPI:
     class TokenMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
             # Host first (DNS rebinding), then the token
-            if not _HOST_RE.match(request.headers.get("host") or ""):
+            if not _HOST_RE.fullmatch(request.headers.get("host") or ""):
                 return _secure(JSONResponse({"error": "Forbidden host"}, status_code=403))
             p = request.url.path
             if p.startswith("/api/") or p.startswith("/files/") or p.startswith("/fonts/"):
                 tok = request.headers.get("x-photoband-token")
-                if tok is None and request.method in ("GET", "HEAD") and _QUERY_TOKEN_RE.match(p):
+                if tok is None and request.method in ("GET", "HEAD") and _QUERY_TOKEN_RE.fullmatch(p):
                     # <img>, FontFace url() and plain downloads can't send headers
                     tok = request.query_params.get("t")
                 if not security.token_ok(tok):
@@ -1044,7 +1045,7 @@ def create_app() -> FastAPI:
             security.allow([out])
         job["settings"] = settings
         b.stage(int(job["index"]), {k: v for k, v in job.items() if k != "tiles"}, tiles)
-        with b._lock:
+        with b._txn():   # the journal's current version (shared with other Photoband processes)
             ent = b.data["entries"][str(int(job["index"]))]
             ent["dest"] = job.get("dest_path") or src
             if notes:
@@ -1075,18 +1076,20 @@ def create_app() -> FastAPI:
                 raise HTTPException(400, "Invalid index")
             if not 0 <= idx < int(b.data.get("expected", 0) or 0):
                 raise HTTPException(400, "Invalid index")
-            with b._lock:
+            # checked and labelled in one journal change: a photo another Photoband process saves
+            # meanwhile is never re-labelled
+            with b._txn():
                 cur = dict(b.data.get("entries", {}).get(str(idx)) or {})
-            if cur and (cur.get("state") in ("done", "running", "restored") or cur.get("backup") or cur.get("out")):
-                skipped.append(idx)   # a saved photo is never re-labelled (nor its path changed)
-                continue
-            # the path is the batch's own record of that photo, never the client's
-            path = cur.get("path") or (files_[idx] if idx < len(files_) else "")
-            if not path:
-                p = it.get("path")
-                path = p if isinstance(p, str) and p and canonical_path(p) in planned else ""
-            reason = it.get("reason", "")
-            b.mark(idx, st, path=path, error=reason if isinstance(reason, str) else "")
+                if cur and (cur.get("state") in ("done", "running", "restored") or cur.get("backup") or cur.get("out")):
+                    skipped.append(idx)   # a saved photo is never re-labelled (nor its path changed)
+                    continue
+                # the path is the batch's own record of that photo, never the client's
+                path = cur.get("path") or (files_[idx] if idx < len(files_) else "")
+                if not path:
+                    p = it.get("path")
+                    path = p if isinstance(p, str) and p and canonical_path(p) in planned else ""
+                reason = it.get("reason", "")
+                b.mark(idx, st, path=path, error=reason if isinstance(reason, str) else "")
         return {"ok": True, "skipped": skipped}
 
     @app.post("/api/batch/{bid}/staging-complete")

@@ -28,7 +28,9 @@ CACHE_MAX = 64
 
 
 def _key(path: str, info: ImageInfo) -> str:
-    return f"{os.path.abspath(path)}|{info.size_bytes}|{info.mtime_ns}"
+    # the file id too (as probe's own cache): a file replaced by another process (a save in
+    # another window, a batch worker) with the same size and modified time is another file
+    return f"{os.path.abspath(path)}|{info.size_bytes}|{info.mtime_ns}|{info.file_id}"
 
 
 def list_photos(paths_or_folder: List[str], include_sub: bool = False) -> List[Dict[str, Any]]:
@@ -179,7 +181,7 @@ ANALYSIS_VERSION = 2   # 2: provenance (isCopy/copyUnknown) on every path; recor
 
 
 def _existing_cache_file(path: str, info: ImageInfo, ocr: bool) -> str:
-    key = proxy.cache_key(path, info.size_bytes, info.mtime_ns)
+    key = proxy.cache_key(path, info.size_bytes, info.mtime_ns, info.file_id)
     tag = ""
     if ocr:
         try:

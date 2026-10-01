@@ -10,6 +10,7 @@ import re
 import shutil
 import sys
 import threading
+import time
 import urllib.request
 from typing import Dict, List, Optional
 
@@ -20,6 +21,11 @@ FALLBACK_IDS = ["noto-serif", "noto-sans"]
 DEFAULT_FAMILY = "source-serif-4"
 _lock = threading.Lock()
 _index: Optional[Dict] = None
+# what the font folders looked like when _index was built: another Photoband process (a window
+# that added a font or downloaded a Google font) changes them; index() then builds it again
+_index_sig: Optional[tuple] = None
+_sig_checked = 0.0
+SIG_CHECK_S = 1.0
 FONT_EXT = (".ttf", ".otf")
 
 
@@ -167,9 +173,28 @@ def _merge_ranges(a, b):
     return out
 
 
+def _folders_sig() -> tuple:
+    """Modified times of the folders fonts are added to (and of their subfolders): adding or
+    removing a font file changes its folder's."""
+    out = []
+    for root in (paths.sub("fonts", "user"), paths.sub("fonts", "google")):
+        for d, _dirs, _files in os.walk(root):
+            try:
+                out.append((d, os.stat(d).st_mtime_ns))
+            except OSError:
+                pass
+    try:
+        out.append(("manifest", os.stat(os.path.join(paths.fonts_dir(), "manifest.json")).st_mtime_ns))
+    except OSError:
+        pass
+    return tuple(out)
+
+
 def build_index(include_system: bool = True) -> Dict:
-    global _index
+    global _index, _index_sig
     with _lock:
+        # taken before the scan: a font added while it runs is picked up by the next index()
+        sig = _folders_sig()
         cache_path = os.path.join(paths.app_data(), "font_cache.json")
         cache = read_json(cache_path, {}) or {}
         files: List[Dict] = []
@@ -195,11 +220,23 @@ def build_index(include_system: bool = True) -> Dict:
         families = _group(files, manifest)
         by_file = {_fid(f["path"]): f["path"] for f in files}
         _index = {"families": families, "files": by_file}
+        _index_sig = sig
         return _index
 
 
 def index() -> Dict:
-    return _index or build_index()
+    """The font index, built again when the font folders changed since (a font added in another
+    Photoband window). Checked at most once a second."""
+    global _sig_checked
+    idx = _index
+    if idx is None:
+        return build_index()
+    now = time.monotonic()
+    if now - _sig_checked >= SIG_CHECK_S:
+        _sig_checked = now
+        if _folders_sig() != _index_sig:
+            return build_index()
+    return idx
 
 
 def file_path(file_id: str) -> Optional[str]:
