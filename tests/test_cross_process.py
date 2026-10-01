@@ -350,13 +350,14 @@ def test_token_and_host_patterns_match_whole_strings_only():
         assert not server._HOST_RE.fullmatch(bad), bad
 
 
-def test_save_log_rotation_is_not_raced_by_two_processes(tmp_path, monkeypatch):
-    # both windows past the size limit at once: only one rotates, nothing is lost
+def test_save_log_rotation_is_not_raced_by_two_processes(tmp_path):
+    # the limit is set so the two writers together pass it exactly once: one rotation, and every
+    # line is in save.log or save.log.1. Unlocked, both writers could rotate at the same moment
+    # (the second move replaces the first's save.log.1) and lines would be lost.
     import multiprocessing as mp
-    from photoband import save as savemod
-    monkeypatch.setattr(savemod, "LOG_ROTATE_BYTES", 2000)
+    n, limit = 200, 15000          # 2 x 200 lines of ~60 bytes = ~24 KB: one rotation
     ctx = mp.get_context("spawn")
-    procs = [ctx.Process(target=_log_lines, args=(os.environ["PHOTOBAND_HOME"], k, 200)) for k in range(2)]
+    procs = [ctx.Process(target=_log_lines, args=(os.environ["PHOTOBAND_HOME"], k, n, limit)) for k in range(2)]
     for pr in procs:
         pr.start()
     for pr in procs:
@@ -365,19 +366,18 @@ def test_save_log_rotation_is_not_raced_by_two_processes(tmp_path, monkeypatch):
     from photoband import paths
     d = paths.sub("logs")
     lines = []
-    for n in ("save.log", "save.log.1"):
-        f = os.path.join(d, n)
+    for name in ("save.log", "save.log.1"):
+        f = os.path.join(d, name)
         if os.path.exists(f):
             lines += open(f, encoding="utf-8").read().splitlines()
-    # every line is whole (no interleaving); the newest lines of both writers survive
-    assert all(ln.startswith("{") and ln.endswith("}") for ln in lines)
-    assert any('"w": 0' in ln and '"i": 199' in ln for ln in lines)
-    assert any('"w": 1' in ln and '"i": 199' in ln for ln in lines)
+    assert all(ln.startswith("{") and ln.endswith("}") for ln in lines)      # no interleaving
+    got = {(e["w"], e["i"]) for e in map(json.loads, lines)}
+    assert got == {(w, i) for w in range(2) for i in range(n)}                # nothing lost
 
 
-def _log_lines(home, w, n):
+def _log_lines(home, w, n, limit):
     os.environ["PHOTOBAND_HOME"] = home
     from photoband import save as savemod
-    savemod.LOG_ROTATE_BYTES = 2000
+    savemod.LOG_ROTATE_BYTES = limit
     for i in range(n):
-        savemod.append_log({"w": w, "i": i, "pad": "x" * 40})
+        savemod.append_log({"w": w, "i": i, "pad": "x" * 30})
