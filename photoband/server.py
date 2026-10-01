@@ -625,7 +625,10 @@ def create_app() -> FastAPI:
     async def photo_erase_preview(body: Dict[str, Any] = Body(...)):
         p = security.check(body["path"])
         import anyio
-        data = await anyio.to_thread.run_sync(photos.erase_preview_webp, p, body.get("erase") or {})
+        try:
+            data = await anyio.to_thread.run_sync(photos.erase_preview_webp, p, body.get("erase") or {})
+        except ValueError as e:   # e.g. an oversized brush mask
+            raise HTTPException(400, str(e))
         return Response(data, media_type="image/webp")
 
     @app.post("/api/photo/existing")
@@ -663,11 +666,20 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------ saving
     def _tiles_from_form(form, job) -> List[Tile]:
+        from .composite import TILE_MAX, upload_size
         tiles = []
         for t in job.get("tiles", []):
             f = form.get(t["name"])
             if f is None:
                 raise HTTPException(400, f"Missing tile {t['name']}")
+            # the UI renders text tiles of at most TILE_MAX px a side: refuse anything bigger
+            # before it is decoded (a tiny PNG can declare a huge image)
+            try:
+                w, h = upload_size(f)
+            except ValueError as e:
+                raise HTTPException(400, f"Tile {t['name']}: {e}")
+            if w > TILE_MAX or h > TILE_MAX:
+                raise HTTPException(400, f"Tile {t['name']} is {w}×{h} px; at most {TILE_MAX} px a side")
             tiles.append(Tile(int(t["x"]), int(t["y"]), f))
         return tiles
 
@@ -685,6 +697,15 @@ def create_app() -> FastAPI:
         if job.get("mode") == "copyAs":
             security.check(job.get("dest_path") or "")
         return src
+
+    @app.post("/api/save/preview")
+    def api_save_preview(body: Dict[str, Any] = Body(...)):
+        from .save import save_preview
+        src = security.check(body.get("path") or "")
+        try:
+            return save_preview(src, load_settings().get("saving", {}), body.get("fields"), body.get("templateName") or "")
+        except (OSError, ImageError) as e:
+            raise HTTPException(404, f"Cannot read {src}: {e}")
 
     @app.post("/api/save")
     async def api_save(request: Request):
@@ -745,18 +766,27 @@ def create_app() -> FastAPI:
             if k == body.get("replaces"):
                 old["cancel"] = True
             # finished ones stay a minute so another window can still collect its last results
-            if (old["cancel"] or now - old.get("finished", now) > 60
+            # (a stopped one stays until the photos it was checking are done: its last results)
+            if ((old["cancel"] and not old["active"]) or now - old.get("finished", now) > 60
                     or now - old.get("started", now) > 1800):
                 old["cancel"] = True
                 _pre.pop(k, None)
         pid = f"pf{int(now * 1000)}"
-        st = {"id": pid, "total": len(files), "results": {}, "cancel": False, "started": now}
+        # active: photos being checked right now. Stop means: start no new ones, let these finish.
+        st = {"id": pid, "total": len(files), "results": {}, "cancel": False, "started": now, "active": set()}
         _pre[pid] = st
         want_ocr = bool(body.get("ocr", False))
 
         def one(p):
-            if st["cancel"]:
-                return
+            # joined before the stop check: once stopped, "active" only shrinks
+            st["active"].add(p)
+            try:
+                if not st["cancel"]:
+                    check(p)
+            finally:
+                st["active"].discard(p)
+
+        def check(p):
             try:
                 m = photos.meta(p)
                 r: Dict[str, Any] = {"path": p, "meta": m, "ok": True}
@@ -783,12 +813,17 @@ def create_app() -> FastAPI:
         if not st:
             raise HTTPException(404)
         res = list(st["results"].values())
-        if len(res) >= st["total"]:
+        # stopped: no photo is being checked any more and none will start; the rest stay unchecked
+        stopped = bool(st["cancel"]) and not st["active"]
+        if len(res) >= st["total"] or stopped:
             st.setdefault("finished", time.time())
-        return {"id": pid, "total": st["total"], "done": len(res), "results": res[since:]}
+        return {"id": pid, "total": st["total"], "done": len(res), "results": res[since:],
+                "stopped": stopped, "active": len(st["active"])}
 
     @app.post("/api/batch/preflight/{pid}/cancel")
     def batch_preflight_cancel(pid: str):
+        """Stop after the photos being checked now: they finish (and are reported), no new ones
+        start. Poll until "stopped" to collect the last results."""
         if pid in _pre:
             _pre[pid]["cancel"] = True
         return {"ok": True}

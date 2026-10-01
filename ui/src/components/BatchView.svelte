@@ -4,6 +4,7 @@
   import { dialogs } from '../lib/dialogs.svelte'
   import { app, draftForFile, PhotoSession, type PhotoItem } from '../lib/store.svelte'
   import { caseCOverwriteRefused, planCaseC } from '../lib/batchplan'
+  import { progressLine, ProgressClock } from '../lib/progress'
   import type { ExistingAnalysis, PhotoMeta, Settings } from '../lib/types'
   import Disclosure from './Disclosure.svelte'
   import Icon from './Icon.svelte'
@@ -12,7 +13,7 @@
   type Plan = {
     path: string
     name: string
-    status: 'pending' | 'ready' | 'flagged' | 'skipped' | 'blocked' | 'excluded' | 'error'
+    status: 'pending' | 'ready' | 'flagged' | 'skipped' | 'blocked' | 'excluded' | 'error' | 'unchecked'
     reasons: string[]
     action: 'band' | 'rebuild' | 'erase' | 'skip'
     session?: PhotoSession
@@ -47,6 +48,11 @@
   let cancelled = $state(false)
   let whichNote = $state('')
   let pfGen = 0
+  let pfStopping = $state(false) // "Stop after this photo" pressed while checking
+  // elapsed time and time left (plain objects: the derived lines below read them on every tick)
+  let pfClock: ProgressClock | null = null
+  let saveClock: ProgressClock | null = null
+  let now = $state(Date.now())
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -72,13 +78,13 @@
     }
   }
 
-  // Ticking boxes only means something in "Only selected" (and "No caption yet"), so
-  // unticking a photo while "All" is chosen switches to "Only selected".
+  // Ticking boxes only means something in "Only ticked" (and "Only uncaptioned"), so
+  // unticking a photo while "All" is chosen switches to "Only ticked".
   function setSelected(next: Set<string>) {
     selected = next
     if (B.which === 'all' && next.size < files.length) {
       setB({ which: 'selected' })
-      whichNote = 'Switched to “Only selected” because you unticked a photo.'
+      whichNote = 'Switched to “Only ticked” because you unticked a photo.'
     }
   }
   function toggleFile(path: string, on: boolean) {
@@ -128,7 +134,8 @@
         seen.add(res.path)
         await onResult(res)
       }
-      if (st.done >= st.total) break
+      // stopped: the photos being checked when Stop was pressed are in; no others will come
+      if (st.done >= st.total || st.stopped) break
       await sleep(350)
     }
     if (pfId === my) pfLive = false
@@ -140,7 +147,7 @@
     let list = files
     if (B.which !== 'all') list = files.filter((f) => selected.has(f.path))
     if (!list.length) {
-      app.toast('warn', 'No photos selected.')
+      app.toast('warn', 'No photos are ticked.')
       return
     }
     step = 'preflight'
@@ -148,6 +155,8 @@
     plans = list.map((f) => ({ path: f.path, name: f.name, size: f.size, status: 'pending', reasons: [], action: 'band' }))
     pfDone = 0
     pfTotal = list.length
+    pfStopping = false
+    pfClock = new ProgressClock()
     const needOcr = B.caseB !== 'skip' || B.caseC !== 'skip'
     const gen = ++pfGen
     try {
@@ -156,12 +165,24 @@
         await planFor(res)
         pfDone = plans.filter((p) => p.status !== 'pending').length
       }, () => cancelled || gen !== pfGen)
+      if (gen === pfGen && pfStopping) {
+        // stopped part way: the photos not checked are listed, and not saved
+        plans = plans.map((p) => (p.status === 'pending' ? { ...p, status: 'unchecked', reasons: ['not checked (checking was stopped)'] } : p))
+        pfDone = pfTotal
+      }
     } catch (e: any) {
       if (gen !== pfGen) return
       app.toast('error', `Checking the photos failed: ${e.message}`)
       plans = plans.map((p) => (p.status === 'pending' ? { ...p, status: 'error', reasons: [`Checking failed: ${e.message}`] } : p))
       pfDone = pfTotal
     }
+  }
+
+  /** Stop checking after the photos being checked now; those already checked can still be saved. */
+  function stopChecking() {
+    if (pfStopping || !pfId || !pfLive) return
+    pfStopping = true
+    post(`/api/batch/preflight/${pfId}/cancel`).catch(() => {})
   }
 
   /** Readable message for a photo that could not be read. */
@@ -333,7 +354,7 @@
   function review(which: 'all' | 'flagged') {
     const list = plans.filter((p) => (which === 'all' ? p.status === 'ready' || p.status === 'flagged' : p.status === 'flagged'))
     if (!list.length) {
-      app.toast('info', which === 'flagged' ? 'Nothing is flagged.' : 'Nothing to review.')
+      app.toast('info', which === 'flagged' ? 'No photos need a look.' : 'Nothing to review.')
       return
     }
     const inList = new Set(list.map((p) => p.path))
@@ -352,8 +373,8 @@
         if (unseen.length && B.warnings === 'hold') {
           const n = unseen.length
           const r = await dialogs.ask(
-            'Some flagged photos weren’t opened',
-            `${n} flagged photo${n > 1 ? 's were' : ' was'} not opened during this review:\n${unseen.slice(0, 6).map((p) => '• ' + p.name).join('\n')}${n > 6 ? `\n… and ${n - 6} more` : ''}\n\nHold ${n > 1 ? 'them' : 'it'} back, or include ${n > 1 ? 'them' : 'it'} in the batch anyway?`,
+            'Some photos that need a look weren’t opened',
+            `${n} photo${n > 1 ? 's that need a look were' : ' that needs a look was'} not opened during this review:\n${unseen.slice(0, 6).map((p) => '• ' + p.name).join('\n')}${n > 6 ? `\n… and ${n - 6} more` : ''}\n\nHold ${n > 1 ? 'them' : 'it'} back, or include ${n > 1 ? 'them' : 'it'} in the batch anyway?`,
             [
               { id: 'cancel', label: 'Keep reviewing' },
               { id: 'include', label: 'Include anyway' },
@@ -441,7 +462,7 @@
   async function markStopped(bid: string, items: { index: number; path: string }[]) {
     if (!items.length) return
     await post(`/api/batch/${bid}/exclude`, {
-      items: items.map((x) => ({ index: x.index, path: x.path, state: 'cancelled', reason: 'Stopped before it was prepared' })),
+      items: items.map((x) => ({ index: x.index, path: x.path, state: 'cancelled', reason: 'Stopped before it was saved' })),
     }).catch(() => {})
   }
 
@@ -473,10 +494,12 @@
     const b = await post('/api/batch/create', { files: list.map((p) => p.path), plan: kept, templateId, folder, batchSettings: $state.snapshot(B) })
     batchId = b.id
     const bid = b.id
+    summary = null
     step = 'running'
     staged = 0
     stageTotal = list.length
     stagingBusy = true
+    saveClock = new ProgressClock()
     try {
       await post(`/api/batch/${bid}/run`)
       startPolling()
@@ -576,22 +599,32 @@
     }, 500)
   }
 
+  /** Stop after the photos being saved now: they finish (each is put in place only once it is
+   *  fully written), no new ones start; the rest is listed as stopped and can be resumed. */
   async function cancelRun() {
+    if (cancelled) return
     cancelled = true
-    await post(`/api/batch/${batchId}/cancel`)
-    app.toast('info', 'Stopping after the photos in progress finish.')
+    // photos being checked again for a retry or resume: stop that too
+    if (pfLive && pfId) post(`/api/batch/preflight/${pfId}/cancel`).catch(() => {})
+    try {
+      await post(`/api/batch/${batchId}/cancel`)
+    } catch (e: any) {
+      app.toast('error', `Could not stop the batch: ${e.message}`)
+    }
   }
   async function retry() {
     const sm = summary
     step = 'running'
     cancelled = false
     stagingBusy = true
+    saveClock = new ProgressClock()
     try {
       // entries that never got a staged job (stopped or failed while preparing) are prepared again first
       const needs = (sm?.entries || []).filter((e: any) => (e.state === 'failed' || e.state === 'cancelled') && e.hasJob === false).map((e: any) => e.index)
       startPolling()
       await restageFromPlan(batchId, sm?.meta, needs)
-      await postRetry(`/api/batch/${batchId}/retry`)
+      // stopped while preparing: the server already stopped the queue; don't start it again
+      if (!cancelled) await postRetry(`/api/batch/${batchId}/retry`)
     } catch (e: any) {
       app.toast('error', `Could not retry: ${e.message}`)
     } finally {
@@ -658,6 +691,7 @@
       summary = sm
       step = 'running'
       stagingBusy = true
+      saveClock = new ProgressClock()
       startPolling()
       // photos the app never staged (it quit before or while preparing them): prepare them again
       const count = Number(sm.meta?.count ?? sm.meta?.files?.length ?? sm.expected ?? 0)
@@ -668,8 +702,10 @@
         app.toast('info', `Preparing ${missing.length} photo${missing.length > 1 ? 's' : ''} that weren’t ready when the batch stopped…`)
         await restageFromPlan(rid, sm.meta, missing)
       }
-      if (!cancelled) await post(`/api/batch/${rid}/staging-complete`)
-      await postRetry(`/api/batch/${rid}/run`)
+      if (!cancelled) {
+        await post(`/api/batch/${rid}/staging-complete`)
+        await postRetry(`/api/batch/${rid}/run`)
+      }
     } catch (e: any) {
       app.toast('error', `Could not resume the batch: ${e.message}`)
     } finally {
@@ -699,6 +735,32 @@
   const notSavedN = $derived((running.held || 0) + (running.blocked || 0) + (running.notPrepared || 0))
   const doneN = $derived((running.done || 0) + (running.failed || 0) + skippedN + notSavedN + (running.restored || 0))
   const total = $derived(summary?.expected || toSave.length || 1)
+  // one line under the progress bar: percent, photos, elapsed, time left
+  const checking = $derived(step === 'preflight' && !pfReady)
+  $effect(() => {
+    if (!checking && step !== 'running') return
+    now = Date.now()
+    const t = setInterval(() => (now = Date.now()), 1000)
+    return () => clearInterval(t)
+  })
+  const pfLine = $derived.by(() => {
+    void now
+    if (!pfClock || !checking) return ''
+    if (pfStopping) return `Stopping after the photos being checked now… ${pfDone} of ${pfTotal} checked`
+    const r = pfClock.update(pfDone, pfTotal, Date.now())
+    return progressLine(pfDone, pfTotal, r.elapsed, r.left)
+  })
+  // photos this batch saves (not those the check already left out, journaled as done from the start)
+  const saveTotal = $derived(Math.max(1, Number(summary?.meta?.count ?? total)))
+  const saveDone = $derived(Math.max(0, Math.min(saveTotal, doneN - (total - saveTotal))))
+  const saveLine = $derived.by(() => {
+    void now
+    if (step !== 'running') return ''
+    if (cancelled) return `Stopping after the photos being saved now… ${saveDone} of ${saveTotal} done`
+    if (!saveClock || !summary) return ''
+    const r = saveClock.update(saveDone, saveTotal, Date.now())
+    return progressLine(saveDone, saveTotal, r.elapsed, r.left)
+  })
   const retryLabel = $derived(
     running.failed && running.cancelled ? 'Retry failed & resume stopped' : running.failed ? 'Retry failed' : running.cancelled ? 'Resume stopped photos' : '',
   )
@@ -707,7 +769,7 @@
     if (base && p.startsWith(base) && /[\\/]/.test(p.charAt(base.length))) return p.slice(base.length + 1)
     return p.split(/[\\/]/).pop() || p
   }
-  const labels: Record<string, string> = { ready: 'Ready', flagged: 'Needs a look', skipped: 'Skipped', blocked: 'Blocked', excluded: 'Excluded', error: 'Error', pending: 'Checking…' }
+  const labels: Record<string, string> = { ready: 'Ready', flagged: 'Needs a look', skipped: 'Skipped', blocked: 'Blocked', excluded: 'Excluded', error: 'Error', pending: 'Checking…', unchecked: 'Not checked' }
   const entryLabels: Record<string, string> = { staged: 'Queued', retry: 'Queued', running: 'Saving', done: 'Saved', failed: 'Failed', changed: 'Changed', skipped: 'Skipped', excluded: 'Excluded', cancelled: 'Stopped', restored: 'Restored', held: 'Held back', blocked: 'Blocked', notPrepared: 'Not prepared' }
   const entryPill: Record<string, string> = { done: 'ready', failed: 'error', running: 'pending', restored: 'restored', cancelled: 'skipped', changed: 'flagged', held: 'flagged', blocked: 'blocked', notPrepared: 'error' }
   /** "Save 6 copies" / "Overwrite 6 photos" */
@@ -733,6 +795,23 @@
     SV.location === 'fixed' ? (SV.fixedFolder ? `into ${SV.fixedFolder}` : 'into the folder chosen in Settings') : SV.location === 'same' ? 'next to each original' : `into a “${SV.subfolderName}” folder next to each original`,
   )
   const backupsWhere = $derived(SV.backupFolder || '“_originals” folders next to the photos')
+  /** Where saving the first photo would write, as an example of the naming. */
+  let example = $state<{ copy: string; backup: string | null } | null>(null)
+  $effect(() => {
+    const first = files[0]?.path
+    void JSON.stringify(SV)
+    if (!first) { example = null; return }
+    let stale = false
+    post<{ copy: string; backup: string | null }>('/api/save/preview', { path: first }).then((r) => { if (!stale) example = r }).catch(() => { if (!stale) example = null })
+    return () => { stale = true }
+  })
+  /** A path relative to the photos' folder when it is inside it. */
+  function relTo(p: string): string {
+    const f = files[0]?.path || ''
+    const d = f.slice(0, Math.max(f.lastIndexOf('/'), f.lastIndexOf('\\')))
+    return d && p.toLowerCase().startsWith(d.toLowerCase()) && '/\\'.includes(p.charAt(d.length)) ? p.slice(d.length + 1) : p
+  }
+  const unsafe = $derived(B.saveMode === 'overwrite' && !SV.backupOriginals)
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
 
   function pickWhich(v: string) {
@@ -754,6 +833,7 @@
     if (counts.skipped) out.push(`${plural(counts.skipped, 'photo is', 'photos are')} skipped, as set in More options.`)
     const bad = (counts.blocked || 0) + (counts.error || 0)
     if (bad) out.push(`${plural(bad, 'photo', 'photos')} can’t be saved by Photoband.`)
+    if (counts.unchecked) out.push(`${plural(counts.unchecked, 'photo was', 'photos were')} not checked because you stopped checking, so ${counts.unchecked === 1 ? 'it' : 'they'} won’t be saved. Go Back and check again to include ${counts.unchecked === 1 ? 'it' : 'them'}.`)
     return out
   })
 
@@ -769,6 +849,7 @@
     }
     if (running.failed) lines.push(`${plural(running.failed, 'photo', 'photos')} couldn’t be saved; the list below says why. “Retry failed” tries again.`)
     if (running.cancelled) lines.push(`${plural(running.cancelled, 'photo was', 'photos were')} not saved because the batch was stopped. “Resume” saves ${running.cancelled === 1 ? 'it' : 'them'}.`)
+    if (summary.state === 'cancelled' && done && mode === 'overwrite' && summary.canRestore) lines.push(`“Restore originals” below can still put back the ${done === 1 ? 'original' : `${done} originals`} replaced before you stopped.`)
     if (running.held) lines.push(`${plural(running.held, 'photo was', 'photos were')} held back because something needs a look, for example no names were found. Open ${running.held === 1 ? 'it' : 'them'} in the editor, or start a new batch and review ${running.held === 1 ? 'it' : 'them'}.`)
     if (running.blocked || running.notPrepared) lines.push(`${plural((running.blocked || 0) + (running.notPrepared || 0), 'photo', 'photos')} can’t be saved this way; the list below says why.`)
     if (skippedN) lines.push(`${plural(skippedN, 'photo was', 'photos were')} skipped (for example, already captioned, excluded, or changed during the batch).`)
@@ -799,6 +880,7 @@
     excluded: 'You excluded it during review.',
     error: 'This file couldn’t be read.',
     pending: 'Being checked…',
+    unchecked: 'Not checked because checking was stopped; it won’t be saved.',
   }
 </script>
 
@@ -882,11 +964,14 @@
             <div class="v">
               <Segmented label="Save mode" value={B.saveMode} options={[{ value: 'copy', label: 'Captioned copies', title: 'Keep the originals as they are and save captioned copies.' }, { value: 'overwrite', label: 'Overwrite originals', title: 'Replace each original with its captioned version (a backup is kept if backups are on).' }]} onchange={(v) => setB({ saveMode: v as any })} />
               {#if B.saveMode === 'copy'}
-                <span class="faint small">Copies go {copiesWhere}. <button class="link" data-tip="Change where copies go and how they are named." onclick={() => (dialogs.settingsOpen = 'saving')}>Change…</button></span>
-              {:else if SV.backupOriginals}
-                <span class="faint small">Each original is backed up first (to {backupsWhere}), so you can restore it from the summary.</span>
+                <span class="faint small">Originals are not touched. Copies go {copiesWhere}{#if example?.copy}, e.g. <span class="mono">{relTo(example.copy)}</span>{/if}. <button class="link" data-tip="Change where copies go and how they are named." onclick={() => (dialogs.settingsOpen = 'saving')}>Change…</button></span>
               {:else}
-                <span class="note warn small" role="alert">Backups are off, so overwritten originals can’t be restored. <button class="link" data-tip="Turn backups on in Settings › Saving." onclick={() => (dialogs.settingsOpen = 'saving')}>Turn backups on…</button></span>
+                <label class="row opt bk" class:nobackup={!SV.backupOriginals} data-tip="Before each original is replaced, copy it to an “_originals” subfolder as name-original (Settings › Saving)."><input type="checkbox" role="switch" checked={SV.backupOriginals} onchange={(e) => app.saveSettings({ saving: { backupOriginals: (e.target as HTMLInputElement).checked } }).catch((er) => app.toast('error', er.message))} /> Back up each original first</label>
+                {#if SV.backupOriginals}
+                  <span class="faint small">Each original is copied to {backupsWhere}{#if example?.backup}, e.g. <span class="mono">{relTo(example.backup)}</span>{/if}, then replaced. You can restore them from the summary.</span>
+                {:else}
+                  <span class="nobk small row" role="alert"><Icon name="warn" size={13} /> Backups are off: the originals are replaced and can’t be restored.</span>
+                {/if}
               {/if}
             </div>
           </div>
@@ -906,7 +991,7 @@
                 <span class="faint small">Erasing handwriting on a scan is only done on copies{B.saveMode === 'overwrite' ? ': these originals are kept' : ''}.</span>
               </div>
               <span>Name already taken<small class="help">When a copy with the same name exists</small></span>
-              <Segmented label="If the name exists" value={SV.onExists} options={[{ value: 'increment', label: 'Add -2, -3…', title: 'Keep both: the new copy gets a number added to its name.' }, { value: 'ask', label: 'Ask', title: 'In a batch, asking is not possible, so a number is added.' }, { value: 'overwrite', label: 'Replace', title: 'Replace an earlier copy of the same photo. Other files with that name are never replaced.' }]} onchange={(v) => app.saveSettings({ saving: { onExists: v } }).catch((e) => app.toast('error', e.message))} />
+              <Segmented label="If the name exists" value={SV.onExists} options={[{ value: 'increment', label: 'Add -2, -3…', title: 'Keep both: the new copy gets a number added to its name.' }, { value: 'ask', label: 'Ask', disabled: true, why: 'A batch can’t stop to ask, so a number is added instead. Ask still applies when you save one photo.' }, { value: 'overwrite', label: 'Replace', title: 'Replace an earlier copy of the same photo. Other files with that name are never replaced.' }]} onchange={(v) => app.saveSettings({ saving: { onExists: v } }).catch((e) => app.toast('error', e.message))} />
             </div>
             <p class="faint small">Photos are saved several at a time, and each one is checked after it is written. Reading the text of existing captions (OCR) only happens for the options that need it.</p>
           </Disclosure>
@@ -915,11 +1000,11 @@
     {:else if step === 'preflight'}
       <section class="card wide">
         <div class="row">
-          <h3 class="grow" aria-live="polite">{!pfReady ? `Checking photos… ${pfDone} of ${pfTotal}` : `${plural(pfTotal, 'photo', 'photos')} checked`}</h3>
+          <h3 class="grow" data-tip={!pfReady ? 'Photoband reads each photo’s information and lays out its caption, without saving anything.' : undefined}>{!pfReady ? 'Checking photos…' : counts.unchecked ? `${plural(pfTotal - counts.unchecked, 'photo', 'photos')} checked, then stopped` : `${plural(pfTotal, 'photo', 'photos')} checked`}</h3>
         </div>
-        <div class="bar" class:indet={pfDone === 0 && pfTotal > 0} role="progressbar" aria-label="Checking progress" aria-valuemin={0} aria-valuemax={pfTotal} aria-valuenow={pfDone}><div style="width:{(pfDone / Math.max(1, pfTotal)) * 100}%"></div></div>
+        <div class="bar" class:indet={pfDone === 0 && pfTotal > 0 && !pfStopping} role="progressbar" aria-label="Checking progress" aria-valuemin={0} aria-valuemax={pfTotal} aria-valuenow={pfDone - (counts.unchecked || 0)} aria-valuetext={pfLine || undefined}><div style="width:{((pfDone - (counts.unchecked || 0)) / Math.max(1, pfTotal)) * 100}%"></div></div>
         {#if !pfReady}
-          <p class="lead">Photoband reads each photo’s information and lays out its caption, without saving anything.</p>
+          <p class="lead progress" aria-live="polite">{pfLine}</p>
         {:else}
           <ul class="lead lines">{#each checkLines as l}<li>{l}</li>{/each}</ul>
         {/if}
@@ -928,6 +1013,7 @@
           <span class="stat warn" data-tip={pillTips.flagged}><b>{counts.flagged || 0}</b> need a look</span>
           <span class="stat" data-tip={pillTips.skipped}><b>{counts.skipped || 0}</b> skipped</span>
           {#if counts.excluded}<span class="stat" data-tip={pillTips.excluded}><b>{counts.excluded}</b> excluded</span>{/if}
+          {#if counts.unchecked}<span class="stat" data-tip={pillTips.unchecked}><b>{counts.unchecked}</b> not checked</span>{/if}
           {#if counts.blocked || counts.error}<span class="stat bad" data-tip="Photoband can’t save these files; the list says why."><b>{(counts.blocked || 0) + (counts.error || 0)}</b> can’t be saved</span>{/if}
         </div>
         <div class="plist scroll">
@@ -943,16 +1029,16 @@
     {:else}
       <section class="card wide">
         {#if step === 'running'}
-          <h3 aria-live="polite">Saving… {Math.min(doneN, total)} of {total}</h3>
+          <h3 data-tip="Each photo is written to a temporary file, checked, and only then put in place. You can keep working in the editor meanwhile.">Saving photos…</h3>
         {:else}
           <div class="result {outcome.tone}">
             <span class="ricon" aria-hidden="true"><Icon name={outcome.tone === 'ok' ? 'check' : 'warn'} size={18} stroke={2.2} /></span>
             <h3>{outcome.title}</h3>
           </div>
         {/if}
-        <div class="bar" class:indet={step === 'running' && doneN === 0} role="progressbar" aria-label="Save progress" aria-valuemin={0} aria-valuemax={total} aria-valuenow={doneN}><div style="width:{(doneN / total) * 100}%"></div></div>
+        <div class="bar" class:indet={step === 'running' && saveDone === 0 && !cancelled} role="progressbar" aria-label="Save progress" aria-valuemin={0} aria-valuemax={saveTotal} aria-valuenow={saveDone} aria-valuetext={saveLine || undefined}><div style="width:{(saveDone / saveTotal) * 100}%"></div></div>
         {#if step === 'running'}
-          <p class="lead">Each photo is written to a temporary file, checked, and only then put in place. You can keep working in the editor meanwhile.</p>
+          <p class="lead progress" aria-live="polite">{saveLine}</p>
         {:else}
           <ul class="lead lines">{#each outcome.lines as l}<li>{l}</li>{/each}</ul>
         {/if}
@@ -965,7 +1051,6 @@
           {#if running.notPrepared}<span class="stat bad" data-tip="Couldn’t be prepared again after the batch stopped"><b>{running.notPrepared}</b> not prepared</span>{/if}
           {#if running.cancelled}<span class="stat warn" data-tip="Not saved because the batch was stopped"><b>{running.cancelled}</b> stopped</span>{/if}
           {#if running.restored}<span class="stat" data-tip="Put back from the backups"><b>{running.restored}</b> restored</span>{/if}
-          {#if step === 'running'}<span class="stat"><b>{Math.max(0, total - doneN)}</b> remaining</span>{/if}
           {#if step === 'running' && stagingBusy && staged < stageTotal && !cancelled}<span class="faint small">Preparing {staged} of {stageTotal}…</span>{/if}
         </div>
         {#if finished && summary?.canRestore && (running.done || 0) > 0}
@@ -1014,12 +1099,13 @@
     {:else if step === 'preflight'}
       <button class="btn ghost" data-tip="Go back to choosing photos and options. Nothing has been saved." onclick={() => { cancelled = true; stopPreflight(); step = 'setup' }}><Icon name="prev" size={14} /> Back</button>
       <span class="grow faint small">{pfReady && heldBack.length ? `${plural(heldBack.length, 'photo', 'photos')} held back unless reviewed.` : ''}</span>
-      <button class="btn" disabled={!pfReady || !counts.flagged} data-tip={!pfReady ? 'Wait until every photo is checked.' : !counts.flagged ? 'No photos need a look.' : 'Open only the photos that need a look in the editor, one by one.'} onclick={() => review('flagged')}>{counts.flagged ? `Review ${counts.flagged} needing a look` : 'Review flagged'}</button>
+      {#if !pfReady}<button class="btn" disabled={pfStopping} data-tip="Finish the photos being checked now and check no more. The photos already checked can still be saved; the rest are left out." onclick={stopChecking}><Icon name="stop" size={14} /> {pfStopping ? 'Stopping…' : 'Stop after this photo'}</button>{/if}
+      <button class="btn" disabled={!pfReady || !counts.flagged} data-tip={!pfReady ? 'Wait until every photo is checked.' : !counts.flagged ? 'No photos need a look.' : 'Open only the photos that need a look in the editor, one by one.'} onclick={() => review('flagged')}>{counts.flagged ? `Review ${counts.flagged} needing a look` : 'Review those needing a look'}</button>
       <button class="btn" disabled={!pfReady} data-tip={!pfReady ? 'Wait until every photo is checked.' : 'Step through every photo in the editor before saving. Optional.'} onclick={() => review('all')}>Review all</button>
-      <button class="btn primary" disabled={!pfReady || !toSave.length} data-tip={!pfReady ? 'Wait until every photo is checked.' : !toSave.length ? 'No photos are ready to save. Review the ones that need a look, or go back and change the options.' : B.saveMode === 'overwrite' ? 'Replace the originals with captioned versions. Asks first.' : 'Save captioned copies. Asks first.'} onclick={saveAll}>{saveLabel(toSave.length)} <Icon name="next" /></button>
+      <button class="btn {unsafe ? 'danger solid' : 'primary'}" disabled={!pfReady || !toSave.length} data-tip={!pfReady ? 'Wait until every photo is checked.' : !toSave.length ? 'No photos are ready to save. Review the ones that need a look, or go back and change the options.' : unsafe ? 'Replace the originals with captioned versions. Backups are OFF: they can’t be restored. Asks first.' : B.saveMode === 'overwrite' ? 'Replace the originals with captioned versions (backed up first). Asks first.' : 'Save captioned copies. Asks first.'} onclick={saveAll}>{#if unsafe}<Icon name="warn" />{/if}{saveLabel(toSave.length)} <Icon name="next" /></button>
     {:else if step === 'running'}
       <span class="grow"></span>
-      <button class="btn danger" data-tip="Stop after the photos being saved right now. Photos already saved stay saved." onclick={cancelRun}><Icon name="stop" size={14} /> Stop</button>
+      <button class="btn" disabled={cancelled} data-tip="Finish the photos being saved right now (none is left half-written) and start no more. Photos already saved stay saved; the rest can be resumed later." onclick={cancelRun}><Icon name="stop" size={14} /> {cancelled ? 'Stopping…' : 'Stop after this photo'}</button>
     {:else}
       <button class="btn ghost" data-tip="Save a spreadsheet (CSV) listing every photo and what happened to it." onclick={() => download(`/api/batch/${batchId}/report.csv`, `photoband-batch-${batchId}.csv`)}><Icon name="download" size={14} /> Export report</button>
       {#if (running.done || 0) > 0 && (summary?.meta?.settings?.saveMode || B.saveMode) !== 'overwrite'}<button class="btn ghost" data-tip="Show the saved copies in your file manager." onclick={showInFolder}><Icon name="folder" size={14} /> Show copies</button>{/if}
@@ -1078,6 +1164,7 @@
   .note.warn { color: var(--warn-fg); background: var(--warn-bg); }
   .col { display: flex; flex-direction: column; gap: 5px; align-items: flex-start; min-width: 0; }
   .lead { margin: 0; color: var(--fg-2); line-height: 1.5; }
+  .lead.progress { font-variant-numeric: tabular-nums; min-height: 1.5em; }
   .lines { padding-left: 18px; }
   .lines li + li { margin-top: 2px; }
   .stats { gap: 18px; flex-wrap: wrap; }
@@ -1109,4 +1196,7 @@
   @media (prefers-reduced-motion: reduce) {
     .bar div, .num { transition: none; }
   }
+  .mono { font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px; }
+  .bk.nobackup, .nobk { color: var(--danger); font-weight: 600; }
+  .nobk { gap: 5px; }
 </style>

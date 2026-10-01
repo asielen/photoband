@@ -155,6 +155,8 @@ class AppStore {
   view = $state<'editor' | 'batch'>('editor')
   overwriteConfirmed = false
   saving = $state(false)
+  /** which kind of save is running, for the toolbar's spinner */
+  savingMode = $state<'copy' | 'overwrite' | null>(null)
   showFaces = $state(false)
   showOriginal = $state(false)
   incompleteBatches = $state<any[]>([])
@@ -737,7 +739,7 @@ class AppStore {
     if (s.draft.templateId !== id) return
     this.commit(s)
     this.saveSettings({ session: { lastTemplate: id } }).catch(() => {})
-    if (hadCustom) this.toast('info', 'Edited blocks kept their text.', { label: 'Reset them to the template', run: () => this.resetAllBlocks(s) }, 9000)
+    if (hadCustom) this.toast('info', 'Caption lines you edited kept their text.', { label: 'Reset them to the template', run: () => this.resetAllBlocks(s) }, 9000)
   }
 
   resetAllBlocks(s: PhotoSession) {
@@ -1026,7 +1028,7 @@ class AppStore {
     if (!s?.meta || !s.layout) return 'Nothing to save yet.'
     const info = s.meta.info
     if (info.save_blocked) return info.save_blocked
-    if (info.pages > 1 && !this.settings.saving.allowMultipageSave) return 'Multi-page TIFF saving is blocked.'
+    if (info.pages > 1 && !this.settings.saving.allowMultipageSave) return 'This is a multi-page TIFF, and saving keeps only the first page. Allow it in Settings › Saving › Advanced.'
     return this.geometryProblem(s)
   }
 
@@ -1068,6 +1070,7 @@ class AppStore {
     }
     if (this.saving) return null
     this.saving = true
+    this.savingMode = mode === 'overwrite' ? 'overwrite' : 'copy'
     // a pending autosave of the state being saved would only re-create the draft afterwards
     clearTimeout(s.draftTimer)
     try {
@@ -1137,6 +1140,7 @@ class AppStore {
       return null
     } finally {
       this.saving = false
+      this.savingMode = null
     }
   }
 

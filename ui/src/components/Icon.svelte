@@ -43,6 +43,8 @@
     play: 'M6 4l14 8-14 8z',
     stop: 'M6 6h12v12H6z',
     lock: 'M5 11h14v10H5zM8 11V7a4 4 0 0 1 8 0v4',
+    shield: 'M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6z',
+    shieldcheck: 'M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6zM9 12l2 2 4-4',
     unlock: 'M5 11h14v10H5zM8 11V7a4 4 0 0 1 7.5-2',
     font: 'M4 20L10 4h4l6 16M7 14h10',
     columns: 'M3 3h18v18H3zM12 3v18',

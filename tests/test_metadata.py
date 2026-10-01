@@ -62,8 +62,61 @@ def test_zero_exif_date_falls_through_to_iptc(et, mkjpg):
 
 
 def test_blank_exif_date_falls_through():
-    md = {"ExifIFD:DateTimeOriginal": "    :  :     :  :  ", "XMP-xmp:CreateDate": "1952:06"}
+    md = {"ExifIFD:DateTimeOriginal": "    :  :     :  :  ", "IPTC:DateCreated": "1952:06"}
     assert normalize(md, info(10, 10))["fields"]["date"] == "1952:06"
+
+
+@pytest.mark.parametrize("fuzzy", ["1950s", "circa 1950", "1950-1955", "Summer 1962", "03/04/1962"])
+def test_fuzzy_date_is_not_replaced_by_a_lower_source(fuzzy):
+    # a scanner's EXIF date is the scan date: it must not stand in for a decade or range
+    md = {"XMP-photoshop:DateCreated": fuzzy, "ExifIFD:DateTimeOriginal": "2023:05:01 12:00:00"}
+    f = normalize(md, info(10, 10))["fields"]
+    assert f["date"] == fuzzy
+    # printed as written: an approximate date is never shown as an exact one, nor dropped
+    assert resolve("{date}", f, T).text == fuzzy
+    assert resolve("{date:mmmm d, yyyy}", f, T).text == fuzzy
+
+
+@pytest.mark.parametrize("human,iso", [("June 14, 1952", "1952-06-14"), ("14 June 1952", "1952-06-14"),
+                                       ("06/14/1952", "1952-06-14"), ("Sept. 1952", "1952-09")])
+def test_human_written_date_is_used_as_an_exact_date(human, iso):
+    md = {"XMP-photoshop:DateCreated": human, "ExifIFD:DateTimeOriginal": "2023:05:01 12:00:00"}
+    f = normalize(md, info(10, 10))["fields"]
+    assert f["date"] == human
+    assert resolve("{date:iso}", f, T).text == iso
+
+
+@pytest.mark.parametrize("tag", ["XMP-xmp:CreateDate", "ExifIFD:CreateDate", "XMP-exif:DateTimeDigitized",
+                                 "IPTC:DigitalCreationDate"])
+def test_scan_date_is_its_own_field_never_the_photo_date(tag):
+    md = {tag: "2023:05:01 12:00:00"}
+    n = normalize(md, info(10, 10))
+    f = n["fields"]
+    assert f["date"] is None
+    assert f["digitized"] == "2023:05:01 12:00:00"
+    assert n["sources"]["digitized"] == tag
+    assert "date" not in n["sources"]
+    assert resolve("[Taken {date:yyyy}]", f, T).text == ""
+    assert resolve("Scanned {digitized:yyyy-mm-dd}", f, T).text == "Scanned 2023-05-01"
+
+
+def test_photo_date_and_scan_date_side_by_side():
+    md = {"ExifIFD:DateTimeOriginal": "1952:06:14 00:00:00", "ExifIFD:CreateDate": "2023:05:01 12:00:00",
+          "XMP-xmp:CreateDate": "2023:05:01 12:00:00"}
+    f = normalize(md, info(10, 10))["fields"]
+    assert resolve("{date:yyyy} (scanned {digitized:yyyy})", f, T).text == "1952 (scanned 2023)"
+
+
+def test_xmp_exif_original_date_is_a_photo_date():
+    md = {"XMP-exif:DateTimeOriginal": "1952-06-14T10:00:00", "XMP-xmp:CreateDate": "2023-05-01"}
+    f = normalize(md, info(10, 10))["fields"]
+    assert resolve("{date:iso}", f, T).text == "1952-06-14"
+
+
+def test_scan_date_read_from_a_real_file(et, mkjpg):
+    p = mkjpg("scan.jpg", "-ExifIFD:CreateDate=2023:05:01 12:00:00", "-XMP-photoshop:DateCreated=1952")
+    f = fields_of(et, p)
+    assert resolve("{date} / {digitized:yyyy-mm-dd}", f, T).text == "1952 / 2023-05-01"
 
 
 def test_title_numeric_string_preserved(et, mkjpg):

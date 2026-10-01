@@ -162,9 +162,14 @@ def test_launcher_survives_missing_std_streams(tmp_path):
     busy.bind(("127.0.0.1", 0))
     busy.listen(1)
     port = busy.getsockname()[1]
+    shown = tmp_path / "shown.txt"
+    # the start failure is reported in a native message box (Windows: MessageBoxW, macOS: an
+    # osascript alert), which would wait for a click forever: record it instead
     code = ("import sys; sys.stdout = None; sys.stderr = None;"
             f"sys.argv = ['Photoband', 'serve', '--no-browser', '--port', '{port}'];"
-            "sys.path.insert(0, 'packaging'); import launcher; raise SystemExit(launcher.run())")
+            "sys.path.insert(0, 'packaging'); import launcher;"
+            f"launcher._show_error = lambda title, text: open({str(shown)!r}, 'a').write(title + '\\n');"
+            "raise SystemExit(launcher.run())")
     try:
         r = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True,
                            timeout=120)
@@ -176,6 +181,7 @@ def test_launcher_survives_missing_std_streams(tmp_path):
     console = (tmp_path / "logs" / "console.log").read_text()
     assert "could not listen" in console.lower()
     assert "starting" in (tmp_path / "logs" / "photoband.log").read_text()
+    assert shown.read_text() == "Photoband could not start\n"   # no console: the error is shown
 
 
 def test_uvicorn_config_needs_no_tty(monkeypatch):

@@ -4,6 +4,13 @@ A date is a ``PartialDate`` with a required year and optional month and day.
 Formatting drops missing parts together with an adjacent separator, so
 ``d mmmm yyyy`` on 1952-06 gives ``June 1952`` and ``yyyy-mm-dd`` on 1952
 gives ``1952``.
+
+``parse_date`` reads exact dates only: ExifTool's forms, ISO, English month
+names ("June 14, 1952", "14 Jun 1952") and numeric dates whose day/month order
+is certain ("06/14/1952", "14.06.1952"). A day/month order that could go either
+way ("03/04/1962") is never guessed. ``render_date`` prints anything else that
+names a year ("1950s", "circa 1950", "Summer 1962", "03/04/1962") as written,
+so an approximate date is neither dropped nor shown as an exact one.
 """
 from __future__ import annotations
 
@@ -42,16 +49,38 @@ class PartialDate:
 
 
 _DATE_RE = re.compile(
-    r"^\s*(?P<y>\d{4})(?!\d)(?:[-:/.](?P<m>\d{1,2})(?!\d)(?:[-:/.](?P<d>\d{1,2})(?!\d))?)?"
+    r"^\s*(?P<y>\d{4})(?!\d)(?:(?P<sep>[-:/.])(?P<m>\d{1,2})(?!\d)(?:(?P=sep)(?P<d>\d{1,2})(?!\d))?)?"
 )
 # Compact YYYYMMDD (optionally followed by a time, e.g. 19520614T100000).
 _COMPACT_RE = re.compile(r"^\s*(?P<y>\d{4})(?P<m>\d{2})(?P<d>\d{2})(?!\d)")
+# What may follow the date: nothing (or EXIF's blank "  :  :  " parts) or a time. Anything
+# else ("1950s", "1950-1955", "1952?") is a decade, range or guess, not this exact date.
+_TAIL_RE = re.compile(r"[\s:]*$|\s+\d{1,2}:\d{2}|T\d{1,2}:?\d{2}")
+
+
+_MONTH_WORDS = {**{n.lower(): i + 1 for i, n in enumerate(MONTHS)},
+                **{n[:3].lower(): i + 1 for i, n in enumerate(MONTHS)}, "sept": 9}
+_WEEKDAY = r"(?:(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:day)?\.?,?\s+)?"
+_ORD = r"(?:st|nd|rd|th)?"
+# English month names: "June 14, 1952", "14 June 1952", "14th of June, 1952", "14-Jun-1952", "June 1952"
+_HUMAN_RES = [re.compile(p, re.IGNORECASE) for p in (
+    rf"^\s*{_WEEKDAY}(?P<mon>[a-z]+)\.?\s+(?P<d>\d{{1,2}}){_ORD},?\s+(?P<y>\d{{4}})(?!\d)",
+    rf"^\s*{_WEEKDAY}(?P<d>\d{{1,2}}){_ORD}(?:\s+of)?[\s-]+(?P<mon>[a-z]+)\.?,?[\s-]+(?P<y>\d{{4}})(?!\d)",
+    r"^\s*(?P<mon>[a-z]+)\.?,?\s+(?P<y>\d{4})(?!\d)",
+)]
+# Day and month in either order before a four-digit year: "06/14/1952", "14.06.1952", "06/1952"
+_NUMERIC_DMY_RE = re.compile(r"^\s*(?P<a>\d{1,2})(?P<sep>[-/.])(?P<b>\d{1,2})(?P=sep)(?P<y>\d{4})(?!\d)")
+_NUMERIC_MY_RE = re.compile(r"^\s*(?P<m>\d{1,2})[-/.](?P<y>\d{4})(?!\d)")
 
 
 def parse_date(value) -> Optional[PartialDate]:
-    """Parse ExifTool-style dates: ``1952``, ``1952-06``, ``1952:06:05 12:00:00``,
-    ``1952-06-05T10:00:00+02:00``, ``19520605``. Zero months/days (``1952:00:00``)
-    count as missing; a zero or unreadable year gives None."""
+    """Parse an exact date: ExifTool-style ``1952``, ``1952-06``, ``1952:06:05 12:00:00``,
+    ``1952-06-05T10:00:00+02:00``, ``19520605``; English month names (``June 14, 1952``,
+    ``14 Jun 1952``, ``June 1952``); and numeric dates whose order is certain
+    (``06/14/1952``, ``14.06.1952``, ``05/05/1962``, ``06/1952``). Zero months/days
+    (``1952:00:00``) count as missing; a zero or unreadable year, a decade or range
+    (``1950s``, ``1950-1955``), an approximate date (``circa 1950``) or a day/month
+    order that could go either way (``03/04/1962``) gives None."""
     if value is None:
         return None
     if isinstance(value, PartialDate):
@@ -63,6 +92,8 @@ def parse_date(value) -> Optional[PartialDate]:
     s = str(value)
     m = _COMPACT_RE.match(s) or _DATE_RE.match(s)
     if not m:
+        return _parse_human(s)
+    if not _TAIL_RE.match(s, m.end()):
         return None
     y = int(m.group("y"))
     if y <= 0:
@@ -78,6 +109,87 @@ def parse_date(value) -> Optional[PartialDate]:
     except ValueError:
         return PartialDate(y, mo)
     return PartialDate(y, mo, d)
+
+
+def _parse_human(s: str) -> Optional[PartialDate]:
+    """Dates as people write them, when they can be read only one way; else None."""
+    for rx in _HUMAN_RES:
+        m = rx.match(s)
+        if m and m.group("mon").lower() in _MONTH_WORDS:
+            return _exact(s, m, int(m.group("y")), _MONTH_WORDS[m.group("mon").lower()],
+                          int(m.group("d")) if "d" in m.groupdict() and m.group("d") else None)
+    m = _NUMERIC_DMY_RE.match(s)
+    if m:
+        a, b = int(m.group("a")), int(m.group("b"))
+        if a > 12 >= b:
+            mo, d = b, a
+        elif b > 12 >= a or a == b:
+            mo, d = a, b
+        else:
+            return None  # 03/04/1962: March 4 or 3 April - never guessed
+        return _exact(s, m, int(m.group("y")), mo, d)
+    m = _NUMERIC_MY_RE.match(s)
+    if m:
+        return _exact(s, m, int(m.group("y")), int(m.group("m")), None)
+    return None
+
+
+def _exact(s: str, m, y: int, mo: int, d: Optional[int]) -> Optional[PartialDate]:
+    """The date a human-format match names, or None when anything else follows it or it
+    does not exist (``June 31, 1952``): a typed date is taken whole or not at all."""
+    if not _TAIL_RE.match(s, m.end()) or y <= 0:
+        return None
+    try:
+        _dt.date(y, mo, d or 1)
+    except ValueError:
+        return None
+    return PartialDate(y, mo, d)
+
+
+# A year that is certain although the date is not exact: a day/month order that could go
+# either way ("03/04/1962"), or a season or part of the year ("Summer 1962", "early 1962").
+_YEAR_OF_AMBIGUOUS_RE = re.compile(r"^\s*(?P<a>\d{1,2})(?P<sep>[-/.])(?P<b>\d{1,2})(?P=sep)(?P<y>\d{4})\s*$")
+_YEAR_OF_PART_RE = re.compile(
+    r"^\s*(?:(?:early|mid|late|spring|summer|autumn|fall|winter|" + "|".join(_MONTH_WORDS) +
+    r")\.?[\s,-]+)+(?:of\s+)?(?P<y>\d{4})\s*$", re.IGNORECASE)
+
+
+def _certain_year(s: str) -> Optional[int]:
+    m = _YEAR_OF_AMBIGUOUS_RE.match(s)
+    if m and 1 <= int(m.group("a")) <= 12 and 1 <= int(m.group("b")) <= 12:
+        return int(m.group("y")) or None
+    m = _YEAR_OF_PART_RE.match(s)
+    return (int(m.group("y")) or None) if m else None
+
+
+def approximate_text(value) -> str:
+    """A date value that is no exact date, as it should be printed: its own text with
+    whitespace collapsed, or "" when it names no date at all ("unknown", "0000:00:00")."""
+    if value is None or isinstance(value, (PartialDate, _dt.date)) or parse_date(value) is not None:
+        return ""
+    s = " ".join(str(value).split())
+    return s if re.search(r"[1-9]", s) else ""
+
+
+def render_date(value, fmt: Optional[str] = None) -> str:
+    """A date value as a caption prints it. Exact dates use ``fmt``; an approximate one is
+    printed as written ("circa 1950" stays "circa 1950"), except that a format of only
+    year fields uses the year when that is certain ("Summer 1962" with ``yyyy`` -> 1962)."""
+    d = parse_date(value)
+    if d is not None:
+        return format_date(d, fmt)
+    s = approximate_text(value)
+    if not s:
+        return ""
+    y = _certain_year(s)
+    if y is not None and fmt and fmt not in ("auto", "iso") and _year_only(fmt):
+        return format_date(PartialDate(y), fmt)
+    return s
+
+
+def _year_only(fmt: str) -> bool:
+    fields = [v for k, v in _tokenize(fmt) if k == "field"]
+    return bool(fields) and all(_FIELD_PART[f] == "y" for f in fields)
 
 
 def _tokenize(fmt: str):

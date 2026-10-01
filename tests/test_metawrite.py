@@ -546,3 +546,49 @@ def test_jpeg_extended_xmp_survives(tmp_path):
     assert len(md["XMP-dc:Description"]) == 100000
     assert md.get("XMP-acme:SecretSauce") == "custom-ns-value"
     assert record.from_metadata(md)
+
+
+@pytest.mark.parametrize("src_ext,fmt", [("jpg", "JPEG"), ("tif", "TIFF"), ("jpg", "PNG"), ("tif", "JPEG")])
+def test_partial_exif_dates_survive_the_copy(tmp_path, src_ext, fmt):
+    # Partial dates of old scans are often stored with zero month/day ("1952:06:00 00:00:00").
+    # ExifTool's default (print-converted) copy rejects them as invalid and drops them silently.
+    from photoband.metadata import normalize
+    from photoband.imageio import probe
+    p = mkimg(str(tmp_path / f"d.{src_ext}"))
+    cli("-overwrite_original", "-ExifIFD:DateTimeOriginal#=1952:06:00 00:00:00",
+        "-ExifIFD:CreateDate#=1952:00:00 00:00:00", "-IFD0:ModifyDate#=    :  :     :  :  ", p)
+    res, _ = do_save(p, fmt)
+    md = md_of(res.out_path)
+    assert md.get("ExifIFD:DateTimeOriginal") == "1952:06:00 00:00:00"
+    assert md.get("ExifIFD:CreateDate") == "1952:00:00 00:00:00"
+    assert md.get("IFD0:ModifyDate") == "    :  :     :  :  "
+    f = normalize(md, probe(res.out_path))["fields"]
+    assert f["date"] == "1952:06:00 00:00:00"
+    assert f["digitized"] == "1952:00:00 00:00:00"
+
+
+_FUZZY_XMP = """<?xpacket begin='' id='W5M0MpCehiHzreSzNTczkc9d'?>
+<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
+ <rdf:Description rdf:about='' xmlns:photoshop='http://ns.adobe.com/photoshop/1.0/'
+  photoshop:DateCreated='circa 1950'/>
+</rdf:RDF></x:xmpmeta>
+<?xpacket end='w'?>"""
+
+
+@pytest.mark.parametrize("src_ext,fmt", [("jpg", "JPEG"), ("tif", "TIFF")])
+def test_approximate_date_is_never_written_as_an_exact_one(tmp_path, src_ext, fmt):
+    # "circa 1950" prints as written; the save must not turn it into an EXIF date of its own
+    from photoband.metadata import normalize
+    from photoband.imageio import probe
+    p = mkimg(str(tmp_path / f"c.{src_ext}"))
+    x = tmp_path / "c.xmp"
+    x.write_text(_FUZZY_XMP)
+    cli("-overwrite_original", f"-xmp<={x}", "-ExifIFD:CreateDate=2023:05:01 12:00:00", p)
+    assert md_of(p).get("XMP-photoshop:DateCreated") == "circa 1950"
+    res, _ = do_save(p, fmt)
+    md = md_of(res.out_path)
+    assert md.get("XMP-photoshop:DateCreated") == "circa 1950"
+    assert not any(k.endswith(":DateTimeOriginal") or k == "IPTC:DateCreated" for k in md)
+    assert md.get("ExifIFD:CreateDate") == "2023:05:01 12:00:00"
+    f = normalize(md, probe(res.out_path))["fields"]
+    assert (f["date"], f["digitized"]) == ("circa 1950", "2023:05:01 12:00:00")

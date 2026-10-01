@@ -6,6 +6,8 @@ All fixtures are synthetic with exact ground truth.
 """
 from __future__ import annotations
 
+import os
+
 import cv2
 import numpy as np
 import pytest
@@ -202,6 +204,41 @@ def test_apostrophes_and_dots_stay_in_their_line():
         res = analyze(img)
         got = res["text"].split("\n")
         assert len(got) == 2 and "|" not in res["text"], got
+
+
+FONTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fonts")
+BUNDLED = {"inter": os.path.join(FONTS, "inter", "Inter[opsz,wght].ttf"),
+           "source-sans-3": os.path.join(FONTS, "source-sans-3", "SourceSans3[wght].ttf"),
+           "noto-sans": os.path.join(FONTS, "noto-sans", "NotoSans[wdth,wght].ttf")}
+
+
+@pytest.mark.parametrize("px", [36, 52])
+@pytest.mark.parametrize("font", sorted(BUNDLED))
+def test_comma_tail_stays_in_line_without_descenders(font, px):
+    # the first line has no g/j/p/q/y, so the comma tail is its lowest ink; in
+    # Inter / Source Sans (and Arial, Calibri ...) it used to split off as a line
+    photo = make_photo(1000, 900, seed=31)
+    text = ["Grandma's kitchen, Jim's 'n' Sue's", "iris & lilies, i.e. July"]
+    img, _ = framed(photo, (250, 250, 250), (40, 260, 40, 40), text, font_px=px,
+                    text_color=(20, 20, 20), font_path=BUNDLED[font])
+    band = detect.detect_band(img)
+    lines = lines_of(detect.find_text(img, band))
+    assert len(lines) == 2, [ln.box for ln in lines]
+    ex = analyze(img, run_ocr=False)
+    assert sum(len(b["lines"]) for b in ex["blocks"]) == 2, ex["blocks"]
+
+
+@pytest.mark.parametrize("second,px2", [("1952", 52), ("1952", 24), ("photo by Ed", 22)])
+def test_short_second_line_stays_separate(second, px2):
+    photo = make_photo(1000, 900, seed=33)
+    img, _ = framed(photo, (250, 250, 250), (40, 260, 40, 40), [], font_px=52)
+    W = img.shape[1]
+    draw_lines(img, (0, 940, W, 150), ["Grandma's kitchen"], 52, (20, 20, 20), font_path=BUNDLED["inter"])
+    draw_lines(img, (0, 1080, W, 80), [second], px2, (20, 20, 20), font_path=BUNDLED["inter"])
+    band = detect.detect_band(img)
+    lines = sorted(lines_of(detect.find_text(img, band)), key=lambda ln: ln.box[1])
+    assert len(lines) == 2, [ln.box for ln in lines]
+    assert lines[0].box[3] <= 1.2 * 52 and lines[1].box[3] <= 1.2 * px2, [ln.box for ln in lines]
 
 
 def test_dust_does_not_stretch_lines():

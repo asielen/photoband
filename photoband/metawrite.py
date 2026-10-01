@@ -529,6 +529,7 @@ def _mime(fmt: str) -> str:
 
 
 _XMP_TOO_LARGE = "too large for JPEG segment"
+_EXIF_DATE_TAGS = ("DateTimeOriginal", "CreateDate", "ModifyDate")
 _OPEN_FAILED = ("Error opening file", "does not exist for -tagsFromFile")
 
 
@@ -672,6 +673,10 @@ def write_metadata(tmp: str, src: str, md: Dict, info: ImageInfo, out_fmt: str, 
     turned = int(info.orientation or 1) in (5, 6, 7, 8)
     if turned:
         p1 += ["--XResolution", "--YResolution"]
+    # EXIF dates are copied raw: the print-converted copy silently drops partial dates
+    # ("1952:06:00 00:00:00", a common way to store a month or year only) as invalid
+    p1 += [f"-{k}#<{k}#" for k in t if k.partition(":")[0] in ("IFD0", "ExifIFD")
+           and k.partition(":")[2] in _EXIF_DATE_TAGS]
 
     # pass 2: our values (-n: raw values, as read)
     p2 = ["-n", "-XMP-photoband:all=", f"-XMP-photoband:Version={__version__}",

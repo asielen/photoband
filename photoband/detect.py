@@ -1071,6 +1071,8 @@ def _group_lines(boxes: np.ndarray) -> List[List[int]]:
        around punctuation: "SUMMER 1978 - LAKE MERCED").
     3. A group nested in / mostly overlapping another merges into it
        (apostrophes, i-dots, accents grouped on their own).
+    3b. A tiny group just below / above a line, within its x-extent, joins it
+       (a comma tail under a line without descenders).
     4. Small components (dots, commas, hyphens, accents) attach only within the
        line's x-extent (+ a little for trailing punctuation) and close to it
        vertically, so dust specks do not stretch line boxes."""
@@ -1140,6 +1142,28 @@ def _group_lines(boxes: np.ndarray) -> List[List[int]]:
                     break
             if merged:
                 break
+
+    # a fragment split off a line: a comma tail hanging below a descender-free
+    # line, an accent / apostrophe just above.  Tiny relative to the line, within
+    # its x-extent, touching or nearly touching it; joins the nearest such line.
+    merged = True
+    while merged and len(lines) > 1:
+        merged = False
+        bb = np.array([gb(g)[:4] for g in lines])
+        gh, gw = bb[:, 3] - bb[:, 1], bb[:, 2] - bb[:, 0]
+        cx = (bb[:, 0] + bb[:, 2]) / 2
+        vgap = np.maximum(bb[:, None, 1], bb[None, :, 1]) - np.minimum(bb[:, None, 3], bb[None, :, 3])
+        frag = ((gh[:, None] <= 0.5 * gh[None]) & (gw[:, None] <= 0.8 * gh[None])
+                & (cx[:, None] >= bb[None, :, 0]) & (cx[:, None] <= bb[None, :, 2])
+                & (vgap <= 0.2 * gh[None]))
+        np.fill_diagonal(frag, False)
+        for s in np.flatnonzero(frag.any(axis=1)):
+            tgt = np.flatnonzero(frag[s])
+            b = int(tgt[np.argmin(vgap[s, tgt])])
+            lines[b] = lines[b] + lines[s]
+            del lines[s]
+            merged = True
+            break
 
     # attach small components (dots, commas, hyphens, accents); line extents come
     # from the primary members only, so attached specks cannot chain-grow a line

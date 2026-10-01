@@ -19,7 +19,7 @@ DEFAULTS: Dict[str, Any] = {
         "showTooltips": True,        # hover / keyboard-focus explanations on controls
     },
     "saving": {
-        "location": "subfolder",     # subfolder | fixed | same
+        "location": "same",          # same | subfolder | fixed
         "subfolderName": "captioned",
         "fixedFolder": "",
         "fileName": "{stem}-captioned",
@@ -28,7 +28,7 @@ DEFAULTS: Dict[str, Any] = {
         "jpegQuality": 95,
         "keepFileDates": False,
         "backupOriginals": True,
-        "backupFolder": "",          # empty = "_originals" subfolder next to the file
+        "backupFolder": "",          # empty = "_originals" subfolder next to the file, as <stem>-original<ext>
         "embedMarker": True,
         "allowMultipageSave": False,
         "allowOverwriteHandwritten": False,

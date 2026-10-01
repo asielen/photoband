@@ -17,7 +17,7 @@ from photoband import drafts
 from photoband import imageio as io_
 from photoband import save as savemod
 from photoband.imageio import load_upright, probe
-from photoband.save import SaveRequest, backup_path_for, save
+from photoband.save import SaveRequest, backup_path_for, save, save_preview
 from photoband.settings import load_settings
 from photoband.util import file_lock, place_exclusive, quick_hash, sweep_temp
 
@@ -47,6 +47,7 @@ def _retouch(path, value=0):
 
 def _save(path, mode="copy", patch=None, text="Ann, Bea and Carl", **kw):
     s = load_settings()
+    s["saving"]["location"] = "subfolder"   # these tests were written for copies in a "captioned" subfolder
     for k, v in (patch or {}).items():
         s["saving"][k] = v
     arr, info = load_upright(path)
@@ -74,7 +75,7 @@ def test_backup_not_reused_for_restored_and_retouched_original(tmp_path):
     retouched = _sha(p)
     r2 = _save(p, "overwrite")
     assert r2.ok, r2.error
-    assert r2.backup_path != base and r2.backup_path.endswith("scan-2.tif")
+    assert r2.backup_path != base and r2.backup_path.endswith("scan-original-2.tif")
     assert _sha(r2.backup_path) == retouched and _sha(base) == orig
 
 
@@ -106,7 +107,7 @@ def test_recaption_reuses_backup_and_identical_original_is_not_duplicated(tmp_pa
     shutil.copy2(r1.backup_path, p)
     r3 = _save(p, "overwrite")
     assert r3.ok and r3.backup_path == r1.backup_path
-    assert sorted(f for f in os.listdir(os.path.dirname(r1.backup_path)) if not f.startswith(".")) == ["scan.tif"]
+    assert sorted(f for f in os.listdir(os.path.dirname(r1.backup_path)) if not f.startswith(".")) == ["scan-original.tif"]
     assert _sha(r1.backup_path) == orig
 
 
@@ -130,11 +131,42 @@ def test_empty_backup_is_never_reused_or_replaced(tmp_path):
     p = _tif(str(tmp_path / "scan.tif"))
     orig = _sha(p)
     os.makedirs(tmp_path / "_originals")
-    (tmp_path / "_originals" / "scan.tif").write_bytes(b"")
+    (tmp_path / "_originals" / "scan-original.tif").write_bytes(b"")
     r = _save(p, "overwrite")
     assert r.ok, r.error
-    assert r.backup_path.endswith("scan-2.tif") and _sha(r.backup_path) == orig
-    assert os.path.getsize(tmp_path / "_originals" / "scan.tif") == 0
+    assert r.backup_path.endswith("scan-original-2.tif") and _sha(r.backup_path) == orig
+    assert os.path.getsize(tmp_path / "_originals" / "scan-original.tif") == 0
+
+
+def test_copy_goes_next_to_the_original_by_default(tmp_path):
+    p = _tif(str(tmp_path / "scan.tif"))
+    arr, _ = load_upright(p)
+    layout, tiles = make_band_layout(arr.shape[1], arr.shape[0])
+    r = save(SaveRequest(path=p, mode="copy", layout=layout, tiles=tiles, state={}, settings=load_settings()))
+    assert r.ok, r.error
+    assert r.out_path == os.path.join(str(tmp_path), "scan-captioned.tif")
+
+
+def test_backup_made_under_the_old_name_is_reused(tmp_path):
+    # backups used to keep the photo's own name (_originals/scan.tif): an identical one still counts
+    p = _tif(str(tmp_path / "scan.tif"))
+    os.makedirs(tmp_path / "_originals")
+    shutil.copy2(p, tmp_path / "_originals" / "scan.tif")
+    r = _save(p, "overwrite")
+    assert r.ok, r.error
+    assert r.backup_path == str(tmp_path / "_originals" / "scan.tif")
+    assert sorted(f for f in os.listdir(tmp_path / "_originals") if not f.startswith(".")) == ["scan.tif"]
+
+
+def test_save_preview_names_each_destination(tmp_path):
+    p = _tif(str(tmp_path / "scan.tif"))
+    s = load_settings()["saving"]
+    pv = save_preview(p, s, None, "")
+    assert pv["copy"] == os.path.join(str(tmp_path), "scan-captioned.tif") and not pv["copyExists"]
+    assert pv["backup"] == os.path.join(str(tmp_path), "_originals", "scan-original.tif") and not pv["backupExists"]
+    assert sorted(os.listdir(tmp_path)) == ["scan.tif"]   # nothing written
+    assert save_preview(p, dict(s, backupOriginals=False), None, "")["backup"] is None
+    assert save_preview(p, dict(s, onExists="increment"), None, "")["copy"].endswith("scan-captioned.tif")
 
 
 # ---------------------------------------------------------------- 2: copy over another original
@@ -423,12 +455,12 @@ def test_read_only_file_is_not_overwritten(tmp_path):
     assert _sha(p) == before and (os.stat(p).st_mode & 0o777) == 0o444
 
 
-def test_overwrite_through_symlink_replaces_the_target(tmp_path):
+def test_overwrite_through_symlink_replaces_the_target(tmp_path, symlink):
     p = _tif(str(tmp_path / "real" / "scan.tif"))
     before = _sha(p)
     os.makedirs(tmp_path / "links")
     ln = str(tmp_path / "links" / "photo.tif")
-    os.symlink(p, ln)
+    symlink(p, ln)
     r = _save(ln, "overwrite")
     assert r.ok, r.error
     assert os.path.islink(ln) and os.path.realpath(ln) == os.path.realpath(p)
@@ -451,10 +483,10 @@ def test_overwrite_keeps_xattrs_and_notes_hardlinks(tmp_path):
     assert any("hard-linked" in n for n in r.notes)
 
 
-def test_fixed_backup_folder_key_follows_links(tmp_path):
+def test_fixed_backup_folder_key_follows_links(tmp_path, symlink):
     p = _tif(str(tmp_path / "real" / "scan.tif"))
     ln = str(tmp_path / "link.tif")
-    os.symlink(p, ln)
+    symlink(p, ln)
     s = {"backupFolder": str(tmp_path / "B")}
     assert backup_path_for(ln, s) == backup_path_for(p, s)
 
@@ -470,14 +502,23 @@ def test_exclusive_placement_never_replaces(tmp_path):
     assert b.read_bytes() == b"old" and a.exists()
 
 
-def test_content_change_with_same_size_and_mtime_is_detected(tmp_path):
+def test_changed_mtime_is_checked_by_content(tmp_path):
+    # only the modified time moved (sync, backup, antivirus): same content, the save goes ahead
     p = _tif(str(tmp_path / "scan.tif"))
     st = os.stat(p)
     qh = quick_hash(p)
-    _retouch(p, 3)
-    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
-    assert os.path.getsize(p) == st.st_size
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
     r = _save(p, "overwrite", expected_stat=(st.st_size, st.st_mtime_ns, qh))
+    assert r.ok, r.error
+    # the content changed too: refused
+    q = _tif(str(tmp_path / "scan2.tif"))
+    st = os.stat(q)
+    qh = quick_hash(q)
+    _retouch(q, 3)
+    os.utime(q, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    assert os.path.getsize(q) == st.st_size
+    r = _save(q, "overwrite", expected_stat=(st.st_size, st.st_mtime_ns, qh))
     assert not r.ok and r.code == "changed"
-    r = _save(p, "overwrite", expected_stat=(st.st_size, st.st_mtime_ns), expected_hash=qh)
+    # a changed modified time with no fingerprint to compare against: refused
+    r = _save(q, "overwrite", expected_stat=(st.st_size, st.st_mtime_ns))
     assert not r.ok and r.code == "changed"

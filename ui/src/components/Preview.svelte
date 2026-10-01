@@ -848,7 +848,7 @@
     <span class="zoom" aria-live="polite" data-tip="Current zoom. 100% shows the saved file pixel for pixel." data-tip-side="top"><span class="zl">{'Zoom '}</span>{zoomText}</span>
     <button class="btn sm ghost icon" aria-label="Zoom in" data-tip="Zoom in. Or scroll over the photo." data-tip-side="top" onclick={() => setZoom(zoom * 1.25)}><Icon name="zoomin" size={14} /></button>
     <span class="sep"></span>
-    <div class="seg" role="group" aria-label="Pane layout (Y switches)">
+    <div class="seg" role="group" aria-label="Pane layout">
       <button class="btn sm ghost" class:on={effArrange === 'side'} aria-pressed={effArrange === 'side'} aria-label="Side by side" data-tip="Before and after side by side" data-tip-key="Y" data-tip-side="top" onclick={() => setArrange('side')}><Icon name="split" size={13} /><span class="lbl">Side by side</span></button>
       <button class="btn sm ghost" class:on={effArrange === 'stacked'} aria-pressed={effArrange === 'stacked'} aria-label="Stacked" data-tip="Before above after" data-tip-key="Y" data-tip-side="top" onclick={() => setArrange('stacked')}><Icon name="stack" size={13} /><span class="lbl">Stacked</span></button>
     </div>

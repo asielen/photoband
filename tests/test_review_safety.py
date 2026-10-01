@@ -52,6 +52,7 @@ def _copy(fixtures_dir, name, dst):
 
 def _save(path, mode="copy", saving=None, text="Ann, Bea and Carl", layout=None, **kw):
     s = load_settings()
+    s["saving"]["location"] = "subfolder"   # these tests were written for copies in a "captioned" subfolder
     s["saving"].update(saving or {})
     arr, info = load_upright(path)
     tiles = []
@@ -92,7 +93,7 @@ def test_batch_stage_refuses_client_destinations(client, tmp_path, fixtures_dir)
     r = client.post(f"/api/batch/{bid}/stage", data=data, files=files)
     assert r.status_code == 200, r.text
     dest = r.json()["dest"]
-    assert os.path.dirname(dest) == str(allowed / "captioned")
+    assert os.path.dirname(dest) == str(allowed)   # copies go next to the original by default
     job = json.load(open(os.path.join(batchmod.get_batch(bid).dir, "00000", "job.json")))
     assert job["dest_path"] == dest and job.get("on_exists") is None
     assert not security.is_allowed(str(victim))
@@ -212,7 +213,7 @@ def test_bad_settings_file_is_ignored_value_by_value():
     assert _window_size({"session": {"window": {"w": "x", "h": 700}}}) == (1440, 700)
     with open(p, "w") as fh:
         fh.write("[]")
-    assert load_settings()["saving"]["location"] == "subfolder"
+    assert load_settings()["saving"]["location"] == "same"
     # internal callers are validated too
     save_settings({"session": {"window": 5}})
     assert load_settings()["session"]["window"] == {"w": 1440, "h": 900}
@@ -339,7 +340,7 @@ def test_newer_draft_survives_an_overwrite(client, tmp_path, fixtures_dir):
     assert drafts.load_draft_any(p) is None
 
 
-def test_drafts_are_keyed_canonically_and_old_keys_migrate(tmp_path):
+def test_drafts_are_keyed_canonically_and_old_keys_migrate(tmp_path, symlink):
     import hashlib as _h
     import unicodedata
     from photoband import paths
@@ -350,7 +351,7 @@ def test_drafts_are_keyed_canonically_and_old_keys_migrate(tmp_path):
     f = d / name
     f.write_bytes(b"x" * 100)
     link = tmp_path / "link"
-    os.symlink(d, link)
+    symlink(d, link, target_is_directory=True)
     drafts.save_draft(str(link / name), {"v": 1})
     assert drafts.load_draft(str(f)) == {"v": 1}
     drafts.delete_draft(str(f))
@@ -488,12 +489,19 @@ def test_launch_url_carries_a_one_time_nonce_not_the_token():
 # ------------------------------------------------------------------ 14. in-app browser scope
 
 def test_fs_list_is_limited_to_home_drives_and_temp(client, tmp_path, monkeypatch):
-    assert client.get("/api/fs/list", params={"dir": "/etc"}).status_code == 403
-    assert client.get("/api/fs/list", params={"dir": "/"}).status_code == 403
+    if os.name == "nt":
+        # "/" is the current drive's root there, and drives are browsable by design; the
+        # system folders on them are not
+        assert client.get("/api/fs/list", params={"dir": os.environ.get("SystemRoot", "C:\\Windows")}
+                          ).status_code == 403
+    else:
+        assert client.get("/api/fs/list", params={"dir": "/etc"}).status_code == 403
+        assert client.get("/api/fs/list", params={"dir": "/"}).status_code == 403
     assert client.get("/api/fs/list", params={"dir": str(tmp_path)}).status_code == 200
     home = tmp_path / "home"
     (home / ".ssh").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))   # what expanduser("~") reads on Windows
     j = client.get("/api/fs/list").json()
     assert j["dir"] == os.path.realpath(str(home))
     assert "/" not in j["roots"]
@@ -533,3 +541,50 @@ def test_user_errors_are_400_and_unexpected_value_errors_are_logged(client, capl
     except ValueError as e:
         assert isinstance(e, security.UserError)
         assert server._expected_value_error(e)
+
+
+# ------------------------------------------------------------------ upload sizes
+
+def _png(w, h):
+    import io as _io
+    from PIL import Image
+    b = _io.BytesIO()
+    Image.new("RGBA", (w, h)).save(b, "PNG")
+    return b.getvalue()
+
+
+def test_oversized_text_tile_is_refused_before_decoding(client, tmp_path, fixtures_dir):
+    src = _copy(fixtures_dir, "13_date_stamp.jpg", str(tmp_path / "a" / "photo.jpg"))
+    security.allow_root(str(tmp_path / "a"))
+    data, _ = _form(src, "copy")
+    r = client.post("/api/save", data=data, files={"t0": ("t0.png", _png(4097, 1), "image/png")})
+    assert r.status_code == 400 and "4096" in r.text
+    assert sorted(os.listdir(tmp_path / "a")) == ["photo.jpg"]   # nothing written
+    r = client.post("/api/save", data=data, files={"t0": ("t0.png", b"not a png", "image/png")})
+    assert r.status_code == 400
+
+
+def test_oversized_brush_mask_is_refused():
+    import base64
+    from photoband.existing import MASK_MAX, decode_mask_png
+    ok = decode_mask_png(base64.b64encode(_png(64, 32)).decode())
+    assert ok is not None and ok.shape == (32, 64)
+    with pytest.raises(ValueError):
+        decode_mask_png(base64.b64encode(_png(MASK_MAX + 1, 1)).decode())
+
+
+# ------------------------------------------------------------------ temp files of running saves
+
+def test_sweep_keeps_temp_files_of_a_running_save(tmp_path):
+    from photoband.util import sweep_temp, temp_prefix
+    old = time.time() - 3600
+    live = tmp_path / f"{temp_prefix('.pbtmp-')}abc.tif"          # this process: still saving
+    dead = tmp_path / ".pbtmp-p999999-abc.tif"                    # no such process
+    legacy = tmp_path / ".pbtmp-xyz.tif"                          # made before owners were named
+    for f in (live, dead, legacy):
+        f.write_bytes(b"x")
+        os.utime(f, (old, old))
+    removed = sweep_temp([str(tmp_path)])
+    assert live.exists()
+    assert not dead.exists() and not legacy.exists()
+    assert sorted(removed) == sorted([str(dead), str(legacy)])

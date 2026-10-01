@@ -10,6 +10,7 @@ import glob
 import os
 import re
 import subprocess
+import sys
 import time
 
 import cv2
@@ -556,7 +557,9 @@ def test_analyze_3000px():
     # detection + OCR time on an unmarked photo), which the old test-only copy skipped
     assert dt < 9.0, dt
     assert res["band"]["found"] and res["band"]["photo_rect"] == list(truth)
-    assert res["case"] == "B" and res["engine"] == "tesseract"
+    # the engine that read it is the first available one: tesseract only where no OS engine
+    # (Apple Vision, Windows.Media.Ocr) is present
+    assert res["case"] == "B" and res["engine"] == (ocr.engines() or [None])[0]
     assert_words_read(POLA_TEXT, res["text"].replace("\n", " "))
     assert res["style"]["align"] == "center"
     assert res["textOverPhoto"] == []
@@ -572,3 +575,16 @@ def test_engines_and_empty_recognize():
     r = ocr.recognize(np.full((40, 200, 3), 255, np.uint8))
     assert set(r) >= {"text", "confidence", "words", "engine"}
     assert r["text"] == ""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows OCR is Windows only")
+def test_windows_ocr_reads_a_line():
+    # the binding changed between pywinrt versions (create_copy_with_alpha_from_buffer):
+    # call the engine directly, so a system Tesseract can't hide a broken Windows OCR
+    if not ocr._winocr_available():
+        pytest.skip("Windows OCR is not available here")
+    font = ImageFont.truetype(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fonts", "inter", "Inter[opsz,wght].ttf"), 40)
+    im = Image.new("RGB", (520, 80), "white")
+    ImageDraw.Draw(im).text((12, 14), "Lake Merced 1962", font=font, fill="black")
+    r = ocr._winocr_recognize(np.asarray(im))
+    assert "Merced" in r["text"] and "1962" in r["text"], r["text"]

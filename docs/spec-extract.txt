@@ -125,7 +125,9 @@ XMP-dc:Title  IPTC:ObjectName  XMP-photoshop:Headline  EXIF:XPTitle
 caption
 XMP-dc:Description  IPTC:Caption-Abstract  EXIF:ImageDescription  EXIF:XPComment
 date
-XMP-photoshop:DateCreated  EXIF:DateTimeOriginal  IPTC:DateCreated  XMP-xmp:CreateDate; partial dates (1952, 1952-06) are kept as partial
+XMP-photoshop:DateCreated  EXIF:DateTimeOriginal  IPTC:DateCreated  XMP-exif:DateTimeOriginal; when the photo was taken, never the scan date. Partial dates (1952, 1952-06) are kept as partial. Dates written by people are read when they can only mean one thing (June 14, 1952; 14 Jun 1952; 06/14/1952; 14.06.1952); a day/month order that could go either way (03/04/1962) is never guessed. A value that names a year but no exact date (1950s, circa 1950, Summer 1962, 03/04/1962) is kept as written and stops the search, so a lower source never stands in for it
+digitized
+EXIF:CreateDate  XMP-xmp:CreateDate  XMP-exif:DateTimeDigitized  IPTC:DigitalCreationDate; when the photo was scanned or the file was made (on a scan, the scan date)
 location
 XMP-iptcCore:Location, City, State, Country (each also its own token)
 keywords
@@ -160,8 +162,11 @@ Options and formats
 Field text
 case = upper, lower or title; max=N truncates with 
 {date}
-Photo date
-Formats yyyy yy mmmm mmm mm m dd d, or auto. Missing parts are dropped with their adjacent separators, so {date:d mmmm yyyy} on 1952-06 gives "June 1952"
+Photo date (when it was taken)
+Formats yyyy yy mmmm mmm mm m dd d, or auto. Missing parts are dropped with their adjacent separators, so {date:d mmmm yyyy} on 1952-06 gives "June 1952". An approximate date prints as written whatever the format ("circa 1950", "1950s", "03/04/1962"), except that a format of only year fields prints the year when that is certain ({date:yyyy} on "Summer 1962" or "03/04/1962" gives "1962")
+{digitized}
+Scan date (when the photo was scanned or the file was made)
+Same formats and rules as {date}
 {today}
 Current date
 Same formats as {date}

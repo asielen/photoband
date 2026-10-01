@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional
 
 from . import paths
 from .util import (LockBusy, PidLock, _pid_alive, atomic_write_bytes, atomic_write_json, canonical_path,
-                   file_identity, file_lock, fsync_dir, read_json, replace_with_retry, sweep_temp)
+                   file_identity, file_lock, fsync_dir, read_json, replace_with_retry, sweep_temp, temp_prefix)
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +35,8 @@ log = logging.getLogger(__name__)
 TERMINAL = {"done", "failed", "skipped", "changed", "excluded", "held", "blocked", "notPrepared"}
 # pre-flight statuses of photos that are not saved -> journal state
 _UNSAVED_STATE = {"skipped": "skipped", "blocked": "blocked", "error": "blocked", "excluded": "excluded",
-                  "flagged": "held", "held": "held", "pending": "notPrepared"}
+                  "flagged": "held", "held": "held", "pending": "notPrepared",
+                  "unchecked": "skipped"}
 
 
 class BatchBusy(Exception):
@@ -322,8 +323,12 @@ class Batch:
         job["tiles"] = tl
         atomic_write_json(os.path.join(jd, "job.json"), job)
         with self._lock:
-            self.data["entries"][str(index)] = {"index": index, "path": job["path"], "state": "staged",
-                                                "error": "", "out": "", "backup": "", "notes": [], "job": True}
+            # staged after Stop (it was being prepared then): kept, not run. Retry/resume runs it.
+            stopped = self._cancel.is_set()
+            self.data["entries"][str(index)] = {"index": index, "path": job["path"],
+                                                "state": "cancelled" if stopped else "staged",
+                                                "error": "Stopped before it was saved" if stopped else "",
+                                                "out": "", "backup": "", "notes": [], "job": True}
             self._write()
 
     def mark(self, index: int, state: str, **kw) -> None:
@@ -472,7 +477,26 @@ class Batch:
             self._release_run_lock()
 
     def cancel(self):
+        """Stop after the photos being saved now: no new photo starts, the ones in progress
+        finish (each is written to a temp file and put in place atomically, so none is left half
+        written) and queued ones become "cancelled" (Retry runs them). Photos staged after this
+        are kept as "cancelled" too. Not running here (stopped while photos were still being
+        prepared for a retry or resume): the queue is stopped right away."""
         self._cancel.set()
+        if self._thread and self._thread.is_alive():
+            return
+        if _lock_holder(os.path.join(self.dir, "run.lock")) not in (None, os.getpid()):
+            return  # running in another Photoband window: that one decides
+        with self._lock:
+            n = 0
+            for e in self.data.get("entries", {}).values():
+                if e.get("state") in ("staged", "retry"):
+                    e["state"] = "cancelled"
+                    e["error"] = "Stopped before it was saved"
+                    n += 1
+            if n or self.data.get("state") in ("running", "staging"):
+                self.data["state"] = "cancelled"
+            self._write()
 
     def _pending(self) -> List[int]:
         with self._lock:
@@ -542,6 +566,7 @@ class Batch:
                 for e in self.data["entries"].values():
                     if e["state"] in ("staged", "retry"):
                         e["state"] = "cancelled"
+                        e["error"] = "Stopped before it was saved"
                 self.data["state"] = "cancelled"
             else:
                 self.data["state"] = "finished"
@@ -563,6 +588,12 @@ class Batch:
             return
         if r.get("code") == "changed":
             self.mark(idx, "changed", error="Changed during batch")
+        elif r.get("code") == "exists":
+            # save() reports the conflicting path as the error (for the editor's "Replace?" dialog)
+            name = os.path.basename(str(r.get("error") or "")) or "The output file"
+            self.mark(idx, "failed", code="exists",
+                      error=f"{name} appeared after the batch was prepared and was not replaced. Rename or move "
+                            f"it, then use Retry.")
         else:
             self.mark(idx, "failed", error=r.get("error", "Unknown error"), code=r.get("code", ""))
 
@@ -687,6 +718,13 @@ class Batch:
                 if not bid or bid[0] == 0:
                     r.update(result="missing-backup", message="The backup file is missing or empty")
                     continue
+                # held from before the "edited since the batch" check until the file is put back:
+                # a save that finishes in between would otherwise be restored over unseen
+                try:
+                    lk = file_lock(target).acquire()
+                except LockBusy:
+                    r.update(result="error", message="This photo is being saved right now; try again when it finishes")
+                    continue
                 cur = file_identity(target) if os.path.exists(target) else None
                 if cur and cur[0] == bid[0] and cur[2] == bid[2]:
                     r.update(result="unchanged", message="Already the original")
@@ -703,12 +741,11 @@ class Batch:
                     r.update(result="skipped-edited", message="Edited since the batch; not restored")
                     self.mark(e["index"], e["state"], restoreResult="skipped-edited")
                     continue
-                lk = file_lock(target).acquire()
                 if edited:
                     stem, ext = os.path.splitext(os.path.basename(target))
                     r["aside"] = store_copy(target, os.path.join(os.path.dirname(b), f"{stem}-before-restore{ext}"))
                 d = os.path.dirname(target)
-                fd, tmp = tempfile.mkstemp(prefix=".pbrestore-", suffix=os.path.splitext(target)[1], dir=d)
+                fd, tmp = tempfile.mkstemp(prefix=temp_prefix(".pbrestore-"), suffix=os.path.splitext(target)[1], dir=d)
                 with os.fdopen(fd, "wb") as out, open(b, "rb") as inp:
                     shutil.copyfileobj(inp, out, 4 * 1024 * 1024)
                     out.flush()

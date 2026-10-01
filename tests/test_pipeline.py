@@ -8,7 +8,7 @@ import pytest
 import tifffile
 from PIL import Image
 
-from conftest import make_band_layout
+from conftest import make_band_layout, posix_permissions
 from photoband import photos
 from photoband.exiftool import get as et_get
 from photoband.existing import analyze_existing
@@ -19,6 +19,7 @@ from photoband.settings import load_settings
 
 def _save(path, mode="copy", layout=None, tiles=None, settings_patch=None, **kw):
     s = load_settings()
+    s["saving"]["location"] = "subfolder"   # these tests were written for copies in a "captioned" subfolder
     if settings_patch:
         for k, v in settings_patch.items():
             s["saving"][k] = v
@@ -280,12 +281,12 @@ def test_copy_as_refuses_to_replace_existing_file(work):
     assert r.ok, r.error
 
 
-def test_copy_as_onto_source_is_an_overwrite(work):
+def test_copy_as_onto_source_is_an_overwrite(work, symlink):
     p = work("06_group_three_rows.tif")
     before = open(p, "rb").read()
     # the same file under another name (a link here; a different letter case on Windows/macOS)
     alias = os.path.join(os.path.dirname(p), "alias.tif")
-    os.symlink(p, alias)
+    symlink(p, alias)
     r, *_ = _save(p, mode="copyAs", dest_path=alias)
     assert not r.ok and r.code == "source"
     assert open(p, "rb").read() == before
@@ -305,6 +306,7 @@ def test_copy_as_onto_source_honours_case_c_guard(work):
     assert not os.path.exists(os.path.join(os.path.dirname(p), "_originals"))
 
 
+@posix_permissions
 def test_permissions_preserved(work):
     p = work("09_partial_date.jpg")
     os.chmod(p, 0o640)

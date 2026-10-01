@@ -11,7 +11,8 @@ function outputIsJpeg(s: PhotoSession, destPath?: string): boolean {
   return fmt === 'jpeg' || (fmt === 'same' && s.meta?.info.format === 'JPEG')
 }
 
-/** Shown once: however it is closed (button, × or Esc), it counts as seen. */
+/** Shown once: however it is closed (button, × or Esc), it counts as seen. Only Save copy as…
+ *  needs it: otherwise the JPEG notice above the photo already says so. */
 async function jpegWarning(destPath?: string): Promise<boolean> {
   const s = app.session
   if (!s?.meta) return true
@@ -78,7 +79,7 @@ function samePath(a: string, b: string): boolean {
 
 async function saveCopy(): Promise<boolean> {
   const s = app.session
-  if (!s || !(await existingBandCheck(s)) || !(await jpegWarning())) return false
+  if (!s || !(await existingBandCheck(s))) return false
   let res = await app.save(s, 'copy')
   if (res && !res.ok && res.code === 'exists') {
     const { dir, name } = splitPath(res.error)
@@ -118,20 +119,21 @@ async function overwrite(): Promise<boolean> {
     if (jpeg) app.saveSettings({ session: { jpegWarned: true } }).catch(() => {})
     if (r.id !== 'ok') return false
     if (r.checked) app.overwriteConfirmed = true
-  } else if (!(await jpegWarning(s.path))) {
-    return false
   }
   const res = await app.save(s, 'overwrite')
   return !!res?.ok
 }
 
-/** After a save: open the next photo, keeping the caption block that was being edited. */
-async function goToNext(blk: string | null) {
-  if (app.current >= app.photos.length - 1) {
+/** After a save: open the photo after the saved one, keeping the caption block that was being
+ *  edited. Saves of big scans take seconds: if the user moved to another photo meanwhile, stay there. */
+async function goToNext(saved: string, blk: string | null) {
+  const i = app.photos.findIndex((p) => p.path === saved)
+  if (i < 0 || app.session?.path !== saved) return
+  if (i >= app.photos.length - 1) {
     app.toast('info', 'That was the last photo.')
     return
   }
-  await app.next()
+  await app.select(i + 1)
   const s = app.session
   const eff = s ? app.effective(s) : null
   if (blk && eff) {
@@ -199,12 +201,14 @@ export const actions = {
   /** Save a copy, then go to the next photo (Mod+Enter). */
   async saveAndNext() {
     const blk = focusedBlock()
-    if (await saveCopy()) await goToNext(blk)
+    const saved = app.session?.path
+    if (saved && (await saveCopy())) await goToNext(saved, blk)
   },
   /** Overwrite the original, then go to the next photo (Mod+Shift+Enter). */
   async overwriteAndNext() {
     const blk = focusedBlock()
-    if (await overwrite()) await goToNext(blk)
+    const saved = app.session?.path
+    if (saved && (await overwrite())) await goToNext(saved, blk)
   },
   /** E / Enter: jump into the first caption block. */
   focusFirstBlock() {
@@ -218,7 +222,7 @@ export const actions = {
   async revertToTemplate() {
     const s = app.session
     if (!s || !app.hasEdits(s)) return
-    const ok = await dialogs.confirm('Revert to template?', "This photo's text and style edits are discarded and every block follows the template again. You can undo this.", 'Revert', true)
+    const ok = await dialogs.confirm('Revert to template?', "This photo's text and style edits are discarded and every block follows the template again. You can undo this.", 'Revert')
     if (ok) app.revertToTemplate(s)
   },
   async reopenLastFolder() {
@@ -236,7 +240,7 @@ export const actions = {
   async removeMarker() {
     const s = app.session
     if (!s) return
-    if (!(await existingBandCheck(s)) || !(await jpegWarning())) return
+    if (!(await existingBandCheck(s))) return
     const res = await app.save(s, 'copy', { embedMarker: false })
     if (res?.ok) app.toast('info', 'Saved a copy without the hidden band data.')
   },

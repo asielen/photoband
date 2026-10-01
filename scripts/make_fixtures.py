@@ -129,7 +129,10 @@ def font(size, prefer=("DejaVuSerif.ttf", "DejaVuSans.ttf", "LiberationSerif-Reg
             for p in prefer:
                 if p in fs:
                     return ImageFont.truetype(os.path.join(dp, p), size)
-    return ImageFont.load_default()
+    # No DejaVu (Windows, stock macOS): Pillow's built-in scalable font at the asked
+    # size.  The size-less bitmap default is ~10 px whatever ``size`` says, which
+    # left e.g. the 70 px date stamp of fixture 13 too small to be a stamp.
+    return ImageFont.load_default(size)
 
 
 # ----------------------------------------------------------------------------

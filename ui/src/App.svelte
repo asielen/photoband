@@ -14,6 +14,8 @@
   import HelpDialog from './components/HelpDialog.svelte'
   import Icon from './components/Icon.svelte'
   import Inspector from './components/Inspector.svelte'
+  import JpegNotice from './components/JpegNotice.svelte'
+  import SavePreview from './components/SavePreview.svelte'
   import Preview from './components/Preview.svelte'
   import SettingsDialog from './components/SettingsDialog.svelte'
   import Toasts from './components/Toasts.svelte'
@@ -43,11 +45,10 @@
     const out: Command[] = [
       { id: 'open-folder', group: 'Open', label: 'Open folder…', key: 'Mod+Shift+O', run: actions.openFolder },
       { id: 'open-files', group: 'Open', label: 'Open files…', key: 'Mod+O', run: actions.openFiles },
-      { id: 'save-copy', group: 'Save', label: 'Save copy', key: 'Mod+S', disabled: saveWhy, keywords: 'export write', run: actions.saveCopy },
-      { id: 'save-copy-as', group: 'Save', label: 'Save copy as…', key: 'Mod+Shift+S', disabled: saveWhy, run: actions.saveCopyAs },
-      { id: 'save-next', group: 'Save', label: 'Save copy & next', key: 'Mod+Enter', disabled: saveWhy, keywords: 'continue', run: actions.saveAndNext },
-      { id: 'overwrite', group: 'Save', label: 'Overwrite original', disabled: overWhy, keywords: 'replace', run: actions.overwrite },
+      { id: 'save-next', group: 'Save', label: 'Save copy & next', key: 'Mod+S', disabled: saveWhy, keywords: 'export write continue', run: actions.saveAndNext },
       { id: 'overwrite-next', group: 'Save', label: 'Overwrite original & next', key: 'Mod+Shift+Enter', disabled: overWhy, keywords: 'replace continue', run: actions.overwriteAndNext },
+      { id: 'save-copy-as', group: 'Save', label: 'Save copy as…', key: 'Mod+Shift+S', disabled: saveWhy, run: actions.saveCopyAs },
+      { id: 'save-no-marker', group: 'Save', label: 'Save copy without hidden band data', disabled: saveWhy, keywords: 'marker privacy', run: actions.removeMarker },
       { id: 'edit-caption', group: 'Caption', label: 'Edit the caption', key: 'E', disabled: noPhoto, keywords: 'text type', run: actions.focusFirstBlock },
       { id: 'undo', group: 'Caption', label: 'Undo', key: 'Mod+Z', disabled: noPhoto || (s?.undoStack.length ? null : 'Nothing to undo yet.'), run: () => s && app.undo(s) },
       { id: 'redo', group: 'Caption', label: 'Redo', key: 'Mod+Shift+Z', disabled: noPhoto || (s?.redoStack.length ? null : 'Nothing to redo.'), run: () => s && app.redo(s) },
@@ -127,7 +128,7 @@
     if (m && k === 's') {
       e.preventDefault()
       if (e.shiftKey) actions.saveCopyAs()
-      else actions.saveCopy()
+      else actions.saveAndNext()
       return
     }
     if (m && k === 'enter') {
@@ -246,6 +247,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="shell" ondragover={(e) => { e.preventDefault(); dragOver = true }} ondragleave={(e) => { if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) dragOver = false }} ondrop={drop}>
     <Toolbar />
+    {#if app.view === 'editor' && app.session && !app.batchReview}<SavePreview s={app.session} />{/if}
     {#if app.notice}<div class="notice row"><Icon name="info" size={14} /> {app.notice}</div>{/if}
     {#if app.incompleteBatches.length && app.view === 'editor'}
       {#each app.incompleteBatches as b}
@@ -310,6 +312,7 @@
             {#if app.session.error}
               <div class="err row"><Icon name="warn" /> {app.session.error}</div>
             {/if}
+            {#if !app.batchReview}<JpegNotice s={app.session} />{/if}
           {/if}
           <Preview bind:this={preview} bind:tool />
           {#if app.session}<Warnings s={app.session} />{/if}

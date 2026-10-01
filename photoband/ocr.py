@@ -18,6 +18,7 @@ crop's pixel coordinates (x, y, w, h).
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -33,6 +34,8 @@ try:
     import cv2
 except Exception as exc:  # pragma: no cover
     raise ImportError("photoband.ocr needs opencv-python") from exc
+
+log = logging.getLogger(__name__)
 
 TARGET_TEXT_HEIGHT = 64      # px: full line height (ascender..descender) -> x-height ~ 32-40
 PAD = 16                     # white border added around crops for Tesseract
@@ -364,8 +367,9 @@ def _winocr_recognize(img8: np.ndarray) -> dict:
     except TypeError:
         writer.write_bytes(list(bgra.tobytes()))    # older bindings want a list of ints
     buf = writer.detach_buffer()
-    bmp = SoftwareBitmap.create_copy_from_buffer(buf, BitmapPixelFormat.BGRA8, W, H,
-                                                 BitmapAlphaMode.PREMULTIPLIED)
+    # pywinrt >= 3 names the overload with an alpha mode create_copy_with_alpha_from_buffer
+    make = getattr(SoftwareBitmap, "create_copy_with_alpha_from_buffer", None) or SoftwareBitmap.create_copy_from_buffer
+    bmp = make(buf, BitmapPixelFormat.BGRA8, W, H, BitmapAlphaMode.PREMULTIPLIED)
     engine = OcrEngine.try_create_from_user_profile_languages()
     if engine is None:
         raise RuntimeError("no OCR language installed")
@@ -435,8 +439,11 @@ def recognize(img8: np.ndarray) -> dict:
             r = _ADAPTERS[name][1](img)
             r["engine"] = name
             return r
-        except (ImportError, AttributeError) as exc:
+        except (ImportError, AttributeError, TypeError) as exc:
+            # a missing or changed binding fails the same way on every crop: stop using the engine
             with _broken_lock:
+                if name not in _broken:
+                    log.warning("OCR engine %s does not work here (%s); using the next one", name, exc)
                 _broken.add(name)
             last_err = exc
         except Exception as exc:
@@ -458,17 +465,20 @@ def _crop8(arr: np.ndarray, box, pad: int) -> tuple:
     return _to_rgb8(crop), (x0, y0)
 
 
-def recognize_blocks(arr, blocks, crop_fn=None) -> None:
+def recognize_blocks(arr, blocks, crop_fn=None) -> List[str]:
     """Fill ``TextLine.text / confidence / words`` in place (word boxes in
     full-resolution image coordinates).  Lines are recognised in parallel.
 
     ``crop_fn(line) -> (rgb8 crop, (x0, y0)) | None`` supplies a cleaned crop
     (e.g. :func:`photoband.detect.line_ocr_crop`: only the line's own ink, clipped
-    to its band); None falls back to a padded crop of the line box."""
+    to its band); None falls back to a padded crop of the line box.
+
+    Returns the engines that read the lines, most used first."""
     arr = np.asarray(arr)
     lines = [ln for b in blocks for ln in b.lines]
     if not lines:
-        return
+        return []
+    used: List[str] = []
 
     def work(ln):
         got = None
@@ -483,6 +493,8 @@ def recognize_blocks(arr, blocks, crop_fn=None) -> None:
             pad = max(6, int(0.35 * ln.box[3]))
             crop, (ox, oy) = _crop8(arr, ln.box, pad)
         r = recognize(crop)
+        if r.get("engine"):
+            used.append(r["engine"])
         ln.text = r.get("text", "").replace("\n", " ").strip()
         ln.confidence = float(r.get("confidence", 0.0))
         ln.words = [{"text": w["text"], "confidence": float(w["confidence"]),
@@ -496,3 +508,4 @@ def recognize_blocks(arr, blocks, crop_fn=None) -> None:
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             list(ex.map(work, lines))
+    return sorted(set(used), key=lambda e: -used.count(e))

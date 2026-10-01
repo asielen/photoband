@@ -42,6 +42,9 @@ def blocks_from_json(items: List[Dict[str, Any]]) -> List[TextBlock]:
     return out
 
 
+MASK_MAX = 8192          # px a side for brush masks (the UI draws them at preview size)
+
+
 def decode_mask_png(data: Optional[str]) -> Optional[np.ndarray]:
     """A brush mask sent by the UI as a data URL / base64 PNG (any size; alpha or luminance > 0 = on)."""
     if not data:
@@ -50,6 +53,12 @@ def decode_mask_png(data: Optional[str]) -> Optional[np.ndarray]:
         data = data.split(",", 1)[1]
     try:
         im = Image.open(io.BytesIO(base64.b64decode(data)))
+    except Exception:
+        return None
+    # masks come at preview size: refuse a huge one before decoding it (a tiny PNG can declare one)
+    if im.size[0] > MASK_MAX or im.size[1] > MASK_MAX:
+        raise ValueError(f"The brush mask is {im.size[0]}×{im.size[1]} px; at most {MASK_MAX} px a side")
+    try:
         a = np.asarray(im.convert("RGBA"))
         return (a[:, :, 3] > 0) & (a[:, :, :3].max(axis=2) > 0)
     except Exception:
@@ -239,9 +248,10 @@ def analyze_existing(arr: np.ndarray, info: ImageInfo, md: Dict[str, Any], run_o
     if run_ocr and blocks:
         from . import ocr
         try:
-            ocr.recognize_blocks(arr, blocks,
-                                 crop_fn=lambda ln: line_ocr_crop(arr, band, ln))
-            engine = (ocr.engines() or [None])[0]
+            used = ocr.recognize_blocks(arr, blocks,
+                                        crop_fn=lambda ln: line_ocr_crop(arr, band, ln))
+            # the engine that actually read the text (a broken first choice falls through)
+            engine = (used or ocr.engines() or [None])[0]
             ocr_ran = engine is not None
             if ocr_ran:
                 blocks = filter_ocr_lines(blocks)

@@ -160,6 +160,31 @@ def is_readonly(path: str) -> bool:
     return (not os.access(path, os.W_OK)) or (st.st_mode & 0o222) == 0
 
 
+def held_open_elsewhere(path: str) -> bool:
+    """Windows: True when another program has ``path`` open without letting it be replaced
+    (no FILE_SHARE_DELETE, as most editors and viewers open files). Replacing such a file fails
+    with "access denied" (5), not a sharing violation, so this tells the two apart. Opens the
+    file for DELETE access only to ask; nothing is changed. False elsewhere or when unsure."""
+    if os.name != "nt" or not os.path.isfile(path):
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = wintypes.HANDLE
+        k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        DELETE, SHARE_ALL, OPEN_EXISTING = 0x00010000, 0x7, 3
+        h = k32.CreateFileW(path, DELETE, SHARE_ALL, None, OPEN_EXISTING, 0, None)
+        if h and h != wintypes.HANDLE(-1).value:
+            k32.CloseHandle(h)
+            return False
+        return ctypes.get_last_error() == 32   # ERROR_SHARING_VIOLATION
+    except Exception:
+        return False
+
+
 def dir_writable(d: str) -> bool:
     return os.access(d, os.W_OK | os.X_OK) if os.name != "nt" else True
 
@@ -401,6 +426,32 @@ def _litter_age(p: str, name: str, now: float) -> float:
     return now - os.lstat(p).st_mtime
 
 
+def temp_prefix(kind: str) -> str:
+    """``.pbtmp-p<pid>-`` etc.: the process that owns a temp file is in its name, so a sweep never
+    removes the file of a save that is still running (a multi-GB save to a slow share can take
+    longer than the sweep's age limit)."""
+    return f"{kind}p{os.getpid()}-"
+
+
+_OWNER_RE = None
+
+
+def _owner_running(name: str, age: float) -> bool:
+    """The temp file's owning process (from its name) is still running. Never trusted after a
+    day, so a reused process id can't keep litter forever."""
+    global _OWNER_RE
+    if age > 86400:
+        return False
+    if _OWNER_RE is None:
+        import re
+        _OWNER_RE = re.compile(r"^\.pb(?:tmp|bak|restore)-p(\d{1,10})-")
+    m = _OWNER_RE.match(name)
+    if not m:
+        return False
+    pid = int(m.group(1))
+    return pid == os.getpid() or _pid_alive(pid)
+
+
 def sweep_temp(folders: Iterable[str], max_age: float = 600.0) -> List[str]:
     """Delete this app's temp files (.pbtmp-*, .pbbak-*, *.partial, *.pbrestore) older than
     ``max_age`` seconds in each folder and its backup subfolder. Returns what was removed."""
@@ -427,7 +478,10 @@ def sweep_temp(folders: Iterable[str], max_age: float = 600.0) -> List[str]:
                     continue  # someone else's .partial download: not ours
                 p = os.path.join(d, n)
                 try:
-                    if os.path.isfile(p) and not os.path.islink(p) and _litter_age(p, n, now) > max_age:
+                    if not os.path.isfile(p) or os.path.islink(p):
+                        continue
+                    age = _litter_age(p, n, now)
+                    if age > max_age and not _owner_running(n, age):
                         os.unlink(p)
                         removed.append(p)
                 except OSError:
