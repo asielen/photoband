@@ -56,6 +56,19 @@ def symlink():
     return make
 
 
+def best_time(fn, repeats: int = 3):
+    """(result, seconds) of the fastest of ``repeats`` calls. Speed checks use it so a busy machine
+    (parallel tests, a cold first call) doesn't fail them; a real slowdown still does."""
+    import time
+    best, out = None, None
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        out = fn()
+        dt = time.perf_counter() - t0
+        best = dt if best is None else min(best, dt)
+    return out, best
+
+
 # POSIX permission bits (chmod 0o640 ...): Windows only keeps a read-only flag.
 posix_permissions = pytest.mark.skipif(os.name == "nt", reason="needs POSIX file permission bits (not on Windows)")
 

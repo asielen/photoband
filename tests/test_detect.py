@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+from conftest import best_time
 from photoband import detect, erase, ocr
 from photoband.existing import analyze_existing
 
@@ -343,12 +344,10 @@ def test_textured_paper(paper):
 def test_no_border_natural_photo():
     for seed in range(5):
         photo = make_photo(1500, 1000, seed=100 + seed)
-        t0 = time.perf_counter()
-        band = detect.detect_band(photo)
-        dt = time.perf_counter() - t0
+        band, dt = best_time(lambda: detect.detect_band(photo))
         assert not band.found, seed
         assert band.photo_rect == (0, 0, 1500, 1000)
-        assert dt < 0.5
+        assert dt < 0.5, dt
 
 
 # =============================================================================
@@ -465,9 +464,8 @@ def test_case_d_date_stamp():
     photo = make_photo(1200, 900, seed=51, lo=20, hi=150)
     img, sbox = _stamp(photo)
     save_artifact("date_stamp.png", img)
-    t0 = time.perf_counter()
-    boxes = detect.detect_text_over_photo(img, (0, 0, 1200, 900))
-    assert time.perf_counter() - t0 < 2.0
+    boxes, dt = best_time(lambda: detect.detect_text_over_photo(img, (0, 0, 1200, 900)), repeats=2)
+    assert dt < 2.0, dt
     assert any(_overlap(b, sbox) for b in boxes), boxes
 
 
@@ -475,9 +473,8 @@ def test_case_d_date_stamp():
 def test_case_d_plain_photos_have_no_boxes():
     for seed in range(4):
         photo = make_photo(1200, 900, seed=60 + seed)
-        t0 = time.perf_counter()
-        boxes = detect.detect_text_over_photo(photo, (0, 0, 1200, 900))
-        assert time.perf_counter() - t0 < 2.0
+        boxes, dt = best_time(lambda: detect.detect_text_over_photo(photo, (0, 0, 1200, 900)), repeats=2)
+        assert dt < 2.0, dt
         assert boxes == [], (seed, boxes)
 
 
@@ -516,9 +513,7 @@ def test_timing_big_uint16():
     photo = cv2.resize(small, (pw, ph), interpolation=cv2.INTER_LINEAR)
     img = np.full((H, W, 3), 65535, np.uint16)
     img[t:t + ph, l:l + pw] = photo.astype(np.uint16) * 257
-    t0 = time.perf_counter()
-    band = detect.detect_band(img)
-    dt = time.perf_counter() - t0
+    band, dt = best_time(lambda: detect.detect_band(img), repeats=2)
     assert band.found and band.photo_rect == (l, t, pw, ph)
     assert dt < 3.0, dt
 
