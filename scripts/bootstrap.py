@@ -65,9 +65,20 @@ def parse_version(text: str) -> tuple[int, ...]:
     return tuple(int(x or 0) for x in m.groups()) if m else ()
 
 
-def node_status() -> tuple[str | None, str | None, str]:
-    """(node, npm, problem) - problem is "" when Node is new enough."""
-    node, npm = shutil.which("node"), shutil.which("npm")
+def npm_for(node: str) -> list[str] | None:
+    """npm as run by ``node`` itself: npm.cmd on Windows runs the node.exe in its own folder, which
+    can be another (older) install found earlier on PATH than the node that was checked."""
+    cli = os.path.join(os.path.dirname(node), "node_modules", "npm", "bin", "npm-cli.js")
+    if os.path.isfile(cli):
+        return [node, cli]
+    npm = shutil.which("npm")
+    return [npm] if npm else None
+
+
+def node_status() -> tuple[str | None, list[str] | None, str]:
+    """(node, npm command, problem) - problem is "" when Node is new enough."""
+    node = shutil.which("node")
+    npm = npm_for(node) if node else None
     want = f"{MIN_NODE[0]}.{MIN_NODE[1]}"
     how = ("Install Node.js LTS from https://nodejs.org (or `nvm install`, which reads .nvmrc"
            + (", or `winget install OpenJS.NodeJS.LTS`" if IS_WIN else ", or `brew install node@22`") + ").")
@@ -76,7 +87,21 @@ def node_status() -> tuple[str | None, str | None, str]:
     out = subprocess.run([node, "--version"], capture_output=True, text=True).stdout.strip()
     if parse_version(out)[:2] < MIN_NODE:
         return node, npm, f"Node.js {want}+ is needed to build the UI; found {out or 'unknown'}.\n{how}"
+    # an npm from PATH (none next to node) runs on the node.exe in its own folder on Windows
+    own = os.path.join(os.path.dirname(npm[0]), "node.exe")
+    if len(npm) == 1 and IS_WIN and os.path.isfile(own) and not same_file(own, node):
+        own_v = subprocess.run([own, "--version"], capture_output=True, text=True).stdout.strip()
+        if parse_version(own_v)[:2] < MIN_NODE:
+            return node, npm, (f"npm on PATH ({npm[0]}) runs on Node.js {own_v or 'unknown'}, not {out}. "
+                               f"Put Node.js {want}+ with npm first on PATH.")
     return node, npm, ""
+
+
+def same_file(a: str, b: str) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
 
 
 # ----------------------------------------------------------------------------- venv
@@ -128,17 +153,17 @@ def ui_up_to_date() -> bool:
     return os.path.exists(index) and os.path.getmtime(index) >= newest_mtime([os.path.join(UI, p) for p in UI_INPUTS])
 
 
-def build_ui(npm: str, force: bool) -> None:
+def build_ui(npm: list[str], force: bool) -> None:
     marker = os.path.join(UI, "node_modules", ".package-lock.json")
     lock = os.path.join(UI, "package-lock.json")
     if force or not os.path.exists(marker) or os.path.getmtime(marker) < os.path.getmtime(lock):
         say("Installing UI dependencies (npm ci)")
-        run([npm, "ci", "--no-audit", "--no-fund"], cwd=UI)
+        run(npm + ["ci", "--no-audit", "--no-fund"], cwd=UI)
     if not force and ui_up_to_date():
         say("UI build is up to date (ui/dist)")
         return
     say("Building the UI (npm run build)")
-    run([npm, "run", "build"], cwd=UI)
+    run(npm + ["run", "build"], cwd=UI)
 
 
 # ----------------------------------------------------------------------------- ExifTool
