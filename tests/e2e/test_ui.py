@@ -182,7 +182,7 @@ def test_group_rows_and_unicode(page):
 def test_case_b_recognized(page):
     pg = page
     select_photo(pg, "11_other_tool_colored_band.png")
-    pg.wait_for_selector("text=Existing caption found", timeout=30000)
+    pg.wait_for_selector("text=This photo already has a caption band", timeout=30000)
     shot(pg, "11_case_b_banner")
     pg.click("button:has-text('Use recognized text')")
     pg.wait_for_timeout(1500)
@@ -193,8 +193,8 @@ def test_case_b_recognized(page):
 def test_case_c_erase(page):
     pg = page
     select_photo(pg, "12_scanned_polaroid_handwriting.tif")
-    pg.wait_for_selector("text=Physical caption on a scan", timeout=30000)
-    pg.click("button:has-text('Replace with template')")
+    pg.wait_for_selector("text=Handwriting or printing on the photo", timeout=30000)
+    pg.click("button:has-text('Erase it, use template')")
     pg.wait_for_timeout(3000)
     shot(pg, "13_case_c_erase")
     # overwrite is disabled for case C by default

@@ -1004,7 +1004,7 @@ def create_app() -> FastAPI:
                 # a physical caption is erased on copies only, whatever Settings › Saving allows
                 job["mode"] = "copy"
                 job["case"] = "C"
-                notes.append("Physical caption: erased on a copy; the original was not changed")
+                notes.append("Writing on the border: erased on a copy; the original was not changed")
         # the source as staged: the save refuses it if the content changed since (size+mtime+hash)
         from .util import quick_hash
         try:

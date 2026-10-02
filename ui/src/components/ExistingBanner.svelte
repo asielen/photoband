@@ -13,8 +13,9 @@
     if (!ex) return ''
     const parts: string[] = []
     if (ex.source === 'marker') parts.push('exact photo edge known')
-    if (conf != null) parts.push(`${conf}% confidence`)
-    if (!ex.hasText) parts.push('no text found in the border')
+    if (conf != null) parts.push(`${conf}% sure`)
+    // case C: writing was seen but couldn't be read; case B: a band without readable text
+    if (!ex.hasText) parts.push(ex.case === 'C' ? 'the words couldn’t be read' : 'no text found in it')
     return parts.join(' · ')
   })
   $effect(() => {
@@ -75,9 +76,9 @@
       <div class="row msgrow">
         <Icon name={ex.case === 'C' ? 'pen' : 'text'} />
         <div class="grow">
-          <b>{ex.case === 'C' ? 'Physical caption on a scan' : 'Existing caption found'}</b>
+          <b>{ex.case === 'C' ? 'Handwriting or printing on the photo’s border' : 'This photo already has a caption band'}</b>
           {#if details}<span class="faint"> · {details}</span>{/if}
-          {#if ex.case === 'C'}<div class="faint small">Handwriting on a print is part of the record, so changes go to a copy{app.settings.saving.allowOverwriteHandwritten ? '' : ' (Overwrite original is off; Settings › Saving)'}. The text it says is kept in the file.</div>{/if}
+          {#if ex.case === 'C'}<div class="faint small">{#if app.settings.saving.allowOverwriteHandwritten}Writing on an original print is part of its history: saving a copy keeps the original as it is.{:else}Writing on an original print is part of its history, so Photoband won’t overwrite this scan. Saving makes a captioned copy and leaves the original as it is (Settings › Saving can allow overwriting).{/if}{ex.hasText ? ' The words read from it are kept in the copy’s photo information.' : ''}</div>{/if}
           {#if overCount}<div class="faint small">Text printed over the photo ({overCount === 1 ? 'outlined in orange' : `${overCount} places, outlined in orange`} in Before) is flagged only and never erased.</div>{/if}
           {#if otherText.length}<div class="faint small">Not treated as caption (paper backprint or lab logo): {otherText.map((t) => `“${t}”`).join(', ')}.</div>{/if}
         </div>
@@ -85,8 +86,8 @@
       <div class="row tools">
       {#if !active}
         {#if ex.hasText}<button class="btn sm primary" data-tip="Use the text read from the old caption. Check the words underlined as uncertain." onclick={() => app.useExisting(s, 'recognized', ex.case === 'C' ? 'erase' : 'rebuild')}>Use recognized text</button>{/if}
-        <button class="btn sm" data-tip="Replace the old caption with the text from the template" onclick={() => app.useExisting(s, 'template', ex.case === 'C' ? 'erase' : 'rebuild')}>Replace with template</button>
-        <button class="btn sm ghost" data-tip="Keep the old caption as part of the photo; a new band is added below it" onclick={() => (s.existingIgnored = true)}>Ignore</button>
+        <button class="btn sm" data-tip={ex.case === 'C' ? 'On the copy, erase the writing and put the template’s caption in its place. The original scan is not changed.' : 'Remove the old band and add a new one with the template’s caption'} onclick={() => app.useExisting(s, 'template', ex.case === 'C' ? 'erase' : 'rebuild')}>{ex.case === 'C' ? 'Erase it, use template' : 'Replace with template'}</button>
+        <button class="btn sm ghost" data-tip={ex.case === 'C' ? 'Leave the writing as part of the photo and add a new caption band below it' : 'Keep the old band as part of the photo and add a new band below it'} onclick={() => (s.existingIgnored = true)}>{ex.case === 'C' ? 'Keep the writing' : 'Keep it'}</button>
       {:else}
         <Segmented small value={s.draft.mode} label="Replacement mode" options={[{ value: 'rebuild', label: 'Rebuild band', tip: 'Crop to the photo and add a new band' }, { value: 'erase', label: 'Erase in place', tip: 'Keep the original band and paper; erase the old text and write the new text there' }]} onchange={(v) => app.useExisting(s, s.draft.existingChoice || 'template', v as any)} />
         <span class="sep"></span>

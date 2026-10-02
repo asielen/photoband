@@ -2,6 +2,7 @@
   import { proxyUrl } from '../lib/api'
   import { app } from '../lib/store.svelte'
   import { dialogs } from '../lib/dialogs.svelte'
+  import { fileItems, isContextKey, openContextMenu } from '../lib/contextmenu.svelte'
   import Icon from './Icon.svelte'
   let list: HTMLDivElement
   $effect(() => {
@@ -54,7 +55,9 @@ ${st}`
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div class="strip scroll" bind:this={list} role="listbox" aria-label="Photos" tabindex="-1" onkeydown={key}>
   {#each app.photos as p, i (p.path)}
-    <button class="item" class:cur={i === app.current} data-i={i} role="option" aria-selected={i === app.current} tabindex={i === app.current || (app.current < 0 && i === 0) ? 0 : -1} data-tip={tipFor(p)} data-tip-side="right" onclick={() => app.select(i)}>
+    <button class="item" class:cur={i === app.current} data-i={i} role="option" aria-selected={i === app.current} tabindex={i === app.current || (app.current < 0 && i === 0) ? 0 : -1} data-tip={tipFor(p)} data-tip-side="right" onclick={() => app.select(i)}
+      oncontextmenu={(e) => openContextMenu(e, `Actions for ${p.name}`, fileItems(p.path))}
+      onkeydown={(e) => { if (isContextKey(e)) { e.stopPropagation(); openContextMenu(e, `Actions for ${p.name}`, fileItems(p.path)) } }}>
       <div class="thumb"><img src={proxyUrl(p.path, 0, true)} alt="" loading="lazy" decoding="async" /></div>
       <div class="meta row">
         <span class="badge {p.status}" role="img" aria-label={label[p.status]}>

@@ -150,7 +150,7 @@ def test_disabled_control_explains_why(page, server):
     assert key in ("Ctrl+Z", "⌘Z"), key
     # a scan with a handwritten caption: Overwrite is off, and its tooltip says why
     select_photo(pg, "12_scanned_polaroid_handwriting.tif")
-    pg.wait_for_selector("text=Physical caption on a scan", timeout=30000)
+    pg.wait_for_selector("text=Handwriting or printing on the photo", timeout=30000)
     over = pg.locator('header.tb button.overwrite')
     assert over.is_disabled()
     text, _ = tip_for(pg, 'header.tb button.overwrite')
