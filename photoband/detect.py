@@ -1469,15 +1469,88 @@ def _alnum(s: str) -> int:
     return sum(ch.isalnum() for ch in s)
 
 
-def filter_ocr_lines(blocks: List[TextBlock]) -> List[TextBlock]:
-    """After OCR: drop lines that are punctuation or specks read as text ("|",
-    "'", "i" at low confidence) and blocks left empty."""
+# What OCR output counts as text read. Every engine invents characters on marks that are not
+# writing: Tesseract read the dust, a hair and the paper-edge shadow of a blank flatbed border as
+# "|", "az" (confidence 0.33 on an 18x4 px hair) and "|" again. A read only counts when it is
+# plausible text on a mark the size of writing, whichever engine produced it:
+#   * the line is text-sized: at least WRITING_THICKNESS of the image's short side thick (the same
+#     yardstick the no-OCR rule :func:`ink_like` uses), so specks, hairs and slivers never count;
+#   * it holds a word-like token: >= 2 alphanumerics making up at least half the token, so
+#     single glyphs ("|", "i", "l") and punctuation runs never count;
+#   * the engine was confident (>= OCR_MIN_WORD_CONF per word; Windows OCR reports none and gets
+#     ocr.UNKNOWN_CONFIDENCE, which passes, so for it the other two rules decide). A low-confidence
+#     word-like read still counts on a line SHAPED like writing (cursive reads poorly, but it
+#     reads): it is then no weaker than the no-OCR evidence the shape alone gives.
+# No dictionary or vowel test: captions are names, places, initials, years and abbreviations.
+OCR_MIN_WORD_CONF = 0.5
+WRITING_THICKNESS = 0.01      # of the short side; 2.5 mm handwriting at 300 dpi is 30 px on 1200 px
+
+
+def _text_thickness(shape) -> float:
+    try:
+        short = min(int(shape[0]), int(shape[1]))
+    except (TypeError, IndexError, ValueError):
+        short = 0
+    return max(6.0, WRITING_THICKNESS * short)
+
+
+def _thick_long(box) -> Tuple[float, float]:
+    w, h = float(box[2]), float(box[3])
+    return min(w, h), max(w, h)
+
+
+def _writing_shaped(box, shape) -> bool:
+    """Thick enough for writing and at least twice as long as thick, along either axis
+    (sideways writing on a side border counts)."""
+    thick, long_ = _thick_long(box)
+    return thick >= _text_thickness(shape) and long_ >= 2.0 * thick
+
+
+def word_like(text: str) -> bool:
+    """A token that could be a word, a number or an initialism, not a glyph or punctuation."""
+    t = (text or "").strip()
+    a = _alnum(t)
+    return a >= 2 and a >= 0.5 * len(t)
+
+
+def _read_words(ln) -> List[Tuple[str, float]]:
+    """(text, confidence) per word; the line's text and confidence when no words were kept."""
+    words = getattr(ln, "words", None) or []
+    if words:
+        return [(str(w.get("text", "")), float(w.get("confidence", 0.0) or 0.0)) for w in words]
+    return [(tok, float(ln.confidence or 0.0)) for tok in (ln.text or "").split()]
+
+
+def line_reads_as_text(ln, shape=None, min_conf: float = OCR_MIN_WORD_CONF) -> bool:
+    """OCR confidently read a word from a text-sized line."""
+    if _thick_long(ln.box)[0] < _text_thickness(shape):
+        return False
+    return any(word_like(t) and c >= min_conf for t, c in _read_words(ln))
+
+
+def line_reads_as_writing(ln, shape=None) -> bool:
+    """Evidence of writing in a read line: a confident word (:func:`line_reads_as_text`), or a
+    word-like read at any confidence from a line shaped like writing."""
+    if line_reads_as_text(ln, shape):
+        return True
+    return _writing_shaped(ln.box, shape) and any(word_like(t) for t, _ in _read_words(ln))
+
+
+def filter_ocr_lines(blocks: List[TextBlock], shape=None) -> List[TextBlock]:
+    """After OCR: keep a block only when one of its lines reads as writing
+    (:func:`line_reads_as_writing`; ``shape`` is the image's), so engine output on specks, hairs
+    and slivers ("|", "az") never becomes text, a caption or a case. In a kept block, short
+    companion lines ("'71", "5") stay when something was read from them; punctuation and specks
+    read as text ("|", "'", "i" at low confidence) are dropped."""
+    half = 0.5 * _text_thickness(shape)
     out = []
     for b in blocks:
-        keep = [ln for ln in b.lines
-                if _alnum(ln.text) >= 2 or (_alnum(ln.text) >= 1 and ln.confidence >= 0.6)]
-        if not keep:
+        if not any(line_reads_as_writing(ln, shape) for ln in b.lines):
             continue
+        keep = [ln for ln in b.lines
+                if line_reads_as_writing(ln, shape)
+                or (_thick_long(ln.box)[0] >= half
+                    and (_alnum(ln.text) >= 2 or (_alnum(ln.text) >= 1 and ln.confidence >= 0.6)))]
         if len(keep) != len(b.lines):
             b = TextBlock(_union_box([ln.box for ln in keep]), keep, b.role)
         out.append(b)
@@ -2077,18 +2150,11 @@ def scan_evidence(band: BandResult, md=None) -> Tuple[float, List[str]]:
     return score, cues
 
 
-def has_real_text(blocks, min_conf: float = 0.5) -> bool:
-    """>= 2 alphanumerics read with confidence >= ``min_conf`` in caption blocks."""
-    n = 0
-    for b in blocks:
-        if getattr(b, "role", "caption") == "other":
-            continue
-        for ln in b.lines:
-            if ln.words:
-                n += sum(_alnum(w.get("text", "")) for w in ln.words if float(w.get("confidence", 0)) >= min_conf)
-            elif ln.confidence >= min_conf:
-                n += _alnum(ln.text)
-    return n >= 2
+def has_real_text(blocks, min_conf: float = OCR_MIN_WORD_CONF, shape=None) -> bool:
+    """A word confidently read from a text-sized line of a caption block
+    (:func:`line_reads_as_text`)."""
+    return any(line_reads_as_text(ln, shape, min_conf)
+               for b in blocks if getattr(b, "role", "caption") != "other" for ln in b.lines)
 
 
 def ink_like(blocks, shape) -> bool:
@@ -2097,20 +2163,8 @@ def ink_like(blocks, shape) -> bool:
     1200 px side) and at least twice as long as it is thick, along either axis (sideways
     writing on a side border counts). Dust, hairs, the scanner's shadow and the print's own
     paper edge seen against the scanner lid are specks or thin slivers, not writing."""
-    try:
-        short = min(int(shape[0]), int(shape[1]))
-    except (TypeError, IndexError, ValueError):
-        short = 0
-    t = max(6.0, 0.01 * short)
-    for b in blocks:
-        if getattr(b, "role", "caption") == "other":
-            continue
-        for ln in b.lines:
-            w, h = float(ln.box[2]), float(ln.box[3])
-            thick, long_ = min(w, h), max(w, h)
-            if thick >= t and long_ >= 2.0 * thick:
-                return True
-    return False
+    return any(_writing_shaped(ln.box, shape)
+               for b in blocks if getattr(b, "role", "caption") != "other" for ln in b.lines)
 
 
 PLAIN_BORDER_HINT = ("The photo has a plain border with nothing written on it, so there is no old caption "
@@ -2121,8 +2175,9 @@ def decide_case(band: BandResult, blocks, score: float, ocr_ran: bool, marker: b
     """-> (case, quiet hint or None) for a detected band.
 
     B and C both say "this border holds an existing caption", so both need evidence of
-    WRITING in it, not only of a border: letters OCR read (with ``ocr_ran`` the blocks are
-    already OCR-filtered, so a surviving line had letters read from it), or, without OCR,
+    WRITING in it, not only of a border: plausible text OCR read (:func:`line_reads_as_writing`,
+    checked here too, not only by :func:`filter_ocr_lines`: what an engine invents on dust and
+    hairs never counts, whichever engine it is), or, without OCR,
     candidate lines shaped like writing (:func:`ink_like`; ``shape`` is the image's). The scan
     cues in ``score`` only tell what KIND of border it is (paper on a scan: C, a flat digital
     band: B), never that anything is written on it. A plain border, or a single plain strip
@@ -2134,8 +2189,13 @@ def decide_case(band: BandResult, blocks, score: float, ocr_ran: bool, marker: b
     captions = [b for b in blocks if getattr(b, "role", "caption") != "other"]
     single = len(band.bands) == 1
     if ocr_ran:
-        # a whole border: any line OCR read letters from (cursive reads poorly, but it reads)
-        writing = has_real_text(captions) or (not single and bool(captions))
+        if single:
+            # a strip at one edge is photo unless a word was confidently read in it
+            writing = has_real_text(captions, shape=shape)
+        else:
+            # a whole border: also a low-confidence read from a writing-shaped line (cursive
+            # reads poorly, but it reads)
+            writing = any(line_reads_as_writing(ln, shape) for b in captions for ln in b.lines)
     else:
         # no letters to go by: a single strip stays photo (as when OCR finds none), a whole
         # border counts when its marks are shaped like writing

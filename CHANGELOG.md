@@ -32,6 +32,10 @@ All notable changes to Photoband. The version lives in one place: `photoband/__i
   shaped like writing), not just paper-like scan cues; dust, hairs and the print's own paper edge
   are not writing. The banner no longer shows a "% sure" (it was the photo-edge detector's
   confidence); a doubtful edge is called out as something to check instead.
+- Text recognition no longer "reads" dust and hairs: characters an OCR engine invents on specks and
+  slivers (Tesseract read a hair as "az") never count as text, a caption or writing on the border.
+  A read counts only as a word-like token on a mark the size of writing, read with confidence
+  (or, at low confidence, on a line shaped like writing). The same rule applies to every engine.
 - The Edge loupe no longer turns black with a broken image when the pointer goes past the image
   edge, and a failed load anywhere in the preview (loupe, proxy, thumbnails, erase preview) shows a
   note or retries instead of freezing.

@@ -9,11 +9,13 @@ against the scanner lid.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pytest
 
-from photoband import detect
-from photoband.detect import BandResult, TextBlock, TextLine, decide_case, ink_like
+from photoband import detect, ocr
+from photoband.detect import BandResult, TextBlock, TextLine, decide_case, filter_ocr_lines, ink_like
 from test_detect import ITALIC, analyze, framed, make_photo, polaroid_sides
 
 PLAIN = detect.PLAIN_BORDER_HINT
@@ -112,3 +114,110 @@ def test_border_with_writing_is_b_or_c_by_the_scan_cues():
 
 def test_marker_proves_photobands_own_band_even_without_text():
     assert decide_case(_band(), [], 0.0, ocr_ran=True, marker=True, shape=SHAPE) == ("B", None)
+
+
+# --------------------------------------------------------------------------- OCR output on noise
+# CI (Linux, Tesseract only) read the scanner marks of the blank border above as text while
+# Windows OCR read nothing: an engine's characters on dust and hairs must never count as writing,
+# whichever engine it is. These are the exact reads Tesseract 5 returned for the three marks.
+
+NOISE_SHAPE = (1356, 1114, 3)
+TESS_NOISE = [((120, 1116, 6, 5), "|", 0.625), ((400, 1176, 18, 4), "az", 0.334), ((700, 1236, 7, 8), "|", 0.357)]
+
+
+def _read(box, text, conf):
+    return TextBlock(box=box, lines=[TextLine(box=box, text=text, confidence=conf,
+                                              words=[{"text": text, "confidence": conf, "box": box}])])
+
+
+@pytest.mark.parametrize("conf", [None, ocr.UNKNOWN_CONFIDENCE, 0.99])
+def test_engine_reads_on_specks_and_hairs_are_not_writing(conf):
+    # Tesseract's own confidences, then the same text from an engine without confidences
+    # (Windows OCR), then a confident engine: the marks are no bigger for it
+    blocks = [_read(box, text, conf if conf is not None else c) for box, text, c in TESS_NOISE]
+    assert filter_ocr_lines(blocks, shape=NOISE_SHAPE) == []
+    assert decide_case(_band(), blocks, 4.0, ocr_ran=True, shape=NOISE_SHAPE) == (None, PLAIN)
+
+
+@pytest.mark.parametrize("text", ["|", "l", "~~", "-.-", "'", "1"])
+def test_single_glyphs_and_punctuation_are_not_writing_even_on_a_text_sized_mark(text):
+    # the white-wall test's "|" read at 0.71 on a 15x36 px mark
+    blocks = [_read((300, 2700, 40, 70), text, 0.95)]
+    assert filter_ocr_lines(blocks, shape=SHAPE) == []
+    assert decide_case(_band(), blocks, 4.0, ocr_ran=True, shape=SHAPE)[0] is None
+
+
+def test_low_confidence_read_counts_only_on_a_writing_shaped_line():
+    # cursive reads poorly but it reads: a whole border with a writing-shaped line counts
+    cursive = [_read((300, 2700, 900, 70), "Aunt Moy 1952", 0.31)]
+    assert decide_case(_band(), cursive, 4.0, ocr_ran=True, shape=SHAPE) == ("C", None)
+    assert filter_ocr_lines(cursive, shape=SHAPE) == cursive
+    # ...but a single strip needs a word read with confidence
+    assert decide_case(_band(1), cursive, 4.0, ocr_ran=True, shape=SHAPE)[0] is None
+    confident = [_read((300, 2700, 900, 70), "Aunt Mary 1952", 0.9)]
+    assert decide_case(_band(1), confident, 4.0, ocr_ran=True, shape=SHAPE) == ("C", None)
+    # the same low-confidence read on a speck-sized mark is noise
+    assert decide_case(_band(), [_read((300, 2700, 20, 8), "az", 0.31)], 4.0, ocr_ran=True,
+                       shape=SHAPE)[0] is None
+
+
+def test_a_caption_keeps_its_short_companion_lines():
+    box = (300, 2700, 900, 70)
+    year = (600, 2790, 120, 60)
+    blk = TextBlock(box=(300, 2700, 900, 150), lines=[
+        TextLine(box=box, text="Mom & Dad, Yosemite", confidence=0.9, words=[]),
+        TextLine(box=year, text="'71", confidence=0.4, words=[]),
+        TextLine(box=(700, 2860, 6, 5), text="|", confidence=0.6, words=[])])
+    out = filter_ocr_lines([blk], shape=SHAPE)
+    assert [ln.text for ln in out[0].lines] == ["Mom & Dad, Yosemite", "'71"]
+
+
+# --------------------------------------------------------------------------- each engine, for real
+# The engines read differently (CI has only Tesseract; Windows prefers Windows OCR), so the
+# decisions are checked with each one forced. Skipped where the engine is not installed.
+
+def _engine_available(name):
+    try:
+        return bool(ocr._ADAPTERS[name][0]())
+    except Exception:
+        return False
+
+
+@pytest.fixture(params=["tesseract", "winocr"])
+def only_engine(request, monkeypatch):
+    name = request.param
+    if not _engine_available(name):
+        pytest.skip(f"OCR engine {name} is not available here")
+    for other in ocr.ENGINE_ORDER:
+        if other != name:
+            monkeypatch.setitem(ocr._ADAPTERS, other, (lambda: False, ocr._ADAPTERS[other][1]))
+    assert ocr.engines() == [name]
+    return name
+
+
+def test_plain_border_is_no_case_with_each_engine(only_engine):
+    img, truth = _paper()
+    res = analyze(_scanner_marks(img, truth), run_ocr=True)
+    assert res["case"] is None, (only_engine, res["case"], res["text"], res["blocks"])
+    assert res["warnings"] == [PLAIN] and res["hasText"] is False and res["text"] == ""
+
+
+def test_written_border_is_read_with_each_engine(only_engine):
+    img, truth = _paper(["Aunt Mary, Easter"])
+    res = analyze(_scanner_marks(img, truth), run_ocr=True)
+    assert res["case"] == "C" and res["engine"] == only_engine
+    assert res["hasText"] is True and "Mary" in res["text"], res["text"]
+    assert "|" not in res["text"] and "az" not in res["text"].split()
+
+
+def test_caption_fixtures_are_read_with_each_engine(only_engine, fixtures_dir):
+    from photoband.imageio import load_upright
+    from photoband.existing import analyze_existing
+    from test_pipeline import _md
+    for name, case, word in (("11_other_tool_colored_band.png", "B", "Rosa"),
+                             ("12_scanned_polaroid_handwriting.tif", "C", "Yosemite")):
+        p = os.path.join(fixtures_dir, name)
+        a, i = load_upright(p)
+        res = analyze_existing(a, i, _md(p))
+        assert res["case"] == case and res["engine"] == only_engine, (name, res["case"], res["engine"])
+        assert res["hasText"] and word in res["text"], (name, res["text"])

@@ -311,7 +311,9 @@ def analyze_existing(arr: np.ndarray, info: ImageInfo, md: Dict[str, Any], run_o
             engine = (used or ocr.engines() or [None])[0]
             ocr_ran = engine is not None
             if ocr_ran:
-                blocks = filter_ocr_lines(blocks)
+                # only plausible text on writing-sized marks counts as read (an engine's "|" or
+                # "az" on dust and hairs is not a caption; see detect.filter_ocr_lines)
+                blocks = filter_ocr_lines(blocks, shape=arr.shape)
         except Exception as e:
             out["warnings"].append(f"Text recognition failed: {e}")
     over = []
