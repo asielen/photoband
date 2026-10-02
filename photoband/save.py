@@ -1528,7 +1528,7 @@ CASE_C_OVERWRITE_MSG = ("This scan has a handwritten or printed caption, so over
 
 def _refuse_case_c(saving: Dict, batch_erase: bool) -> None:
     if batch_erase:
-        raise SaveError("Erasing a physical caption in a batch is done on copies only; the original was not "
+        raise SaveError("Erasing writing on a print's border in a batch is done on copies only; the original was not "
                         "changed.", code="case_c_overwrite")
     if not saving.get("allowOverwriteHandwritten"):
         # every mode (band, rebuild, erase): spec "For case C, Overwrite original is disabled until the

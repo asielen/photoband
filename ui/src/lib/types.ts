@@ -160,7 +160,10 @@ export interface BandInfo {
 export interface ExistingAnalysis {
   case: 'A' | 'B' | 'C' | 'D' | null
   source: 'record' | 'marker+payload' | 'marker' | 'detection' | null
+  /** how sure the detector is where the photo ends (same value as edgeConfidence; kept for saved records) */
   confidence?: number
+  /** how sure the detector is WHERE the photo ends, 0..1; not whether the border holds writing */
+  edgeConfidence?: number
   sourceRect?: Rect
   /** a captioned copy Photoband saved (not an original captioned in place) */
   isCopy?: boolean

@@ -311,7 +311,9 @@ def analyze_existing(arr: np.ndarray, info: ImageInfo, md: Dict[str, Any], run_o
             engine = (used or ocr.engines() or [None])[0]
             ocr_ran = engine is not None
             if ocr_ran:
-                blocks = filter_ocr_lines(blocks)
+                # only plausible text on writing-sized marks counts as read (an engine's "|" or
+                # "az" on dust and hairs is not a caption; see detect.filter_ocr_lines)
+                blocks = filter_ocr_lines(blocks, shape=arr.shape)
         except Exception as e:
             out["warnings"].append(f"Text recognition failed: {e}")
     over = []
@@ -329,7 +331,9 @@ def analyze_existing(arr: np.ndarray, info: ImageInfo, md: Dict[str, Any], run_o
             out["warnings"].append("The check for text printed over the photo ran out of time; only date stamps "
                                    "were checked.")
     score, cues = scan_evidence(band, md)
-    case, hint = decide_case(band, blocks, score, ocr_ran or not run_ocr, marker=mk is not None)
+    # ocr_ran: only when letters could actually be read (no OCR asked for, or no engine, is not
+    # "read and found nothing"); then the evidence of writing is the shape of the marks
+    case, hint = decide_case(band, blocks, score, ocr_ran, marker=mk is not None, shape=arr.shape)
     if mk is not None and case in ("B", "C"):
         case = "B"   # the hidden marker proves a Photoband (digital) band; its pattern is not paper grain
     if hint:
@@ -349,7 +353,10 @@ def analyze_existing(arr: np.ndarray, info: ImageInfo, md: Dict[str, Any], run_o
     out.update(
         case=case,
         source="marker" if mk is not None else ("detection" if case in ("B", "C") else None),
+        # how sure the detector is WHERE the photo ends (the band's edge), not whether anything is
+        # written on the border: that is the case itself (B/C need writing, see decide_case)
         confidence=1.0 if mk is not None else (float(band.confidence) if case in ("B", "C") else 0.0),
+        edgeConfidence=1.0 if mk is not None else (float(band.confidence) if case in ("B", "C") else 0.0),
         band=band_json,
         blocks=[b.to_json() for b in blocks],
         text="\n".join(ln.text for b in captions for ln in b.lines if ln.text),
@@ -357,12 +364,11 @@ def analyze_existing(arr: np.ndarray, info: ImageInfo, md: Dict[str, Any], run_o
         styles=estimate_styles(arr, band, blocks) if blocks else [],
         textOverPhoto=over,
         engine=engine,
-        hasText=bool(captions),
+        # words were read (an unread mark, e.g. with no OCR engine, gives nothing to "use")
+        hasText=any(ln.text.strip() for b in captions for ln in b.lines),
         scanCues=cues,
         scanScore=round(float(score), 2),
     )
-    if case in ("B", "C") and not captions:
-        out["warnings"].append("A plain border was found with no text in it.")
     if over:
         out["warnings"].append("Text printed over the photo was found. It is flagged only and never erased.")
     return out

@@ -19,6 +19,7 @@
   import Preview from './components/Preview.svelte'
   import SettingsDialog from './components/SettingsDialog.svelte'
   import Toasts from './components/Toasts.svelte'
+  import ContextMenu from './components/ContextMenu.svelte'
   import Toolbar from './components/Toolbar.svelte'
   import Warnings from './components/Warnings.svelte'
 
@@ -332,6 +333,7 @@
 {#if dialogs.settingsOpen}<SettingsDialog />{/if}
 {#if dialogs.helpOpen}<HelpDialog />{/if}
 <Toasts />
+<ContextMenu />
 
 <style>
   .shell { height: 100%; display: flex; flex-direction: column; position: relative; }

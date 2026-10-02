@@ -150,7 +150,7 @@ def test_disabled_control_explains_why(page, server):
     assert key in ("Ctrl+Z", "⌘Z"), key
     # a scan with a handwritten caption: Overwrite is off, and its tooltip says why
     select_photo(pg, "12_scanned_polaroid_handwriting.tif")
-    pg.wait_for_selector("text=Physical caption on a scan", timeout=30000)
+    pg.wait_for_selector("text=Handwriting or printing on the photo", timeout=30000)
     over = pg.locator('header.tb button.overwrite')
     assert over.is_disabled()
     text, _ = tip_for(pg, 'header.tb button.overwrite')
@@ -168,7 +168,7 @@ def test_command_palette(page):
     assert zoom.inner_text() != fit_text
     # focus somewhere known, so we can check it comes back
     pg.locator(".strip button.cur").focus()
-    pg.keyboard.press("Control+k")
+    pg.keyboard.press("ControlOrMeta+k")
     dlg = pg.get_by_role("dialog", name="Commands")
     dlg.wait_for()
     total = dlg.get_by_role("option").count()
@@ -176,7 +176,7 @@ def test_command_palette(page):
     # disabled commands say why, with the toolbar's reasons
     pg.keyboard.type("undo")
     assert "Nothing to undo" in dlg.get_by_role("option").first.inner_text()
-    pg.keyboard.press("Control+a")
+    pg.keyboard.press("ControlOrMeta+a")
     pg.keyboard.type("zoom fit")
     opts = dlg.get_by_role("option")
     assert 0 < opts.count() < total
@@ -188,7 +188,7 @@ def test_command_palette(page):
     assert zoom.inner_text() == fit_text
     assert pg.evaluate("() => document.activeElement && document.activeElement.getAttribute('role')") == "option"
     # Esc closes it; arrows move the selection
-    pg.keyboard.press("Control+k")
+    pg.keyboard.press("ControlOrMeta+k")
     dlg.wait_for()
     pg.keyboard.press("ArrowDown")
     assert dlg.locator("[role=option][aria-selected=true]").count() == 1
@@ -252,3 +252,48 @@ def test_warning_about_a_hidden_control_opens_its_disclosure(page):
     pg.wait_for_timeout(500)
     assert pg.locator("text=overflows").count() == 0
     assert not pg.errors, pg.errors
+
+
+def test_file_menu_from_the_keyboard_and_tab_moves_on(page):
+    # Shift+F10 on the current photo opens its file menu; Tab closes it and moves on from the
+    # photo (the menu sits at the end of the page, so focus must not drop to the document)
+    pg = page
+    item = pg.locator('.strip [role="option"][aria-selected="true"]')
+    item.focus()
+    pg.keyboard.press("Shift+F10")
+    menu = pg.locator('.ctx[role="menu"]')
+    pw.expect(menu).to_be_visible()
+    assert "Show in" in menu.inner_text() and "Copy file path" in menu.inner_text()
+    pg.keyboard.press("Escape")
+    pw.expect(menu).to_have_count(0)
+    assert pg.evaluate("document.activeElement.getAttribute('role')") == "option"
+    pg.keyboard.press("Shift+F10")
+    pw.expect(menu).to_be_visible()
+    pg.keyboard.press("Tab")
+    pw.expect(menu).to_have_count(0)
+    tag = pg.evaluate("document.activeElement && document.activeElement.tagName")
+    assert tag not in (None, "BODY"), tag
+
+
+def test_thumbnails_come_back_after_the_server_was_unreachable(page, server):
+    # every thumbnail request fails for a while (more than the old single retry); once the server
+    # answers again, the hidden thumbnails load without reopening the folder
+    pg = page
+    failing = {"on": True}
+
+    def handler(route):
+        if failing["on"]:
+            route.abort()
+        else:
+            route.continue_()
+    pg.route("**/api/photo/proxy?*thumb=1*", handler)
+    pg.reload()
+    reopen(pg)
+    pg.wait_for_timeout(5000)  # past the first retries
+    hidden = pg.locator(".strip .thumb img[data-tries]")
+    assert hidden.count() > 0
+    failing["on"] = False
+    pg.evaluate("window.dispatchEvent(new Event('focus'))")
+    pw.expect(pg.locator(".strip .thumb img[data-tries]")).to_have_count(0, timeout=15000)
+    assert pg.evaluate("[...document.querySelectorAll('.strip .thumb img')].every(i => i.naturalWidth > 0 && i.style.visibility !== 'hidden')")
+    pg.unroute("**/api/photo/proxy?*thumb=1*")

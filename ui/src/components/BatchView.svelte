@@ -4,6 +4,7 @@
   import { dialogs } from '../lib/dialogs.svelte'
   import { app, draftForFile, PhotoSession, type PhotoItem } from '../lib/store.svelte'
   import { caseCOverwriteRefused, copySkipReason, planCaseC } from '../lib/batchplan'
+  import { EDGE_UNSURE, edgeConfidence } from '../lib/existing'
   import { batchRun } from '../lib/batchstate.svelte'
   import { writeControl } from '../lib/controls'
   import { baseName, dirOf, relInside } from '../lib/paths'
@@ -12,6 +13,7 @@
   import Disclosure from './Disclosure.svelte'
   import Icon from './Icon.svelte'
   import Segmented from './Segmented.svelte'
+  import { fileItems, fileMenu, revealFile, fileManagerName } from '../lib/contextmenu.svelte'
 
   type Plan = {
     path: string
@@ -287,7 +289,7 @@
         action = 'rebuild'
         s.draft.sourceRect = ex.band!.photo_rect
         s.draft.photoRect = ex.band!.photo_rect
-        if ((ex.confidence ?? 1) < 0.6) reasons.push('not sure where the existing caption is')
+        if (edgeConfidence(ex) < EDGE_UNSURE) reasons.push('not sure where the photo ends (check its edge)')
       }
     } else if (ex?.case === 'C') {
       // as the server does it: in an overwrite batch the caption is erased on a copy, the original is kept
@@ -298,6 +300,7 @@
         s.draft.mode = 'erase'
         s.draft.photoRect = ex.band!.photo_rect
         s.draft.existingChoice = 'template'
+        if (edgeConfidence(ex) < EDGE_UNSURE) reasons.push('not sure where the photo ends (check its edge)')
       }
     } else if (ex?.case === 'D') {
       reasons.push('text printed over the photo (left untouched)')
@@ -899,6 +902,12 @@
   const unsafe = $derived(B.saveMode === 'overwrite' && !SV.backupOriginals)
   // a save running (a single photo): its settings must not change under it
   const saveLock = $derived(app.saving ? 'Wait until the save finishes: it uses the setting as it was.' : '')
+  /** Right-click on a saved photo: the photo, and the file it was saved as. */
+  function entryItems(e: any) {
+    const items = fileItems(e.path || '')
+    if (e.out && e.out !== e.path) items.splice(1, 0, { label: `Show the saved file in ${fileManagerName()}`, run: () => revealFile(e.out) })
+    return items
+  }
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
 
   function pickWhich(v: string) {
@@ -1035,7 +1044,7 @@
               </div>
               <div class="files scroll">
                 {#each files as f (f.path)}
-                  <label class="frow row"><input type="checkbox" checked={B.which === 'all' || selected.has(f.path)} onchange={(e) => toggleFile(f.path, (e.target as HTMLInputElement).checked)} /> <span class="grow name" data-tip={f.path}>{f.name}</span><span class="faint small">{(f.size / 1048576).toFixed(1)} MB</span></label>
+                  <label class="frow row" use:fileMenu={{ label: `Actions for ${f.name}`, items: () => fileItems(f.path) }}><input type="checkbox" checked={B.which === 'all' || selected.has(f.path)} onchange={(e) => toggleFile(f.path, (e.target as HTMLInputElement).checked)} /> <span class="grow name" data-tip={f.path}>{f.name}</span><span class="faint small">{(f.size / 1048576).toFixed(1)} MB</span></label>
                 {/each}
               </div>
             </Disclosure>
@@ -1081,9 +1090,9 @@
               <Segmented label="Captions made by Photoband" value={B.caseA} options={[{ value: 'recaption', label: 'Re-caption', title: 'Replace the old Photoband band with a new one.' }, { value: 'skip', label: 'Skip', title: 'Leave these photos as they are.' }]} onchange={(v) => setB({ caseA: v as any })} />
               <span>Other bands<small class="help">Caption bands added by another app</small></span>
               <Segmented label="Caption bands from other apps" value={B.caseB} options={[{ value: 'rebuild', label: 'Rebuild band', title: 'Cut off the old band and add a new one. Its text is read (OCR) to start the caption.' }, { value: 'skip', label: 'Skip', title: 'Leave these photos as they are.' }]} onchange={(v) => setB({ caseB: v as any })} />
-              <span>Physical captions<small class="help">Handwritten or printed captions on the scan</small></span>
+              <span>Writing on the border<small class="help">Handwriting or printing on a print’s border</small></span>
               <div class="col">
-                <Segmented label="Physical captions" value={B.caseC} options={[{ value: 'skip', label: 'Skip', title: 'Leave the handwriting alone (recommended for originals).' }, { value: 'erase', label: 'Erase in place', title: 'Erase the writing on a copy and print the caption in the same spot.' }]} onchange={(v) => setB({ caseC: v as any })} />
+                <Segmented label="Writing on the border" value={B.caseC} options={[{ value: 'skip', label: 'Skip', title: 'Leave the handwriting alone (recommended for originals).' }, { value: 'erase', label: 'Erase in place', title: 'Erase the writing on a copy and print the caption in the same spot.' }]} onchange={(v) => setB({ caseC: v as any })} />
                 <span class="faint small">Erasing handwriting on a scan is only done on copies{B.saveMode === 'overwrite' ? ': these originals are kept' : ''}.</span>
               </div>
               <span>Name already taken<small class="help">When a copy with the same name exists</small></span>
@@ -1114,7 +1123,7 @@
         </div>
         <div class="plist scroll">
           {#each plans as p (p.path)}
-            <div class="prow row">
+            <div class="prow row" role="listitem" aria-label={p.name ?? p.path} use:fileMenu={{ label: `Actions for ${p.name ?? p.path}`, items: () => fileItems(p.path) }}>
               <span class="pill {p.status}" data-tip={p.isCopy ? 'A captioned copy Photoband made: left as it is.' : p.maybeCopy ? 'Probably a captioned copy whose photo information was removed: left as it is. Open it to caption it again.' : pillTips[p.status]}>{labels[p.status]}</span>
               <span class="name" data-tip={p.path}>{p.name}</span>
               <span class="reasons" data-tip={[p.action !== 'band' && p.status !== 'skipped' ? (p.action === 'rebuild' ? 'Replaces the existing band.' : p.onCopy ? 'Erases the old caption on a copy; the original is kept.' : 'Erases the old caption in place.') : '', ...p.reasons].filter(Boolean).join('\n') || undefined}>{#if p.usesDraft && p.status !== 'skipped'}<span class="tag">uses your edits</span>{/if}{[p.action !== 'band' && p.status !== 'skipped' ? (p.action === 'rebuild' ? 'replace band' : p.onCopy ? 'erase on a copy (original kept)' : 'erase in place') : '', ...p.reasons, p.reviewed ? 'reviewed' : ''].filter(Boolean).join(' · ')}</span>
@@ -1162,7 +1171,7 @@
         {#if step === 'running'}
           <div class="plist scroll">
             {#each (summary?.entries || []).filter((e: any) => e.state !== 'done') as e (e.index)}
-              <div class="prow row">
+              <div class="prow row" role="listitem" aria-label={rel(e.path || '')} use:fileMenu={{ label: `Actions for ${rel(e.path || '')}`, items: () => entryItems(e) }}>
                 <span class="pill {entryPill[e.state] || 'skipped'}">{entryLabels[e.state] || e.state}</span>
                 <span class="name" data-tip={e.path}>{rel(e.path || '')}</span>
                 <span class="reasons" data-tip={e.error || e.out || undefined}>{e.error || (e.state === 'restored' ? 'original put back' : e.out ? rel(e.out) : '')}</span>
@@ -1173,7 +1182,7 @@
           <Disclosure id="batch.details" label="Each photo" count={`(${(summary?.entries || []).length})`} tip="What happened to every photo, and where it was saved." bind:open={detailsOpen}>
             <div class="plist scroll fixed">
               {#each summary?.entries || [] as e (e.index)}
-                <div class="prow row">
+                <div class="prow row" role="listitem" aria-label={rel(e.path || '')} use:fileMenu={{ label: `Actions for ${rel(e.path || '')}`, items: () => entryItems(e) }}>
                   <span class="pill {entryPill[e.state] || 'skipped'}">{entryLabels[e.state] || e.state}</span>
                   <span class="name" data-tip={e.path}>{rel(e.path || '')}</span>
                   <span class="reasons" data-tip={e.error || e.out || undefined}>{e.error || (e.state === 'restored' ? 'original put back' : e.out ? `saved as ${rel(e.out)}` : '')}</span>

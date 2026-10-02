@@ -22,7 +22,9 @@ Decisions worth knowing:
   spot removal, red eye) reference the old geometry and are removed; global
   develop settings stay. Both are reported in the notes.
 * Frames: MWG regions use metadata.region_frame_orientation (AppliedToDimensions
-  decides stored vs upright for orientation 5-8). MP regions have no
+  decides stored vs upright for orientation 5-8, except for Lightroom, whose
+  AppliedToDimensions is the upright size while its boxes are in the stored
+  frame; the overlay, captions and this remap share that one decision). MP regions have no
   AppliedToDimensions and use the file's orientation. IPTC ImageRegion and the
   EXIF/XMP subject area are handled the same way as MP (the stored pixels,
   with the EXIF orientation applied), because that is how they were
@@ -90,10 +92,11 @@ def _name(v) -> str:
     return str(v).strip() if v not in (None, "") else ""
 
 
-def mwg_orientation(md: Dict, info: ImageInfo) -> int:
-    """Orientation to apply to stored MWG region boxes (shared decision with metadata.py)."""
+def mwg_orientation(md: Dict, info: ImageInfo, region: Optional[Dict] = None) -> int:
+    """Orientation to apply to a stored MWG region box, decided per region (the same
+    decision metadata.py makes for display)."""
     from .metadata import region_frame_orientation
-    return region_frame_orientation(md, info)
+    return region_frame_orientation(md, info, region)
 
 
 def mp_orientation(md: Dict, info: ImageInfo) -> int:
@@ -173,12 +176,12 @@ def _dropped(notes: Optional[List[str]], kind: str, name: str) -> None:
 
 
 def _mwg_updates(mwg: Dict, md: Dict, info: ImageInfo, g: _Geo, notes) -> Dict:
-    ori = mwg_orientation(md, info)
-    fw, _ = _frame_px(ori, info.upright_size)
     new_list = []
     for r in mwg.get("RegionList") or []:
         if not isinstance(r, dict):
             continue
+        ori = mwg_orientation(md, info, r)   # per region: Lightroom's and other tools' frames differ
+        fw, _ = _frame_px(ori, info.upright_size)
         area = dict(r.get("Area") or {}) if isinstance(r.get("Area"), dict) else {}
         cx, cy = _opt(area.get("X")), _opt(area.get("Y"))
         if str(area.get("Unit", "normalized")).strip().lower() != "normalized" or cx is None or cy is None:

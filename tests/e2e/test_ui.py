@@ -112,7 +112,7 @@ def test_open_edit_save(page, server):
     assert pg.locator(".chip.custom").count() == 1
     shot(pg, "02_custom_edit")
     # save copy
-    pg.keyboard.press("Control+s")
+    pg.keyboard.press("ControlOrMeta+s")
     pg.wait_for_selector("text=Saved 01_prophoto16_lzw-captioned.tif", timeout=60000)
     out = os.path.join(server["work"], "01_prophoto16_lzw-captioned.tif")   # next to the original
     assert os.path.exists(out)
@@ -182,7 +182,7 @@ def test_group_rows_and_unicode(page):
 def test_case_b_recognized(page):
     pg = page
     select_photo(pg, "11_other_tool_colored_band.png")
-    pg.wait_for_selector("text=Existing caption found", timeout=30000)
+    pg.wait_for_selector("text=This photo already has a caption band", timeout=30000)
     shot(pg, "11_case_b_banner")
     pg.click("button:has-text('Use recognized text')")
     pg.wait_for_timeout(1500)
@@ -193,12 +193,37 @@ def test_case_b_recognized(page):
 def test_case_c_erase(page):
     pg = page
     select_photo(pg, "12_scanned_polaroid_handwriting.tif")
-    pg.wait_for_selector("text=Physical caption on a scan", timeout=30000)
-    pg.click("button:has-text('Replace with template')")
+    pg.wait_for_selector("text=Handwriting or printing on the photo", timeout=30000)
+    pg.click("button:has-text('Erase it, use template')")
     pg.wait_for_timeout(3000)
     shot(pg, "13_case_c_erase")
     # overwrite is disabled for case C by default
     assert pg.locator("header.tb button.overwrite").is_disabled()
+
+
+def test_edge_loupe_past_the_image_edge(page):
+    """Dragging an edge past the image's own edge (a thin border) used to ask for an empty crop:
+    the loupe showed black with a broken image and its alt text "Edge at 400%"."""
+    pg = page
+    pg.locator("button:has-text('Edge')").first.click()
+    cv = pg.locator('canvas[aria-label^="Before"]').bounding_box()
+    W, H = 1760, 1900                      # 12_scanned_polaroid_handwriting.tif; photo top at y=110
+    z = min((cv["width"] - 56) / W, (cv["height"] - 56) / H)
+    ox, oy = cv["x"] + (cv["width"] - W * z) / 2, cv["y"] + (cv["height"] - H * z) / 2
+    x, y = ox + 800 * z, oy + 110 * z
+    pg.mouse.move(x, y)
+    pg.mouse.down()
+    for i in range(1, 8):                  # up past the top of the image
+        pg.mouse.move(x, y - i * 12)
+        pg.wait_for_timeout(40)
+    loupe_img = pg.locator(".loupe img")
+    loupe_img.wait_for(timeout=10000)
+    pg.wait_for_function("() => { const i = document.querySelector('.loupe img'); return i && i.complete && i.naturalWidth === 40 && i.naturalHeight === 40 }", timeout=10000)
+    assert pg.locator(".loupe-note").count() == 0
+    shot(pg, "13b_edge_loupe_past_edge")
+    pg.mouse.up()
+    pw.expect(pg.locator(".loupe")).to_have_count(0)
+    pg.locator("button:has-text('Edge')").first.click()
 
 
 def test_case_d_flag(page):

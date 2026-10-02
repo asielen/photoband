@@ -126,3 +126,11 @@ def test_syntax_errors_do_not_crash():
     for bad in ["{title", "[{title}", "}", "]", "{", "{|}", "{:}", "\\"]:
         res = r(bad)
         assert isinstance(res.text, str)
+
+
+def test_keyword_prefix_boundary_keeps_combining_marks_in_the_word():
+    from captiontokens.tokens import _prefix_match
+    assert not _prefix_match("cafe\u0301 visit", "cafe")      # "café" (decomposed) is another word
+    assert _prefix_match("cafe\u0301 visit", "cafe\u0301")
+    assert not _prefix_match("हिन्दी", "हिन")                 # a vowel sign continues the word
+    assert _prefix_match("scan 2024", "scan") and not _prefix_match("scandinavia", "scan")

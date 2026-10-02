@@ -2,10 +2,13 @@
   import { app, type PhotoSession } from '../lib/store.svelte'
   import Icon from './Icon.svelte'
   import Segmented from './Segmented.svelte'
+  import { EDGE_UNSURE, edgeConfidence } from '../lib/existing'
 
   let { s, tool = $bindable('pan') }: { s: PhotoSession; tool?: 'pan' | 'edge' | 'brush-add' | 'brush-remove' } = $props()
   const ex = $derived(s.existing)
-  const conf = $derived(ex?.confidence != null ? Math.round(ex.confidence * 100) : null)
+  // how sure the detector is where the photo ends (not whether there is writing: the case says that).
+  // No percentage: only a low one is worth saying, as something to check.
+  const edgeUnsure = $derived(ex?.source === 'detection' && edgeConfidence(ex) < EDGE_UNSURE)
   const active = $derived(s.draft.mode !== 'band')
   // "Ignore"/"Dismiss" is remembered on the photo (Save then doesn't ask about the old band)
   const dismissed = $derived(s.existingIgnored)
@@ -13,8 +16,10 @@
     if (!ex) return ''
     const parts: string[] = []
     if (ex.source === 'marker') parts.push('exact photo edge known')
-    if (conf != null) parts.push(`${conf}% confidence`)
-    if (!ex.hasText) parts.push('no text found in the border')
+    if (edgeUnsure) parts.push('the photo’s edge is a guess: check it with Edge')
+    // B and C both need writing in the border (a plain border is no case); none read means the
+    // marks couldn't be read (C), or Photoband's own band was saved without text (B, by its marker)
+    if (!ex.hasText) parts.push(ex.case === 'C' ? 'the words couldn’t be read' : 'no text found in it')
     return parts.join(' · ')
   })
   $effect(() => {
@@ -75,9 +80,9 @@
       <div class="row msgrow">
         <Icon name={ex.case === 'C' ? 'pen' : 'text'} />
         <div class="grow">
-          <b>{ex.case === 'C' ? 'Physical caption on a scan' : 'Existing caption found'}</b>
+          <b>{ex.case === 'C' ? 'Handwriting or printing on the photo’s border' : 'This photo already has a caption band'}</b>
           {#if details}<span class="faint"> · {details}</span>{/if}
-          {#if ex.case === 'C'}<div class="faint small">Handwriting on a print is part of the record, so changes go to a copy{app.settings.saving.allowOverwriteHandwritten ? '' : ' (Overwrite original is off; Settings › Saving)'}. The text it says is kept in the file.</div>{/if}
+          {#if ex.case === 'C'}<div class="faint small">{#if app.settings.saving.allowOverwriteHandwritten}Writing on an original print is part of its history: saving a copy keeps the original as it is.{:else}Writing on an original print is part of its history, so Photoband won’t overwrite this scan. Saving makes a captioned copy and leaves the original as it is (Settings › Saving can allow overwriting).{/if}{ex.hasText ? ' The words read from it are kept in the copy’s photo information.' : ''}</div>{/if}
           {#if overCount}<div class="faint small">Text printed over the photo ({overCount === 1 ? 'outlined in orange' : `${overCount} places, outlined in orange`} in Before) is flagged only and never erased.</div>{/if}
           {#if otherText.length}<div class="faint small">Not treated as caption (paper backprint or lab logo): {otherText.map((t) => `“${t}”`).join(', ')}.</div>{/if}
         </div>
@@ -85,8 +90,8 @@
       <div class="row tools">
       {#if !active}
         {#if ex.hasText}<button class="btn sm primary" data-tip="Use the text read from the old caption. Check the words underlined as uncertain." onclick={() => app.useExisting(s, 'recognized', ex.case === 'C' ? 'erase' : 'rebuild')}>Use recognized text</button>{/if}
-        <button class="btn sm" data-tip="Replace the old caption with the text from the template" onclick={() => app.useExisting(s, 'template', ex.case === 'C' ? 'erase' : 'rebuild')}>Replace with template</button>
-        <button class="btn sm ghost" data-tip="Keep the old caption as part of the photo; a new band is added below it" onclick={() => (s.existingIgnored = true)}>Ignore</button>
+        <button class="btn sm" data-tip={ex.case === 'C' ? (app.settings.saving.allowOverwriteHandwritten ? 'Erase the writing and put the template’s caption in its place. Save copy keeps the scan as it is; Overwrite (allowed in Settings › Saving) replaces it.' : 'Erase the writing and put the template’s caption in its place, on the saved copy. The original scan is not changed: overwriting it is off in Settings › Saving.') : 'Remove the old band and add a new one with the template’s caption'} onclick={() => app.useExisting(s, 'template', ex.case === 'C' ? 'erase' : 'rebuild')}>{ex.case === 'C' ? 'Erase it, use template' : 'Replace with template'}</button>
+        <button class="btn sm ghost" data-tip={ex.case === 'C' ? 'Leave the writing as part of the photo and add a new caption band below it' : 'Keep the old band as part of the photo and add a new band below it'} onclick={() => (s.existingIgnored = true)}>{ex.case === 'C' ? 'Keep the writing' : 'Keep it'}</button>
       {:else}
         <Segmented small value={s.draft.mode} label="Replacement mode" options={[{ value: 'rebuild', label: 'Rebuild band', tip: 'Crop to the photo and add a new band' }, { value: 'erase', label: 'Erase in place', tip: 'Keep the original band and paper; erase the old text and write the new text there' }]} onchange={(v) => app.useExisting(s, s.draft.existingChoice || 'template', v as any)} />
         <span class="sep"></span>

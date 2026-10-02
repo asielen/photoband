@@ -2,6 +2,7 @@
   import { proxyUrl } from '../lib/api'
   import { app } from '../lib/store.svelte'
   import { dialogs } from '../lib/dialogs.svelte'
+  import { fileItems, fileMenu } from '../lib/contextmenu.svelte'
   import Icon from './Icon.svelte'
   let list: HTMLDivElement
   $effect(() => {
@@ -49,13 +50,43 @@ ${st}`
     app.select(to)
     queueMicrotask(() => list?.querySelector<HTMLElement>(`[data-i="${to}"]`)?.focus())
   }
+  // A thumbnail that fails to load is hidden (no broken-image icon) and tried again with a growing
+  // wait (1.5 s ... 30 s) for as long as it is shown, and at once when the window regains focus
+  // or the network returns: a server that was briefly unreachable never leaves it blank for good.
+  const timers = new WeakMap<HTMLImageElement, ReturnType<typeof setTimeout>>()
+  function retryThumb(im: HTMLImageElement) {
+    clearTimeout(timers.get(im))
+    if (!im.isConnected || !im.dataset.base) return
+    const n = Number(im.dataset.tries || 0)
+    im.src = `${im.dataset.base}${im.dataset.base.includes('?') ? '&' : '?'}retry=${n}`
+  }
+  function thumbFailed(e: Event) {
+    const im = e.currentTarget as HTMLImageElement
+    im.style.visibility = 'hidden'
+    im.dataset.base ||= im.src
+    const n = Number(im.dataset.tries || 0) + 1
+    im.dataset.tries = String(n)
+    clearTimeout(timers.get(im))
+    timers.set(im, setTimeout(() => retryThumb(im), Math.min(30000, 1500 * 2 ** (n - 1))))
+  }
+  function thumbLoaded(e: Event) {
+    const im = e.currentTarget as HTMLImageElement
+    im.style.visibility = ''
+    delete im.dataset.tries
+    clearTimeout(timers.get(im))
+  }
+  function retryFailedThumbs() {
+    list?.querySelectorAll<HTMLImageElement>('img[data-tries]').forEach(retryThumb)
+  }
 </script>
 
+<svelte:window onfocus={retryFailedThumbs} ononline={retryFailedThumbs} />
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div class="strip scroll" bind:this={list} role="listbox" aria-label="Photos" tabindex="-1" onkeydown={key}>
   {#each app.photos as p, i (p.path)}
-    <button class="item" class:cur={i === app.current} data-i={i} role="option" aria-selected={i === app.current} tabindex={i === app.current || (app.current < 0 && i === 0) ? 0 : -1} data-tip={tipFor(p)} data-tip-side="right" onclick={() => app.select(i)}>
-      <div class="thumb"><img src={proxyUrl(p.path, 0, true)} alt="" loading="lazy" decoding="async" /></div>
+    <button class="item" class:cur={i === app.current} data-i={i} role="option" aria-selected={i === app.current} tabindex={i === app.current || (app.current < 0 && i === 0) ? 0 : -1} data-tip={tipFor(p)} data-tip-side="right" onclick={() => app.select(i)}
+      use:fileMenu={{ label: `Actions for ${p.name}`, items: () => fileItems(p.path) }}>
+      <div class="thumb"><img src={proxyUrl(p.path, 0, true)} alt="" loading="lazy" decoding="async" onerror={thumbFailed} onload={thumbLoaded} /></div>
       <div class="meta row">
         <span class="badge {p.status}" role="img" aria-label={label[p.status]}>
           {#if p.status === 'draft'}<Icon name="pen" size={10} stroke={2.5} />{:else if p.status === 'saved'}<Icon name="check" size={10} stroke={3} />{:else if p.status === 'error'}<b aria-hidden="true">!</b>{/if}

@@ -170,18 +170,38 @@ def _atd(md: Dict[str, Any]) -> Optional[Tuple[float, float]]:
     return (aw, ah) if aw > 0 and ah > 0 else None
 
 
-def region_frame_orientation(md: Dict[str, Any], info: ImageInfo) -> int:
-    """Orientation to apply to stored region boxes (MWG and MP).
+def _lightroom_region(region: Any) -> bool:
+    """True when this MWG region was written by Lightroom.
+
+    Lightroom (LR6 to Classic 14 at least) normalizes region boxes against the
+    STORED pixels, like the MWG spec, but writes AppliedToDimensions with the
+    UPRIGHT (displayed) size, so for orientation 5-8 its AppliedToDimensions
+    looks like an upright-frame declaration while the boxes are not. Its
+    regions carry a per-region mwg-rs:Rotation, which is not part of MWG 2.0
+    (ExifTool: "observed in LR6 XMP"). Only that evidence on the region itself
+    counts: not the file-level CreatorTool (it can outlive the regions), and not
+    another region's marker (an editor may add upright faces next to an older
+    Lightroom one)."""
+    return isinstance(region, dict) and "Rotation" in region
+
+
+def region_frame_orientation(md: Dict[str, Any], info: ImageInfo, region: Any = None) -> int:
+    """Orientation to apply to a stored MWG region box (``region``: its RegionList
+    entry; decided per region).
 
     Regions are normally written against the stored pixels, so the EXIF
     orientation applies. For orientation 5-8, a tool may have written them
     against the upright image instead; AppliedToDimensions tells which: its
     aspect ratio is compared with the stored and the upright frame (it may be
-    a scaled copy), and 1 is returned when it matches the upright frame."""
+    a scaled copy), and 1 is returned when it matches the upright frame.
+    A region Lightroom wrote is the exception: Lightroom's AppliedToDimensions is
+    always the upright size while its boxes are in the stored frame."""
     o = int(info.orientation or 1)
     md = _text_view(md)
     atd = _atd(md)
     if o not in (5, 6, 7, 8) or atd is None or not info.width or not info.height:
+        return o
+    if _lightroom_region(region):
         return o
     aw, ah = atd
     r = math.log(aw / ah)
@@ -190,13 +210,20 @@ def region_frame_orientation(md: Dict[str, Any], info: ImageInfo) -> int:
     return 1 if upright < stored else o
 
 
-def _dims_mismatch(md: Dict[str, Any], info: ImageInfo, rotate: int) -> bool:
+def _dims_mismatch(md: Dict[str, Any], info: ImageInfo) -> bool:
+    """AppliedToDimensions is neither the stored nor (for a rotated file,
+    orientation 5-8) the upright pixel size: a scaled or edited copy. For a rotated
+    file either size is fine (Lightroom writes the upright size for stored-frame
+    boxes); an unrotated file has only one frame, so a transposed size is a mismatch."""
     atd = _atd(md)
     if atd is None or not info.width or not info.height:
         return False
     aw, ah = atd
-    fw, fh = (info.height, info.width) if (rotate == 1 and info.orientation in (5, 6, 7, 8)) else (info.width, info.height)
-    return abs(aw - fw) / fw > 0.01 or abs(ah - fh) / fh > 0.01
+
+    def off(fw, fh):
+        return abs(aw - fw) / fw > 0.01 or abs(ah - fh) / fh > 0.01
+    rotated = int(info.orientation or 1) in (5, 6, 7, 8)
+    return off(info.width, info.height) and (not rotated or off(info.height, info.width))
 
 
 def _mwg_box(area, rotate: int):
@@ -240,8 +267,7 @@ def parse_regions(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
     A region without usable coordinates keeps its name with box None."""
     md = _text_view(md)
     warnings: List[str] = []
-    rotate = region_frame_orientation(md, info)
-    if _dims_mismatch(md, info, rotate):
+    if _dims_mismatch(md, info):
         warnings.append("region dimensions mismatch")
     mwg_named: List[Dict[str, Any]] = []
     mwg_unnamed: List[Dict[str, Any]] = []
@@ -253,7 +279,7 @@ def parse_regions(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
         if str(r.get("Type", "Face")).strip().lower() != "face":
             continue
         name = _name(r.get("Name"))
-        entry = {"name": name, "box": _mwg_box(r.get("Area"), rotate), "source": "MWG"}
+        entry = {"name": name, "box": _mwg_box(r.get("Area"), region_frame_orientation(md, info, r)), "source": "MWG"}
         (mwg_named if name else mwg_unnamed).append(entry)
     named, unnamed = list(mwg_named), list(mwg_unnamed)
     mp = md.get("XMP-MP:RegionInfoMP")

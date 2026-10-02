@@ -23,6 +23,7 @@ from __future__ import annotations
 import datetime as _dt
 from dataclasses import dataclass, field
 import re
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
 from .dates import PartialDate, check_format, format_date, render_date
@@ -210,7 +211,13 @@ def _prefix_match(text: str, prefix: str) -> bool:
     t = text.lower()
     if not t.startswith(prefix):
         return False
-    return len(t) == len(prefix) or not t[len(prefix)].isalnum() or not prefix[-1].isalnum()
+    return len(t) == len(prefix) or not _word_char(t[len(prefix)]) or not _word_char(prefix[-1])
+
+
+def _word_char(ch: str) -> bool:
+    """Part of a word in any script: letters, digits and combining marks (``str.isalnum`` is
+    False for marks, so "cafe" + U+0301 looked like "cafe" followed by a boundary)."""
+    return unicodedata.category(ch)[0] in "LNM"
 
 
 def _keyword_excluded(kw: str, paths: List[str], prefixes: List[str]) -> bool:

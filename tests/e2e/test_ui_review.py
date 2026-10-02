@@ -177,7 +177,7 @@ def test_tab_never_hides_panels(page):
 def test_panels_toggle_shortcut_and_button(page):
     pg = page
     pg.locator(".strip button.cur").focus()
-    pg.keyboard.press("Control+Backslash")
+    pg.keyboard.press("ControlOrMeta+Backslash")
     pg.wait_for_timeout(300)
     assert pg.locator(".strip").count() == 0 and pg.locator(".insp").count() == 0
     btn = pg.locator("button[aria-label='Show side panels']")
@@ -302,7 +302,7 @@ def test_filmstrip_badge_is_a_shape(page):
     assert badge.get_attribute("aria-label") == "Unsaved edits"
     assert badge.locator("svg").count() == 1
     shot(pg, "08_badge_draft_960")
-    pg.keyboard.press("Control+z")
+    pg.keyboard.press("ControlOrMeta+z")
     pg.keyboard.press("Escape")
 
 
@@ -316,7 +316,7 @@ def test_batch_wording(page):
         more.click()
     txt = pg.inner_text(".batch")
     assert "Check photos" in txt and "pre-flight" not in txt.lower()
-    for helper in ("Captions this app made earlier", "Caption bands added by another app", "Handwritten or printed captions on the scan"):
+    for helper in ("Captions this app made earlier", "Caption bands added by another app", "Handwriting or printing on a print’s border"):
         assert helper in txt, helper
     shot(pg, "07_batch_setup_960")
     pg.click("button:has-text('Back to editor')")
@@ -329,8 +329,8 @@ def test_case_c_ignore_keeps_overwrite_off(page):
     handwriting) either: the server refuses it in every mode, so the button is off with the reason."""
     pg = page
     pg.get_by_role("option", name="12_scanned_polaroid_handwriting.tif").click()
-    pg.wait_for_selector("text=Physical caption on a scan", timeout=30000)
-    pg.click("button:has-text('Ignore')")
+    pg.wait_for_selector("text=Handwriting or printing on the photo", timeout=30000)
+    pg.click("button:has-text('Keep the writing')")
     pg.wait_for_timeout(500)
     btn = pg.locator('header.tb button.overwrite')
     assert btn.is_disabled()
