@@ -124,22 +124,27 @@ if ($SignThumb) {
 if ($SkipInstaller) { Write-Host "App folder written to $AppDir"; exit 0 }
 
 # ---- WebView2 Evergreen bootstrapper (installed by the setup only when missing) ---------
-$Redist = Join-Path $Root "build\redist"
-New-Item -ItemType Directory -Force -Path $Redist | Out-Null
-$WebView2 = Join-Path $Redist "MicrosoftEdgeWebview2Setup.exe"
-if (-not (Test-Path $WebView2)) {
-    Write-Host "Downloading the WebView2 Evergreen bootstrapper"
-    Invoke-WebRequest -UseBasicParsing -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $WebView2
-}
-$sig = Get-AuthenticodeSignature $WebView2
-if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch "O=Microsoft Corporation") {
-    Remove-Item $WebView2 -Force
-    throw "The downloaded WebView2 bootstrapper is not validly signed by Microsoft ($($sig.Status))."
+# Not for win81: current WebView2 releases don't support Windows 8.1, so its installer would
+# only fail there; that build opens in the browser (the app checks for WebView2 itself).
+$isccArgs = @("/DAppVersion=$Version", "/DAppDir=$AppDir",
+              "/DMinWinVersion=$(if ($Win81) { '6.3' } else { '10.0' })", "/DOutputSuffix=$(if ($Win81) { '-win81' } else { '' })")
+if (-not $Win81) {
+    $Redist = Join-Path $Root "build\redist"
+    New-Item -ItemType Directory -Force -Path $Redist | Out-Null
+    $WebView2 = Join-Path $Redist "MicrosoftEdgeWebview2Setup.exe"
+    if (-not (Test-Path $WebView2)) {
+        Write-Host "Downloading the WebView2 Evergreen bootstrapper"
+        Invoke-WebRequest -UseBasicParsing -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $WebView2
+    }
+    $sig = Get-AuthenticodeSignature $WebView2
+    if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch "O=Microsoft Corporation") {
+        Remove-Item $WebView2 -Force
+        throw "The downloaded WebView2 bootstrapper is not validly signed by Microsoft ($($sig.Status))."
+    }
+    $isccArgs += "/DWebView2Bootstrapper=$WebView2"
 }
 
 # ---- installer --------------------------------------------------------------------------
-$isccArgs = @("/DAppVersion=$Version", "/DWebView2Bootstrapper=$WebView2", "/DAppDir=$AppDir",
-              "/DMinWinVersion=$(if ($Win81) { '6.3' } else { '10.0' })", "/DOutputSuffix=$(if ($Win81) { '-win81' } else { '' })")
 if ($SignThumb) {
     # $q and $f are expanded by Inno Setup (quote, file to sign)
     $isccArgs += '/Sphotoband=$q' + $SignTool + '$q sign /fd sha256 /tr ' + $Timestamp + ' /td sha256 /sha1 ' + $SignThumb + ' $f'
