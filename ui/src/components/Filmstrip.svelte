@@ -50,6 +50,17 @@ ${st}`
     app.select(to)
     queueMicrotask(() => list?.querySelector<HTMLElement>(`[data-i="${to}"]`)?.focus())
   }
+  // a thumbnail that fails to load is tried once more, then left out (no broken-image icon)
+  function thumbFailed(e: Event) {
+    const im = e.currentTarget as HTMLImageElement
+    if (!im.dataset.retried) {
+      im.dataset.retried = '1'
+      const src = im.src
+      setTimeout(() => { if (im.isConnected) im.src = src + (src.includes('?') ? '&' : '?') + 'retry=1' }, 3000)
+    } else {
+      im.style.visibility = 'hidden'
+    }
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -58,7 +69,7 @@ ${st}`
     <button class="item" class:cur={i === app.current} data-i={i} role="option" aria-selected={i === app.current} tabindex={i === app.current || (app.current < 0 && i === 0) ? 0 : -1} data-tip={tipFor(p)} data-tip-side="right" onclick={() => app.select(i)}
       oncontextmenu={(e) => openContextMenu(e, `Actions for ${p.name}`, fileItems(p.path))}
       onkeydown={(e) => { if (isContextKey(e)) { e.stopPropagation(); openContextMenu(e, `Actions for ${p.name}`, fileItems(p.path)) } }}>
-      <div class="thumb"><img src={proxyUrl(p.path, 0, true)} alt="" loading="lazy" decoding="async" /></div>
+      <div class="thumb"><img src={proxyUrl(p.path, 0, true)} alt="" loading="lazy" decoding="async" onerror={thumbFailed} /></div>
       <div class="meta row">
         <span class="badge {p.status}" role="img" aria-label={label[p.status]}>
           {#if p.status === 'draft'}<Icon name="pen" size={10} stroke={2.5} />{:else if p.status === 'saved'}<Icon name="check" size={10} stroke={3} />{:else if p.status === 'error'}<b aria-hidden="true">!</b>{/if}

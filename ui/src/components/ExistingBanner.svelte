@@ -2,10 +2,13 @@
   import { app, type PhotoSession } from '../lib/store.svelte'
   import Icon from './Icon.svelte'
   import Segmented from './Segmented.svelte'
+  import { EDGE_UNSURE, edgeConfidence } from '../lib/existing'
 
   let { s, tool = $bindable('pan') }: { s: PhotoSession; tool?: 'pan' | 'edge' | 'brush-add' | 'brush-remove' } = $props()
   const ex = $derived(s.existing)
-  const conf = $derived(ex?.confidence != null ? Math.round(ex.confidence * 100) : null)
+  // how sure the detector is where the photo ends (not whether there is writing: the case says that).
+  // No percentage: only a low one is worth saying, as something to check.
+  const edgeUnsure = $derived(ex?.source === 'detection' && edgeConfidence(ex) < EDGE_UNSURE)
   const active = $derived(s.draft.mode !== 'band')
   // "Ignore"/"Dismiss" is remembered on the photo (Save then doesn't ask about the old band)
   const dismissed = $derived(s.existingIgnored)
@@ -13,8 +16,9 @@
     if (!ex) return ''
     const parts: string[] = []
     if (ex.source === 'marker') parts.push('exact photo edge known')
-    if (conf != null) parts.push(`${conf}% sure`)
-    // case C: writing was seen but couldn't be read; case B: a band without readable text
+    if (edgeUnsure) parts.push('the photo’s edge is a guess: check it with Edge')
+    // B and C both need writing in the border (a plain border is no case); none read means the
+    // marks couldn't be read (C), or Photoband's own band was saved without text (B, by its marker)
     if (!ex.hasText) parts.push(ex.case === 'C' ? 'the words couldn’t be read' : 'no text found in it')
     return parts.join(' · ')
   })

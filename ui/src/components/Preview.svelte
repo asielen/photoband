@@ -6,6 +6,7 @@
   import type { Rect } from '../lib/types'
   import Icon from './Icon.svelte'
   import { untrack } from 'svelte'
+  import { LOUPE_SRC, loupeWindow } from '../lib/loupe'
 
   let { tool = $bindable('pan') }: { tool?: 'pan' | 'edge' | 'brush-add' | 'brush-remove' } = $props()
 
@@ -54,13 +55,30 @@
   // images
   const imgs = new Map<string, HTMLImageElement>()
   let imgTick = $state(0)
+  // a load that failed is retried (after 1.5 s, then 3 s) and then given up: never cached as a
+  // broken image for good, never a spinner that turns forever
+  const IMG_TRIES = 3
+  const imgFails = new Map<string, { n: number; at: number }>()
+  function imgFailed(src: string) {
+    return (imgFails.get(src)?.n ?? 0) >= IMG_TRIES
+  }
   function img(src: string): HTMLImageElement | null {
     let im = imgs.get(src)
     if (!im) {
+      const f = imgFails.get(src)
+      if (f && (f.n >= IMG_TRIES || performance.now() - f.at < 1500 * f.n)) return null
       im = new Image()
       im.decoding = 'async'
-      im.onload = () => imgTick++
-      im.onerror = () => imgTick++
+      im.onload = () => {
+        imgFails.delete(src)
+        imgTick++
+      }
+      im.onerror = () => {
+        if (imgs.get(src) === im) imgs.delete(src)
+        const prev = imgFails.get(src)
+        imgFails.set(src, { n: (prev?.n ?? 0) + 1, at: performance.now() })
+        imgTick++
+      }
       im.src = src
       imgs.set(src, im)
       if (imgs.size > 40) imgs.delete(imgs.keys().next().value!)
@@ -258,8 +276,10 @@
   function draw() {
     raf = 0
     if (!s || !lay || !info || !beforeCv || !afterCv) return
-    const proxy = img(proxyUrl(s.path, s.proxyVersion))
-    loading = !proxy
+    const proxySrc = proxyUrl(s.path, s.proxyVersion)
+    const proxy = img(proxySrc)
+    const proxyFailed = !proxy && imgFailed(proxySrc)
+    loading = !proxy && !proxyFailed
     const W = info.upright_width
     const H = info.upright_height
     const ps = proxy ? proxy.naturalWidth / W : 1
@@ -322,8 +342,11 @@
         if (app.showFaces) drawFaces(ctx, panX + dx * zoom, panY + dy * zoom, lay.sourceRect)
       }
     }
+    if (proxyFailed) {
+      for (const cv of [beforeCv, afterCv]) drawChip(cv.getContext('2d')!, 'Couldn’t load the preview of this photo. Open another photo and come back to try again.', 'Preview unavailable')
+    }
     maybeRequestDetail(ps)
-    // keep the spinner turning until the proxy arrives
+    // keep the spinner turning (and a failed load retrying) until the proxy arrives
     if (loading) schedule()
   }
 
@@ -460,8 +483,11 @@
   // --- existing-text: edge handles, loupe, brush --------------------------------------
   let edgeDrag = $state<{ side: string; rect: Rect; start: Rect } | null>(null)
   let selectedEdge = $state<string>('bottom')
-  let loupe = $state<{ x: number; y: number; src: string; sx: number; sy: number } | null>(null)
+  // the loupe shows LOUPE_SRC source px at 4x. src/sx/sy are those of the image on show: a new crop
+  // replaces it only once it has loaded, and a failed one leaves a note instead of a broken image
+  let loupe = $state<{ x: number; y: number; src: string; sx: number; sy: number; failed: boolean } | null>(null)
   let loupeTimer: any
+  let loupeSeq = 0
 
   function handles(r: Rect) {
     const [x, y, w, h] = r
@@ -488,14 +514,36 @@
   }
 
   function requestLoupe(sx: number, sy: number, cx: number, cy: number) {
+    // the loupe follows the pointer at once; its picture follows when loaded
+    if (loupe) loupe = { ...loupe, x: cx, y: cy }
+    else loupe = { x: cx, y: cy, src: '', sx: 0, sy: 0, failed: false }
     clearTimeout(loupeTimer)
     loupeTimer = setTimeout(() => {
-      if (!s) return
-      const size = 40
-      const src = url('/api/photo/crop', { path: s.path, x: Math.round(sx - size / 2), y: Math.round(sy - size / 2), w: size, h: size, out: 160 })
-      loupe = { x: cx, y: cy, src, sx: Math.round(sx - size / 2), sy: Math.round(sy - size / 2) }
+      if (!s || !info) return
+      const r = loupeWindow(sx, sy, info.upright_width, info.upright_height)
+      const src = url('/api/photo/crop', { path: s.path, x: r.x, y: r.y, w: r.w, h: r.h, out: 160, v: s.proxyVersion })
+      const seq = ++loupeSeq
+      const im = new Image()
+      im.onload = () => {
+        if (seq === loupeSeq && loupe) loupe = { ...loupe, src, sx: r.x, sy: r.y, failed: false }
+      }
+      im.onerror = () => {
+        if (seq === loupeSeq && loupe) loupe = { ...loupe, src: '', failed: true }
+      }
+      im.src = src
     }, 60)
   }
+  // a loupe never outlives the drag that opened it (another tool, another photo)
+  $effect(() => {
+    void [tool, s?.path]
+    untrack(() => {
+      if (!edgeDrag && loupe) {
+        clearTimeout(loupeTimer)
+        loupeSeq++
+        loupe = null
+      }
+    })
+  })
 
   // brush mask at proxy resolution
   let brushMask = $state(0)
@@ -531,6 +579,7 @@
     if (s?.path !== lastMaskPath) {
       lastMaskPath = s?.path ?? ''
       maskAdd = maskRem = null
+      imgFails.clear()   // coming back to a photo tries its failed images again
     }
   })
 
@@ -697,6 +746,10 @@
     if (edgeDrag && s) {
       app.setPhotoEdge(s, edgeDrag.rect)
       edgeDrag = null
+    }
+    if (loupe) {
+      clearTimeout(loupeTimer)
+      loupeSeq++
       loupe = null
     }
     dragging = null
@@ -768,6 +821,13 @@
 
   // erase preview from the backend, refreshed when the mask or edge changes
   let erTimer: any
+  let erFailNote = ''
+  function erasePreviewFailed(detail: string) {
+    // After keeps the last preview that worked: say that it is out of date (once per message)
+    const msg = `Couldn’t update the erase preview${detail ? `: ${detail}` : ''}. After may not show your latest changes.`
+    if (msg !== erFailNote) app.toast('warn', msg)
+    erFailNote = msg
+  }
   $effect(() => {
     const cur = s
     if (!cur || cur.draft.mode !== 'erase' || !cur.existing?.band) return
@@ -784,8 +844,14 @@
           const old = cur.erasePreview
           cur.erasePreview = URL.createObjectURL(await r.blob())
           if (old) setTimeout(() => URL.revokeObjectURL(old), 2000)
+          erFailNote = ''
+        } else {
+          const detail = await r.json().then((j) => (typeof j?.detail === 'string' ? j.detail : '')).catch(() => '')
+          erasePreviewFailed(detail)
         }
-      } catch { /* preview only */ }
+      } catch {
+        erasePreviewFailed('')
+      }
     }, 250)
   })
 
@@ -804,7 +870,7 @@
   const loupeLine = $derived.by(() => {
     if (!loupe || !edgeDrag) return null
     const [x, y, w, h] = edgeDrag.rect
-    const k = 160 / 40
+    const k = 160 / LOUPE_SRC
     if (edgeDrag.side === 'top') return { horiz: true, at: (y - loupe.sy) * k }
     if (edgeDrag.side === 'bottom') return { horiz: true, at: (y + h - loupe.sy) * k }
     if (edgeDrag.side === 'left') return { horiz: false, at: (x - loupe.sx) * k }
@@ -834,8 +900,12 @@
     {/each}
     {#if loupe}
       <div class="loupe" style="left:{Math.min(loupe.x + 24, paneW - 180)}px;top:{Math.max(8, loupe.y - 180)}px">
-        <img src={loupe.src} alt="Edge at 400%" />
-        {#if loupeLine}
+        {#if loupe.src}
+          <img src={loupe.src} alt="Edge at 400%" />
+        {:else}
+          <div class="loupe-note">{loupe.failed ? 'Can’t show this spot' : 'Loading…'}</div>
+        {/if}
+        {#if loupeLine && loupe.src}
           <div class="edge-line" class:horiz={loupeLine.horiz} style={loupeLine.horiz ? `top:${loupeLine.at}px` : `left:${loupeLine.at}px`}></div>
         {/if}
         <span>400%</span>
@@ -905,6 +975,7 @@
   .loupe .edge-line { position: absolute; top: 0; bottom: 0; width: 1px; background: #22d3ee; box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.6); }
   .loupe .edge-line.horiz { top: auto; bottom: auto; left: 0; right: 0; width: auto; height: 1px; }
   .loupe { position: absolute; width: 164px; height: 164px; border: 2px solid #22d3ee; border-radius: 6px; overflow: hidden; background: #000; box-shadow: var(--shadow); pointer-events: none; z-index: 4; }
+  .loupe-note { width: 160px; height: 160px; display: grid; place-items: center; font-size: 11px; color: rgba(255, 255, 255, 0.75); }
   .loupe img { width: 160px; height: 160px; image-rendering: pixelated; display: block; }
   .loupe span { position: absolute; right: 4px; bottom: 3px; font-size: 10px; color: #fff; background: rgba(0,0,0,.5); padding: 0 4px; border-radius: 3px; }
 </style>

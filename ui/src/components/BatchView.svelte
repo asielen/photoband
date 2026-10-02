@@ -4,6 +4,7 @@
   import { dialogs } from '../lib/dialogs.svelte'
   import { app, draftForFile, PhotoSession, type PhotoItem } from '../lib/store.svelte'
   import { caseCOverwriteRefused, copySkipReason, planCaseC } from '../lib/batchplan'
+  import { EDGE_UNSURE, edgeConfidence } from '../lib/existing'
   import { batchRun } from '../lib/batchstate.svelte'
   import { writeControl } from '../lib/controls'
   import { baseName, dirOf, relInside } from '../lib/paths'
@@ -288,7 +289,7 @@
         action = 'rebuild'
         s.draft.sourceRect = ex.band!.photo_rect
         s.draft.photoRect = ex.band!.photo_rect
-        if ((ex.confidence ?? 1) < 0.6) reasons.push('not sure where the existing caption is')
+        if (edgeConfidence(ex) < EDGE_UNSURE) reasons.push('not sure where the photo ends (check its edge)')
       }
     } else if (ex?.case === 'C') {
       // as the server does it: in an overwrite batch the caption is erased on a copy, the original is kept
@@ -299,6 +300,7 @@
         s.draft.mode = 'erase'
         s.draft.photoRect = ex.band!.photo_rect
         s.draft.existingChoice = 'template'
+        if (edgeConfidence(ex) < EDGE_UNSURE) reasons.push('not sure where the photo ends (check its edge)')
       }
     } else if (ex?.case === 'D') {
       reasons.push('text printed over the photo (left untouched)')

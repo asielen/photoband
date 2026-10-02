@@ -27,6 +27,14 @@ All notable changes to Photoband. The version lives in one place: `photoband/__i
   Windows and macOS.
 
 ### Safety and correctness
+- A scanned print with a plain border and nothing written on it is no longer called "writing on the
+  border" (case C): cases B and C now need writing in the border (letters read, or without OCR marks
+  shaped like writing), not just paper-like scan cues; dust, hairs and the print's own paper edge
+  are not writing. The banner no longer shows a "% sure" (it was the photo-edge detector's
+  confidence); a doubtful edge is called out as something to check instead.
+- The Edge loupe no longer turns black with a broken image when the pointer goes past the image
+  edge, and a failed load anywhere in the preview (loupe, proxy, thumbnails, erase preview) shows a
+  note or retries instead of freezing.
 - Saving waits for the existing-caption check; geometry is validated before every save, so a second band can no longer be stacked on a captioned photo.
 - The "overwrite" on-exists policy only replaces an earlier copy of the *same* photo (source key or pixel hash); anything else gets the next free name.
 - Batch Restore returns each file to its state just before the batch.

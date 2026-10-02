@@ -2091,19 +2091,61 @@ def has_real_text(blocks, min_conf: float = 0.5) -> bool:
     return n >= 2
 
 
-def decide_case(band: BandResult, blocks, score: float, ocr_ran: bool, marker: bool = False):
+def ink_like(blocks, shape) -> bool:
+    """Without OCR: is any candidate line shaped like writing? A line of writing is at least
+    about 1% of the image's short side thick (2.5 mm handwriting at 300 dpi is 30 px on a
+    1200 px side) and at least twice as long as it is thick, along either axis (sideways
+    writing on a side border counts). Dust, hairs, the scanner's shadow and the print's own
+    paper edge seen against the scanner lid are specks or thin slivers, not writing."""
+    try:
+        short = min(int(shape[0]), int(shape[1]))
+    except (TypeError, IndexError, ValueError):
+        short = 0
+    t = max(6.0, 0.01 * short)
+    for b in blocks:
+        if getattr(b, "role", "caption") == "other":
+            continue
+        for ln in b.lines:
+            w, h = float(ln.box[2]), float(ln.box[3])
+            thick, long_ = min(w, h), max(w, h)
+            if thick >= t and long_ >= 2.0 * thick:
+                return True
+    return False
+
+
+PLAIN_BORDER_HINT = ("The photo has a plain border with nothing written on it, so there is no old caption "
+                     "to replace. The border is kept as part of the photo.")
+
+
+def decide_case(band: BandResult, blocks, score: float, ocr_ran: bool, marker: bool = False, shape=None):
     """-> (case, quiet hint or None) for a detected band.
 
-    A single plain strip with no real text (a white wall at the bottom of a
-    borderless photo, a sky strip) is not a caption band: no case, a quiet hint."""
+    B and C both say "this border holds an existing caption", so both need evidence of
+    WRITING in it, not only of a border: letters OCR read (with ``ocr_ran`` the blocks are
+    already OCR-filtered, so a surviving line had letters read from it), or, without OCR,
+    candidate lines shaped like writing (:func:`ink_like`; ``shape`` is the image's). The scan
+    cues in ``score`` only tell what KIND of border it is (paper on a scan: C, a flat digital
+    band: B), never that anything is written on it. A plain border, or a single plain strip
+    (a white wall at the bottom of a borderless photo, a sky strip; it needs real text read
+    to count), is not a caption: no case, a quiet hint. Photoband's hidden marker proves its
+    own band, written on or not."""
     if not band.found:
         return None, None
     captions = [b for b in blocks if getattr(b, "role", "caption") != "other"]
-    real = has_real_text(captions) if ocr_ran else bool(captions)
-    if len(band.bands) == 1 and not real and not marker:
-        side = band.bands[0]["side"]
-        return None, (f"A plain strip along the {side} edge looks like part of the photo (no readable text "
-                      f"in it), so it is left alone. Use Edge to mark a border if it is one.")
+    single = len(band.bands) == 1
+    if ocr_ran:
+        # a whole border: any line OCR read letters from (cursive reads poorly, but it reads)
+        writing = has_real_text(captions) or (not single and bool(captions))
+    else:
+        # no letters to go by: a single strip stays photo (as when OCR finds none), a whole
+        # border counts when its marks are shaped like writing
+        writing = not single and (ink_like(captions, shape) if shape is not None else bool(captions))
+    if not writing and not marker:
+        if single:
+            side = band.bands[0]["side"]
+            return None, (f"A plain strip along the {side} edge looks like part of the photo (no readable text "
+                          f"in it), so it is left alone.")
+        return None, PLAIN_BORDER_HINT
     return ("C" if score >= 2.0 else "B"), None
 
 

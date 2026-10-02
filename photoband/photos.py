@@ -177,7 +177,8 @@ def _safe_proxy(p):
 
 # existing-text analysis results are also cached on disk next to the proxy (same key), so
 # re-opens and batch pre-flight don't analyze again. Bump when analyze_existing changes.
-ANALYSIS_VERSION = 2   # 2: provenance (isCopy/copyUnknown) on every path; record from a marker payload
+ANALYSIS_VERSION = 3   # 2: provenance (isCopy/copyUnknown) on every path; record from a marker payload
+#                       3: B/C need writing (a plain border is no case); edgeConfidence; hasText = words read
 
 
 def _existing_cache_file(path: str, info: ImageInfo, ocr: bool) -> str:

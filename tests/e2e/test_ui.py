@@ -201,6 +201,31 @@ def test_case_c_erase(page):
     assert pg.locator("header.tb button.overwrite").is_disabled()
 
 
+def test_edge_loupe_past_the_image_edge(page):
+    """Dragging an edge past the image's own edge (a thin border) used to ask for an empty crop:
+    the loupe showed black with a broken image and its alt text "Edge at 400%"."""
+    pg = page
+    pg.locator("button:has-text('Edge')").first.click()
+    cv = pg.locator('canvas[aria-label^="Before"]').bounding_box()
+    W, H = 1760, 1900                      # 12_scanned_polaroid_handwriting.tif; photo top at y=110
+    z = min((cv["width"] - 56) / W, (cv["height"] - 56) / H)
+    ox, oy = cv["x"] + (cv["width"] - W * z) / 2, cv["y"] + (cv["height"] - H * z) / 2
+    x, y = ox + 800 * z, oy + 110 * z
+    pg.mouse.move(x, y)
+    pg.mouse.down()
+    for i in range(1, 8):                  # up past the top of the image
+        pg.mouse.move(x, y - i * 12)
+        pg.wait_for_timeout(40)
+    loupe_img = pg.locator(".loupe img")
+    loupe_img.wait_for(timeout=10000)
+    pg.wait_for_function("() => { const i = document.querySelector('.loupe img'); return i && i.complete && i.naturalWidth === 40 && i.naturalHeight === 40 }", timeout=10000)
+    assert pg.locator(".loupe-note").count() == 0
+    shot(pg, "13b_edge_loupe_past_edge")
+    pg.mouse.up()
+    pw.expect(pg.locator(".loupe")).to_have_count(0)
+    pg.locator("button:has-text('Edge')").first.click()
+
+
 def test_case_d_flag(page):
     pg = page
     select_photo(pg, "13_date_stamp.jpg")
