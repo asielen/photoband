@@ -1517,6 +1517,43 @@ def _writing_shaped(box, shape, min_ratio: float = 2.0) -> bool:
     return thick >= _text_thickness(shape) and long_ >= min_ratio * thick
 
 
+def _glyph_pieces(ln) -> Optional[Tuple[int, float]]:
+    """(glyph-sized pieces, longest piece's share of the line) of a candidate line's own ink, or
+    None when the ink is not known (blocks from JSON). A piece is glyph-sized when it reaches at
+    least 0.3 of the line's thickness across the line."""
+    ink = getattr(ln, "ink", None)
+    if ink is None:
+        return None
+    m = np.asarray(ink[2])
+    if m.size == 0 or not m.any():
+        return 0, 0.0
+    n, _lab, st, _c = cv2.connectedComponentsWithStats(m.astype(np.uint8), connectivity=8)
+    w, h = float(ln.box[2]), float(ln.box[3])
+    vertical = h > w
+    thick, long_ = min(w, h), max(w, h)
+    along = st[1:, 3] if vertical else st[1:, 2]
+    across = st[1:, 2] if vertical else st[1:, 3]
+    glyphs = int((across >= 0.3 * thick).sum())
+    return glyphs, float(along.max()) / max(long_, 1.0)
+
+
+def _looks_written(ln, shape, min_ratio: float = 2.0) -> bool:
+    """A candidate line that looks like WRITING without reading it: shaped like a line of writing
+    (:func:`_writing_shaped`) and made of several glyph-sized pieces along it (>= 3, or 2 when no
+    single piece runs the whole line). The print's own paper edge, its corner and its shadow
+    against the scanner bed, and a whole plain paper margin are one long piece plus specks
+    (woodbury-263, -034b, -156b, -172b, lakearrowhead-008/-026: at most one glyph-sized piece,
+    spanning 97-100 % of the line); real captions have a dozen or more, none longer than about a
+    fifth of the line. Without the ink (blocks from JSON) the shape alone decides."""
+    if not _writing_shaped(ln.box, shape, min_ratio):
+        return False
+    pieces = _glyph_pieces(ln)
+    if pieces is None:
+        return True
+    glyphs, span = pieces
+    return glyphs >= 3 or (glyphs >= 2 and span < 0.8)
+
+
 def _glyph_token(text: str) -> int:
     """Letters and digits of a token that is mostly word characters ("A.", "J.R.W.", "'71",
     "বাংলা"); 0 for punctuation and marks ("|", "-.-", "~~")."""
@@ -1550,7 +1587,7 @@ def line_reads_as_writing(ln, shape=None) -> bool:
     >= 2 letters or digits read at any confidence from a line shaped like writing."""
     if line_reads_as_text(ln, shape):
         return True
-    return _writing_shaped(ln.box, shape) and _line_glyphs(ln) >= 2
+    return _looks_written(ln, shape) and _line_glyphs(ln) >= 2
 
 
 def filter_ocr_lines(blocks: List[TextBlock], shape=None) -> List[TextBlock]:
@@ -1559,7 +1596,7 @@ def filter_ocr_lines(blocks: List[TextBlock], shape=None) -> List[TextBlock]:
     and slivers ("|", "az") never becomes text, a caption or a case. In a block with such a line,
     short companion lines ("'71", "5") keep what was read from them.
 
-    OCR only ever ADDS evidence: a line shaped like writing (:func:`_writing_shaped`) that the
+    OCR only ever ADDS evidence: a line that looks written (:func:`_looks_written`) that the
     engine could not read (Windows OCR reads no handwriting) stays a candidate with its text
     cleared, exactly as when OCR did not run, so :func:`decide_case` weighs the same marks either
     way. Punctuation and specks read as text are dropped."""
@@ -1572,7 +1609,7 @@ def filter_ocr_lines(blocks: List[TextBlock], shape=None) -> List[TextBlock]:
             if ok or (any(read) and _thick_long(ln.box)[0] >= half
                       and (_line_glyphs(ln) >= 2 or _line_glyphs(ln, 0.6) >= 1)):
                 keep.append(ln)
-            elif _writing_shaped(ln.box, shape):
+            elif _looks_written(ln, shape):
                 keep.append(TextLine(box=ln.box, text="", confidence=0.0, words=[], ink=ln.ink,
                                      contrast=ln.contrast, ink8=ln.ink8))
         if not keep:
@@ -2187,14 +2224,14 @@ CAPTION_LINE_RATIO = 4.0   # a single strip: its writing must look like a captio
 
 
 def ink_like(blocks, shape, min_ratio: float = 2.0) -> bool:
-    """Without OCR: is any candidate line shaped like writing? A line of writing is at least
-    about 1% of the image's short side thick (2.5 mm handwriting at 300 dpi is 30 px on a
+    """Is any candidate line written-looking (:func:`_looks_written`), read or not? A line of
+    writing is at least about 1% of the image's short side thick (2.5 mm handwriting at 300 dpi is 30 px on a
     1200 px side) and at least twice as long as it is thick, along either axis (sideways
     writing on a side border counts). Dust, hairs, the scanner's shadow and the print's own
-    paper edge seen against the scanner lid are specks or thin slivers, not writing.
-    ``min_ratio`` raises the length a line needs (:data:`CAPTION_LINE_RATIO` for a single strip,
+    paper edge seen against the scanner lid are specks, thin slivers or one long piece, not
+    writing. ``min_ratio`` raises the length a line needs (:data:`CAPTION_LINE_RATIO` for a single strip,
     where a light switch on a white wall is a short upright mark)."""
-    return any(_writing_shaped(ln.box, shape, min_ratio)
+    return any(_looks_written(ln, shape, min_ratio)
                for b in blocks if getattr(b, "role", "caption") != "other" for ln in b.lines)
 
 

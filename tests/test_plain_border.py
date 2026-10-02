@@ -333,3 +333,97 @@ def test_words_with_combining_marks_are_text(word, conf):
 @pytest.mark.parametrize("junk", ["\u0301\u0301", "|\u0301", "--", "\u0e48"])
 def test_marks_and_punctuation_alone_are_not_text(junk):
     assert not detect.has_real_text([_read((300, 2700, 260, 70), junk, 0.9)], shape=SHAPE)
+
+
+# --------------------------------------------------------------------------- the print's own edge
+# Real scans (woodbury-263, the README demo, and -034, -034b, -156b, -172b, lakearrowhead-008,
+# -026) are prints lying on a white scanner bed. The candidate "lines" in their borders were the
+# print's paper edge and curled corner against the bed, and whole plain paper margins: shaped like
+# a line (2:1 or longer, thick enough) but made of ONE long piece plus specks, where writing is
+# many glyph-sized pieces. They were called "writing on the border" without OCR (and, after OCR
+# stopped vetoing unread marks, with it too).
+
+def _print_on_bed(lines=(), seed=44):
+    photo = _make_photo(1400, 900, seed=seed)
+    pr, _ = framed(photo, (236, 228, 208), (70, 70, 70, 70), list(lines), font_px=46, text_color=(40, 45, 90),
+                   font_path=ITALIC, texture=3.0)
+    ph, pw = pr.shape[:2]
+    H, W = ph + 260, pw + 300
+    rng = np.random.default_rng(seed)
+    bed = np.full((H, W, 3), 246, np.float32) + rng.normal(0, 1.0, (H, W, 1)).astype(np.float32)
+    ox, oy = 140, 110
+    bed[oy:oy + ph, ox:ox + pw] = pr
+    # the print's edge against the bed: a soft grey shadow along the right and bottom edges,
+    # widening into a curled corner (the 259x27 px candidate on woodbury-263)
+    bed[oy + 6:oy + ph + 4, ox + pw:ox + pw + 4] -= 45
+    bed[oy + ph:oy + ph + 4, ox + 6:ox + pw + 4] -= 45
+    for i in range(30):
+        bed[oy + ph - 2 + i // 3:oy + ph + i // 3 + 1, ox + pw - 260 + i * 8:ox + pw + 2] -= 3
+    return np.clip(bed, 0, 255).astype(np.uint8)
+
+
+@pytest.mark.parametrize("run_ocr", [False, True])
+def test_plain_print_on_a_scanner_bed_is_no_case(run_ocr):
+    res = analyze(_print_on_bed(), run_ocr=run_ocr)
+    assert res["case"] is None, (res["case"], res["warnings"])
+    assert res["hasText"] is False and res["blocks"] == []
+
+
+@pytest.mark.parametrize("run_ocr", [False, True])
+def test_written_print_on_a_scanner_bed_is_still_a_case(run_ocr):
+    res = analyze(_print_on_bed(["Aunt Mary at the lake, 1952"]), run_ocr=run_ocr)
+    assert res["case"] in ("B", "C"), (res["case"], res["warnings"])
+    if run_ocr:
+        assert "Mary" in res["text"], res["text"]
+
+
+def test_written_print_on_a_scanner_bed_with_each_engine(only_engine):
+    assert analyze(_print_on_bed(), run_ocr=True)["case"] is None
+    res = analyze(_print_on_bed(["Aunt Mary at the lake, 1952"]), run_ocr=True)
+    assert res["case"] in ("B", "C") and "Mary" in res["text"], (res["case"], res["text"])
+
+
+def _inked(box, pieces):
+    """A candidate line with its own ink: ``pieces`` are (x, y, w, h) rectangles inside the box."""
+    x, y, w, h = box
+    m = np.zeros((h, w), bool)
+    for px, py, pw, ph in pieces:
+        m[py:py + ph, px:px + pw] = True
+    return TextBlock(box=box, lines=[TextLine(box=box, ink=(x, y, m))])
+
+
+REAL_SHAPE = (2675, 3951, 3)   # woodbury-263
+EDGE_MARKS = {
+    # the curled corner of woodbury-263: one 259x27 wedge (and two specks)
+    "corner wedge": _inked((3479, 2450, 259, 27), [(0, 20, 259, 4), (180, 10, 79, 17), (40, 2, 3, 2), (90, 5, 2, 2)]),
+    # the print's side edge against the bed (woodbury-172b, lakearrowhead-026): one upright piece
+    "side edge": _inked((4743, 3045, 56, 215), [(40, 0, 6, 215), (20, 190, 30, 25)]),
+    # a whole plain paper margin (woodbury-034b, lakearrowhead-008): one long edge plus specks
+    "paper margin": _inked((21, 1117, 302, 1634), [(280, 0, 22, 1634)] + [(40 + 9 * i, 100 * i, 4, 5) for i in range(12)]),
+    # a dashed edge (woodbury-034): thin fragments along the line, none glyph-sized
+    "dashed edge": _inked((4216, 1869, 41, 213), [(18, 10 + 25 * i, 5, 16) for i in range(8)]),
+}
+
+
+@pytest.mark.parametrize("name", sorted(EDGE_MARKS))
+def test_paper_edges_are_not_writing(name):
+    blk = EDGE_MARKS[name]
+    assert detect._writing_shaped(blk.lines[0].box, REAL_SHAPE)       # the box alone looked like writing
+    assert not ink_like([blk], REAL_SHAPE)
+    for n in (1, 4):
+        assert decide_case(_band(n), [blk], 4.0, ocr_ran=False, shape=REAL_SHAPE)[0] is None
+        # OCR ran: a junk read on it, kept as an unread candidate, is still not writing
+        assert filter_ocr_lines([blk], shape=REAL_SHAPE) == []
+
+
+def test_a_row_of_glyphs_is_writing():
+    # "HOTEL PORTLAND, PORTLAND, ORE." on church-misc-043: 26 glyph pieces in a 1368x48 line
+    glyphs = [(i * 52, 6, 40, 36) for i in range(26)]
+    blk = _inked((1607, 2677, 1368, 48), glyphs)
+    assert ink_like([blk], REAL_SHAPE)
+    assert decide_case(_band(1), [blk], 0.0, ocr_ran=False, shape=REAL_SHAPE) == ("B", None)
+    # an underlined caption: the rule is one long piece and no glyphs, not "a long piece"
+    under = _inked((1607, 2677, 1368, 60), glyphs + [(0, 54, 1368, 4)])
+    assert ink_like([under], REAL_SHAPE)
+    # two words in cursive (two pieces, neither spanning the line) still count
+    assert ink_like([_inked((300, 2700, 600, 60), [(0, 5, 260, 50), (320, 5, 280, 50)])], REAL_SHAPE)
