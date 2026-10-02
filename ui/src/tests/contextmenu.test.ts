@@ -32,8 +32,11 @@ describe('fileMenu', () => {
     document.body.append(label)
     fileMenu(label, { label: 'Actions for b.tif', items: () => [{ label: 'Show', run: () => {} }] })
     expect(label.hasAttribute('tabindex')).toBe(false)
+    box.focus()
     box.dispatchEvent(new KeyboardEvent('keydown', { key: 'ContextMenu', bubbles: true }))
     expect(contextMenu!.label).toBe('Actions for b.tif')
-    closeContextMenu()
+    // closing (Esc or an action) puts focus back on the checkbox, not the label around it
+    closeContextMenu(true)
+    expect(document.activeElement).toBe(box)
   })
 })

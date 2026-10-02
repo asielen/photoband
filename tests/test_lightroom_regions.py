@@ -297,3 +297,19 @@ def test_saved_copy_regions_land_on_the_same_faces(tmp_path, orientation):
     # read back, the copy orders the caption the same way as the source
     assert resolve("{names}", normalize(md, out_info)["fields"]).text == resolve(
         "{names}", normalize(_md(p), probe(p))["fields"]).text
+
+
+def test_transposed_dimensions_are_only_accepted_for_rotated_files():
+    # an unrotated file has one frame: regions claiming the transposed size were made for another
+    # image geometry and are flagged; a rotated file may name either frame (Lightroom: upright)
+    md = {"XMP-mwg-rs:RegionInfo": {"AppliedToDimensions": {"W": 600, "H": 800, "Unit": "pixel"},
+                                    "RegionList": [{"Area": {"X": .5, "Y": .3, "W": .05, "H": .07},
+                                                    "Name": "A", "Type": "Face"}]}}
+    flat = ImageInfo(path="x.jpg", format="JPEG", width=800, height=600, channels=3, dtype="uint8",
+                     mode="RGB", orientation=1)
+    assert "region dimensions mismatch" in parse_regions(md, flat)["warnings"]
+    turned = ImageInfo(path="x.jpg", format="JPEG", width=800, height=600, channels=3, dtype="uint8",
+                       mode="RGB", orientation=6)
+    assert "region dimensions mismatch" not in parse_regions(md, turned)["warnings"]
+    md["XMP-mwg-rs:RegionInfo"]["AppliedToDimensions"] = {"W": 800, "H": 600, "Unit": "pixel"}
+    assert "region dimensions mismatch" not in parse_regions(md, flat)["warnings"]

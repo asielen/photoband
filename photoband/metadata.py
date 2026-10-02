@@ -211,9 +211,10 @@ def region_frame_orientation(md: Dict[str, Any], info: ImageInfo) -> int:
 
 
 def _dims_mismatch(md: Dict[str, Any], info: ImageInfo) -> bool:
-    """AppliedToDimensions is neither the stored nor the upright pixel size (a
-    scaled or edited copy). Which of the two it names says nothing here: Lightroom
-    writes the upright size for stored-frame boxes."""
+    """AppliedToDimensions is neither the stored nor (for a rotated file,
+    orientation 5-8) the upright pixel size: a scaled or edited copy. For a rotated
+    file either size is fine (Lightroom writes the upright size for stored-frame
+    boxes); an unrotated file has only one frame, so a transposed size is a mismatch."""
     atd = _atd(md)
     if atd is None or not info.width or not info.height:
         return False
@@ -221,7 +222,8 @@ def _dims_mismatch(md: Dict[str, Any], info: ImageInfo) -> bool:
 
     def off(fw, fh):
         return abs(aw - fw) / fw > 0.01 or abs(ah - fh) / fh > 0.01
-    return off(info.width, info.height) and off(info.height, info.width)
+    rotated = int(info.orientation or 1) in (5, 6, 7, 8)
+    return off(info.width, info.height) and (not rotated or off(info.height, info.width))
 
 
 def _mwg_box(area, rotate: int):

@@ -19,7 +19,11 @@ export function openContextMenu(e: MouseEvent | KeyboardEvent, label: string, it
     x = r ? r.left + 12 : 0
     y = r ? r.bottom - 4 : 0
   }
-  Object.assign(contextMenu!, { x, y, items, label, returnFocus: el })
+  // focus goes back to what actually had it (as Modal does): for a keyboard-opened menu that is
+  // the focused control inside the row (a checkbox), not the row or label that holds it
+  const had = document.activeElement as HTMLElement | null
+  const returnFocus = had && had !== document.body ? had : el
+  Object.assign(contextMenu!, { x, y, items, label, returnFocus })
 }
 
 export function closeContextMenu(refocus = false) {
