@@ -147,6 +147,41 @@ def test_single_glyphs_and_punctuation_are_not_writing_even_on_a_text_sized_mark
     assert decide_case(_band(), blocks, 4.0, ocr_ran=True, shape=SHAPE)[0] is None
 
 
+def _initials(tokens, conf, box=(300, 2700, 260, 70)):
+    """One line of separate tokens, each word with ``conf`` (Tesseract's per-word values, or
+    Windows OCR's UNKNOWN_CONFIDENCE for every word)."""
+    x, y, w, h = box
+    words = [{"text": t, "confidence": conf, "box": (x + i * 60, y, 50, h)} for i, t in enumerate(tokens)]
+    return [TextBlock(box=box, lines=[TextLine(box=box, text=" ".join(tokens), confidence=conf, words=words)])]
+
+
+@pytest.mark.parametrize("conf", [0.91, ocr.UNKNOWN_CONFIDENCE])
+@pytest.mark.parametrize("tokens", [["J", "R"], ["A.", "B."], ["J.R.W."], ["Jo"]])
+def test_initials_are_writing_counted_over_the_line(tokens, conf):
+    # each token may be one glyph: the evidence is the letters read in the LINE
+    blocks = _initials(tokens, conf)
+    assert filter_ocr_lines(blocks, shape=SHAPE) == blocks
+    assert decide_case(_band(), blocks, 4.0, ocr_ran=True, shape=SHAPE) == ("C", None)
+    assert decide_case(_band(1), blocks, 4.0, ocr_ran=True, shape=SHAPE) == ("C", None)   # single strip too
+
+
+@pytest.mark.parametrize("conf", [0.91, ocr.UNKNOWN_CONFIDENCE])
+def test_initials_on_a_speck_or_one_glyph_are_still_noise(conf):
+    # the same reads on a speck-sized mark, and a single glyph on a text-sized one
+    for blocks in (_initials(["J", "R"], conf, box=(300, 2700, 20, 8)), _initials(["a"], conf),
+                   _initials(["|", "l"], conf), _initials([".", "-"], conf)):
+        assert filter_ocr_lines(blocks, shape=SHAPE) == [], blocks[0].lines[0].text
+        assert decide_case(_band(), blocks, 4.0, ocr_ran=True, shape=SHAPE)[0] is None
+
+
+def test_low_confidence_initials_count_only_on_a_writing_shaped_line():
+    low = _initials(["J", "R"], 0.3)                          # 260x70: shaped like writing
+    assert decide_case(_band(), low, 4.0, ocr_ran=True, shape=SHAPE) == ("C", None)
+    assert decide_case(_band(1), low, 4.0, ocr_ran=True, shape=SHAPE)[0] is None
+    squat = _initials(["J", "R"], 0.3, box=(300, 2700, 90, 70))   # text-sized, not writing-shaped
+    assert decide_case(_band(), squat, 4.0, ocr_ran=True, shape=SHAPE)[0] is None
+
+
 def test_low_confidence_read_counts_only_on_a_writing_shaped_line():
     # cursive reads poorly but it reads: a whole border with a writing-shaped line counts
     cursive = [_read((300, 2700, 900, 70), "Aunt Moy 1952", 0.31)]

@@ -1475,12 +1475,13 @@ def _alnum(s: str) -> int:
 # plausible text on a mark the size of writing, whichever engine produced it:
 #   * the line is text-sized: at least WRITING_THICKNESS of the image's short side thick (the same
 #     yardstick the no-OCR rule :func:`ink_like` uses), so specks, hairs and slivers never count;
-#   * it holds a word-like token: >= 2 alphanumerics making up at least half the token, so
-#     single glyphs ("|", "i", "l") and punctuation runs never count;
-#   * the engine was confident (>= OCR_MIN_WORD_CONF per word; Windows OCR reports none and gets
-#     ocr.UNKNOWN_CONFIDENCE, which passes, so for it the other two rules decide). A low-confidence
-#     word-like read still counts on a line SHAPED like writing (cursive reads poorly, but it
-#     reads): it is then no weaker than the no-OCR evidence the shape alone gives.
+#   * the LINE holds >= 2 letters or digits, counted over its tokens that are mostly letters or
+#     digits (per line, not per token: initials "J R" or "A. B." are one-glyph tokens), so a
+#     single glyph ("|", "i", "l") and punctuation runs never count;
+#   * those tokens were read with confidence (>= OCR_MIN_WORD_CONF per word; Windows OCR reports
+#     none and gets ocr.UNKNOWN_CONFIDENCE, which passes, so for it the other two rules decide).
+#     A low-confidence read still counts on a line SHAPED like writing (cursive reads poorly,
+#     but it reads): it is then no weaker than the no-OCR evidence the shape alone gives.
 # No dictionary or vowel test: captions are names, places, initials, years and abbreviations.
 OCR_MIN_WORD_CONF = 0.5
 WRITING_THICKNESS = 0.01      # of the short side; 2.5 mm handwriting at 300 dpi is 30 px on 1200 px
@@ -1506,11 +1507,12 @@ def _writing_shaped(box, shape) -> bool:
     return thick >= _text_thickness(shape) and long_ >= 2.0 * thick
 
 
-def word_like(text: str) -> bool:
-    """A token that could be a word, a number or an initialism, not a glyph or punctuation."""
+def _glyph_token(text: str) -> int:
+    """Alphanumerics of a token that is mostly letters or digits ("A.", "J.R.W.", "'71"); 0 for
+    punctuation and marks ("|", "-.-", "~~")."""
     t = (text or "").strip()
     a = _alnum(t)
-    return a >= 2 and a >= 0.5 * len(t)
+    return a if a >= 0.5 * len(t) else 0
 
 
 def _read_words(ln) -> List[Tuple[str, float]]:
@@ -1521,19 +1523,25 @@ def _read_words(ln) -> List[Tuple[str, float]]:
     return [(tok, float(ln.confidence or 0.0)) for tok in (ln.text or "").split()]
 
 
+def _line_glyphs(ln, min_conf: float = 0.0) -> int:
+    """Letters and digits read in the LINE (summed over its tokens read with >= ``min_conf``):
+    a caption of initials ("J R", "A. B.") is two glyphs in one line, though each token is one."""
+    return sum(_glyph_token(t) for t, c in _read_words(ln) if c >= min_conf)
+
+
 def line_reads_as_text(ln, shape=None, min_conf: float = OCR_MIN_WORD_CONF) -> bool:
-    """OCR confidently read a word from a text-sized line."""
+    """OCR confidently read >= 2 letters or digits from a text-sized line."""
     if _thick_long(ln.box)[0] < _text_thickness(shape):
         return False
-    return any(word_like(t) and c >= min_conf for t, c in _read_words(ln))
+    return _line_glyphs(ln, min_conf) >= 2
 
 
 def line_reads_as_writing(ln, shape=None) -> bool:
-    """Evidence of writing in a read line: a confident word (:func:`line_reads_as_text`), or a
-    word-like read at any confidence from a line shaped like writing."""
+    """Evidence of writing in a read line: confident text (:func:`line_reads_as_text`), or
+    >= 2 letters or digits read at any confidence from a line shaped like writing."""
     if line_reads_as_text(ln, shape):
         return True
-    return _writing_shaped(ln.box, shape) and any(word_like(t) for t, _ in _read_words(ln))
+    return _writing_shaped(ln.box, shape) and _line_glyphs(ln) >= 2
 
 
 def filter_ocr_lines(blocks: List[TextBlock], shape=None) -> List[TextBlock]:
@@ -1550,7 +1558,7 @@ def filter_ocr_lines(blocks: List[TextBlock], shape=None) -> List[TextBlock]:
         keep = [ln for ln in b.lines
                 if line_reads_as_writing(ln, shape)
                 or (_thick_long(ln.box)[0] >= half
-                    and (_alnum(ln.text) >= 2 or (_alnum(ln.text) >= 1 and ln.confidence >= 0.6)))]
+                    and (_line_glyphs(ln) >= 2 or _line_glyphs(ln, 0.6) >= 1))]
         if len(keep) != len(b.lines):
             b = TextBlock(_union_box([ln.box for ln in keep]), keep, b.role)
         out.append(b)
