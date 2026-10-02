@@ -43,8 +43,9 @@ All notable changes to Photoband. The version lives in one place: `photoband/__i
   turns them into a plain border. Recognized text in any script counts, including words with
   combining vowel signs or accents (Bengali, Devanagari, Thai, decomposed é).
 - A print scanned on a white scanner bed is no longer "writing on the border" because of its own
-  paper edge, curled corner or plain margin: unread marks count as writing only when they are
-  several glyph-sized pieces along a line, not one long edge (with or without text recognition).
+  paper edge, curled corner or plain margin: unread marks count as writing only when they have
+  the texture of writing (several glyph-sized pieces, or the loops of a connected cursive name),
+  not one straight edge (with or without text recognition).
 - The Edge loupe no longer turns black with a broken image when the pointer goes past the image
   edge, and a failed load anywhere in the preview (loupe, proxy, thumbnails, erase preview) shows a
   note or retries instead of freezing.

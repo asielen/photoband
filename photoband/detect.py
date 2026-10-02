@@ -1537,21 +1537,48 @@ def _glyph_pieces(ln) -> Optional[Tuple[int, float]]:
     return glyphs, float(along.max()) / max(long_, 1.0)
 
 
-def _looks_written(ln, shape, min_ratio: float = 2.0) -> bool:
+def _ink_loops(ln) -> Optional[float]:
+    """Share of the positions along a candidate line where a cross-section meets its own ink two
+    or more times (loops, crossings, an ascender over a connecting stroke). None when the ink is
+    not known."""
+    ink = getattr(ln, "ink", None)
+    if ink is None:
+        return None
+    m = np.asarray(ink[2], bool)
+    if m.size == 0 or not m.any():
+        return 0.0
+    if m.shape[0] > m.shape[1]:
+        m = m.T                                   # rows across the line, columns along it
+    m = m[:, m.any(axis=0)]
+    runs = (np.diff(np.pad(m, ((1, 0), (0, 0))).astype(np.int8), axis=0) == 1).sum(axis=0)
+    return float((runs >= 2).mean())
+
+
+# writing: >= 0.42 (printed capitals 0.42, Caveat 0.50, connected Great Vibes 0.85-0.94); a paper
+# edge, curled corner or plain margin: <= 0.17 on the real scans
+LOOPS_MIN = 0.3
+
+
+def _looks_written(ln, shape, min_ratio: float = 2.0, inkless_ratio: Optional[float] = None) -> bool:
     """A candidate line that looks like WRITING without reading it: shaped like a line of writing
-    (:func:`_writing_shaped`) and made of several glyph-sized pieces along it (>= 3, or 2 when no
-    single piece runs the whole line). The print's own paper edge, its corner and its shadow
-    against the scanner bed, and a whole plain paper margin are one long piece plus specks
-    (woodbury-263, -034b, -156b, -172b, lakearrowhead-008/-026: at most one glyph-sized piece,
-    spanning 97-100 % of the line); real captions have a dozen or more, none longer than about a
-    fifth of the line. Without the ink (blocks from JSON) the shape alone decides."""
-    if not _writing_shaped(ln.box, shape, min_ratio):
-        return False
+    (:func:`_writing_shaped`) with the texture of writing in its own ink - several glyph-sized
+    pieces along it (>= 3, or 2 when no single piece runs the whole line), or loops and crossings
+    along it (:func:`_ink_loops` >= :data:`LOOPS_MIN`). Connected cursive is one piece but loops.
+
+    The print's own paper edge, its curled corner and its shadow against the scanner bed, and a
+    whole plain paper margin, are neither: one straight piece plus specks, met once by almost
+    every cross-section (woodbury-263, -034, -034b, -156b, -172b, lakearrowhead-008/-026: at most
+    one glyph-sized piece, loops <= 0.17). Without the ink (blocks from JSON) the shape alone
+    decides, at ``inkless_ratio`` when given."""
     pieces = _glyph_pieces(ln)
     if pieces is None:
-        return True
+        return _writing_shaped(ln.box, shape, inkless_ratio or min_ratio)
+    if not _writing_shaped(ln.box, shape, min_ratio):
+        return False
     glyphs, span = pieces
-    return glyphs >= 3 or (glyphs >= 2 and span < 0.8)
+    if glyphs >= 3 or (glyphs >= 2 and span < 0.8):
+        return True
+    return (_ink_loops(ln) or 0.0) >= LOOPS_MIN
 
 
 def _glyph_token(text: str) -> int:
@@ -2220,18 +2247,19 @@ def has_real_text(blocks, min_conf: float = OCR_MIN_WORD_CONF, shape=None) -> bo
                for b in blocks if getattr(b, "role", "caption") != "other" for ln in b.lines)
 
 
-CAPTION_LINE_RATIO = 4.0   # a single strip: its writing must look like a caption LINE, not a mark
+CAPTION_LINE_RATIO = 4.0   # a single strip, when the ink is not known: a caption LINE, not a mark
 
 
-def ink_like(blocks, shape, min_ratio: float = 2.0) -> bool:
+def ink_like(blocks, shape, min_ratio: float = 2.0, inkless_ratio: Optional[float] = None) -> bool:
     """Is any candidate line written-looking (:func:`_looks_written`), read or not? A line of
-    writing is at least about 1% of the image's short side thick (2.5 mm handwriting at 300 dpi is 30 px on a
-    1200 px side) and at least twice as long as it is thick, along either axis (sideways
-    writing on a side border counts). Dust, hairs, the scanner's shadow and the print's own
-    paper edge seen against the scanner lid are specks, thin slivers or one long piece, not
-    writing. ``min_ratio`` raises the length a line needs (:data:`CAPTION_LINE_RATIO` for a single strip,
+    writing is at least about 1% of the image's short side thick (2.5 mm handwriting at 300 dpi
+    is 30 px on a 1200 px side) and at least ``min_ratio`` times as long as it is thick, along
+    either axis (sideways writing on a side border counts), with the texture of writing in its
+    ink. Dust, hairs, the scanner's shadow and the print's own paper edge seen against the
+    scanner lid are specks, thin slivers or one straight piece, not writing. ``inkless_ratio``
+    is the length needed when the ink is unknown (:data:`CAPTION_LINE_RATIO` for a single strip,
     where a light switch on a white wall is a short upright mark)."""
-    return any(_looks_written(ln, shape, min_ratio)
+    return any(_looks_written(ln, shape, min_ratio, inkless_ratio)
                for b in blocks if getattr(b, "role", "caption") != "other" for ln in b.lines)
 
 
@@ -2256,11 +2284,11 @@ def decide_case(band: BandResult, blocks, score: float, ocr_ran: bool, marker: b
         return None, None
     captions = [b for b in blocks if getattr(b, "role", "caption") != "other"]
     single = len(band.bands) == 1
-    # the marks themselves: shaped like writing (a single strip: like a caption line). This
+    # the marks themselves: shaped like writing, with the texture of writing. This
     # counts whether or not OCR ran - OCR that read nothing (no engine reads every hand) is no
     # proof that nothing is written, and when unsure a batch must skip, not add a second band
     if shape is not None:
-        shaped = ink_like(captions, shape, CAPTION_LINE_RATIO if single else 2.0)
+        shaped = ink_like(captions, shape, inkless_ratio=CAPTION_LINE_RATIO if single else None)
     else:
         shaped = not single and not ocr_ran and bool(captions)   # legacy callers without a shape
     read = False

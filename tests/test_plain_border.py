@@ -16,6 +16,7 @@ import pytest
 
 from photoband import detect, ocr
 from photoband.detect import BandResult, TextBlock, TextLine, decide_case, filter_ocr_lines, ink_like
+from test_detect import FONTS
 from test_detect import make_photo as _make_photo
 from test_detect import ITALIC, analyze, framed, make_photo, polaroid_sides
 
@@ -427,3 +428,47 @@ def test_a_row_of_glyphs_is_writing():
     assert ink_like([under], REAL_SHAPE)
     # two words in cursive (two pieces, neither spanning the line) still count
     assert ink_like([_inked((300, 2700, 600, 60), [(0, 5, 260, 50), (320, 5, 280, 50)])], REAL_SHAPE)
+
+
+# --------------------------------------------------------------------------- connected cursive
+# A handwritten name in one connected stroke is ONE piece of ink running the whole line, like a
+# paper edge, but it loops: cross-sections meet it two or more times where a paper edge is met
+# once. Without OCR (the default batch pre-flight) it must still count, on a single strip too.
+
+GREAT_VIBES = os.path.join(FONTS, "great-vibes", "GreatVibes-Regular.ttf")
+CAVEAT = os.path.join(FONTS, "caveat", "Caveat[wght].ttf")
+STRIP, BORDER = (0, 240, 0, 0), (70, 240, 60, 60)
+
+
+def _cursive(word, font, sides):
+    photo = _make_photo(1000, 800, seed=43)
+    return framed(photo, (240, 236, 226), sides, [word], font_px=80, text_color=(40, 45, 90), font_path=font,
+                  texture=3.0)
+
+
+@pytest.mark.parametrize("sides", [STRIP, BORDER], ids=["single strip", "whole border"])
+@pytest.mark.parametrize("word,font", [("minimum", "great-vibes"), ("Annie", "great-vibes"), ("Harriet", "great-vibes"),
+                                       ("Aunt Mary", "great-vibes"), ("Mommy", "caveat")])
+def test_connected_cursive_is_writing_without_ocr(word, font, sides):
+    img, truth = _cursive(word, {"great-vibes": GREAT_VIBES, "caveat": CAVEAT}[font], sides)
+    res = analyze(img, run_ocr=False)
+    assert res["case"] in ("B", "C"), (word, res["case"], res["warnings"])
+    assert res["band"]["photo_rect"] == list(truth)
+
+
+def test_connected_cursive_passes_on_its_loops_not_its_pieces():
+    # the case the piece count alone missed: one glyph-sized piece running the whole line
+    img, _ = _cursive("minimum", GREAT_VIBES, BORDER)
+    band = detect.detect_band(img)
+    lines = [ln for b in detect.find_text(img, band) for ln in b.lines if detect._writing_shaped(ln.box, img.shape)]
+    assert lines
+    for ln in lines:
+        glyphs, span = detect._glyph_pieces(ln)
+        assert glyphs <= 1 and span > 0.9, (glyphs, span)
+        assert detect._ink_loops(ln) >= detect.LOOPS_MIN
+        assert ink_like([TextBlock(box=ln.box, lines=[ln])], img.shape)
+
+
+@pytest.mark.parametrize("name", sorted(EDGE_MARKS))
+def test_paper_edges_do_not_loop(name):
+    assert detect._ink_loops(EDGE_MARKS[name].lines[0]) < detect.LOOPS_MIN
