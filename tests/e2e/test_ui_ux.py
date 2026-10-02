@@ -252,3 +252,24 @@ def test_warning_about_a_hidden_control_opens_its_disclosure(page):
     pg.wait_for_timeout(500)
     assert pg.locator("text=overflows").count() == 0
     assert not pg.errors, pg.errors
+
+
+def test_file_menu_from_the_keyboard_and_tab_moves_on(page):
+    # Shift+F10 on the current photo opens its file menu; Tab closes it and moves on from the
+    # photo (the menu sits at the end of the page, so focus must not drop to the document)
+    pg = page
+    item = pg.locator('.strip [role="option"][aria-selected="true"]')
+    item.focus()
+    pg.keyboard.press("Shift+F10")
+    menu = pg.locator('.ctx[role="menu"]')
+    pw.expect(menu).to_be_visible()
+    assert "Show in" in menu.inner_text() and "Copy file path" in menu.inner_text()
+    pg.keyboard.press("Escape")
+    pw.expect(menu).to_have_count(0)
+    assert pg.evaluate("document.activeElement.getAttribute('role')") == "option"
+    pg.keyboard.press("Shift+F10")
+    pw.expect(menu).to_be_visible()
+    pg.keyboard.press("Tab")
+    pw.expect(menu).to_have_count(0)
+    tag = pg.evaluate("document.activeElement && document.activeElement.tagName")
+    assert tag not in (None, "BODY"), tag

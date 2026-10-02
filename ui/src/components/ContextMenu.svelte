@@ -18,8 +18,12 @@
     if (e.key === 'Escape') closeContextMenu(true)
     else if (e.key === 'ArrowDown') btns[(i + 1) % btns.length]?.focus()
     else if (e.key === 'ArrowUp') btns[(i - 1 + btns.length) % btns.length]?.focus()
-    else if (e.key === 'Tab') closeContextMenu()
-    else return
+    else if (e.key === 'Tab') {
+      // the menu sits at the end of the page: put focus back on the row it was opened from and
+      // let the browser's Tab move on from there (it acts on the element focused after this handler)
+      closeContextMenu(true)
+      return
+    } else return
     e.preventDefault()
     e.stopPropagation()
   }
