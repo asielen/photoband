@@ -16,6 +16,7 @@ import pytest
 
 from photoband import detect, ocr
 from photoband.detect import BandResult, TextBlock, TextLine, decide_case, filter_ocr_lines, ink_like
+from test_detect import make_photo as _make_photo
 from test_detect import ITALIC, analyze, framed, make_photo, polaroid_sides
 
 PLAIN = detect.PLAIN_BORDER_HINT
@@ -167,11 +168,15 @@ def test_initials_are_writing_counted_over_the_line(tokens, conf):
 
 @pytest.mark.parametrize("conf", [0.91, ocr.UNKNOWN_CONFIDENCE])
 def test_initials_on_a_speck_or_one_glyph_are_still_noise(conf):
-    # the same reads on a speck-sized mark, and a single glyph on a text-sized one
-    for blocks in (_initials(["J", "R"], conf, box=(300, 2700, 20, 8)), _initials(["a"], conf),
-                   _initials(["|", "l"], conf), _initials([".", "-"], conf)):
+    # the same reads on a speck-sized mark, and a single glyph on a text-sized (not line-shaped) one
+    sq = (300, 2700, 90, 70)
+    for blocks in (_initials(["J", "R"], conf, box=(300, 2700, 20, 8)), _initials(["a"], conf, box=sq),
+                   _initials(["|", "l"], conf, box=sq), _initials([".", "-"], conf, box=sq)):
         assert filter_ocr_lines(blocks, shape=SHAPE) == [], blocks[0].lines[0].text
         assert decide_case(_band(), blocks, 4.0, ocr_ran=True, shape=SHAPE)[0] is None
+    # on a line-shaped mark the glyph is still not text: the mark stays an unread candidate
+    kept = filter_ocr_lines(_initials(["a"], conf), shape=SHAPE)
+    assert [ln.text for b in kept for ln in b.lines] == [""]
 
 
 def test_low_confidence_initials_count_only_on_a_writing_shaped_line():
@@ -187,8 +192,8 @@ def test_low_confidence_read_counts_only_on_a_writing_shaped_line():
     cursive = [_read((300, 2700, 900, 70), "Aunt Moy 1952", 0.31)]
     assert decide_case(_band(), cursive, 4.0, ocr_ran=True, shape=SHAPE) == ("C", None)
     assert filter_ocr_lines(cursive, shape=SHAPE) == cursive
-    # ...but a single strip needs a word read with confidence
-    assert decide_case(_band(1), cursive, 4.0, ocr_ran=True, shape=SHAPE)[0] is None
+    # a single strip: the 900x70 line is shaped like a caption line, so it counts there too
+    assert decide_case(_band(1), cursive, 4.0, ocr_ran=True, shape=SHAPE) == ("C", None)
     confident = [_read((300, 2700, 900, 70), "Aunt Mary 1952", 0.9)]
     assert decide_case(_band(1), confident, 4.0, ocr_ran=True, shape=SHAPE) == ("C", None)
     # the same low-confidence read on a speck-sized mark is noise
@@ -256,3 +261,75 @@ def test_caption_fixtures_are_read_with_each_engine(only_engine, fixtures_dir):
         res = analyze_existing(a, i, _md(p))
         assert res["case"] == case and res["engine"] == only_engine, (name, res["case"], res["engine"])
         assert res["hasText"] and word in res["text"], (name, res["text"])
+
+
+# --------------------------------------------------------------------------- with or without OCR
+# The evidence is the same whether OCR ran or not: the batch pre-flight runs WITHOUT OCR when
+# both "Caption bands from other apps" and "Writing on the border" are Skip, and the save-time
+# case check runs without it too. A single strip with a caption line in it was "photo" there, so
+# an overwrite batch set to skip existing captions added a second band to the original.
+
+def _bottom_strip(lines=("Aunt Mary, Easter 1952",), seed=43):
+    photo = _make_photo(1000, 800, seed=seed)
+    return framed(photo, (240, 236, 226), (0, 220, 0, 0), list(lines), font_px=58,
+                  text_color=(40, 45, 90), font_path=ITALIC, texture=3.0)
+
+
+@pytest.mark.parametrize("run_ocr", [False, True])
+def test_single_strip_with_a_caption_is_a_case_with_or_without_ocr(run_ocr):
+    img, truth = _bottom_strip()
+    res = analyze(img, run_ocr=run_ocr)
+    assert res["case"] in ("B", "C"), (res["case"], res["warnings"])
+    assert res["band"]["photo_rect"] == list(truth)
+
+
+def test_plain_single_strip_without_ocr_stays_photo():
+    img, _ = _bottom_strip(lines=())
+    res = analyze(img, run_ocr=False)
+    assert res["case"] is None and res["blocks"] == []
+
+
+def test_caption_fixtures_are_cases_without_ocr(fixtures_dir):
+    from photoband.existing import analyze_existing
+    from photoband.imageio import load_upright
+    from test_pipeline import _md
+    for name, case in (("11_other_tool_colored_band.png", "B"), ("12_scanned_polaroid_handwriting.tif", "C"),
+                       ("14_near_white_sky.tif", None)):
+        p = os.path.join(fixtures_dir, name)
+        a, i = load_upright(p)
+        res = analyze_existing(a, i, _md(p), run_ocr=False)
+        assert res["case"] == case, (name, res["case"], res["warnings"])
+        assert res["hasText"] is False
+
+
+def test_unread_writing_is_still_writing():
+    # OCR ran and read nothing from a caption line (Windows OCR reads no handwriting): that is
+    # not proof of a plain border, the marks still count as they do without OCR
+    line = [_blk((300, 2700, 900, 70))]
+    for n in (1, 4):
+        assert decide_case(_band(n), filter_ocr_lines(line, shape=SHAPE), 4.0, ocr_ran=True,
+                           shape=SHAPE) == ("C", None)
+    kept = filter_ocr_lines([_read((300, 2700, 900, 70), "~~ ||", 0.2)], shape=SHAPE)
+    assert [ln.text for b in kept for ln in b.lines] == [""]      # junk read is not shown as text
+    # a short upright mark on a single strip (the white wall's light switch) is not a caption line
+    switch = [_blk((1118, 958, 15, 36))]
+    assert decide_case(_band(1), switch, 0.0, ocr_ran=False, shape=(1100, 1500, 3))[0] is None
+    assert decide_case(_band(1), switch, 0.0, ocr_ran=True, shape=(1100, 1500, 3))[0] is None
+
+
+# --------------------------------------------------------------------------- any script
+# Combining marks belong to the word: Bengali and Devanagari vowel signs, Thai tone marks and a
+# decomposed accent are not punctuation.
+
+@pytest.mark.parametrize("word", ["বাংলা", "हिन्दी", "ภาษาไทย", "Rene\u0301e", "e\u0301té"])
+@pytest.mark.parametrize("conf", [0.9, ocr.UNKNOWN_CONFIDENCE])
+def test_words_with_combining_marks_are_text(word, conf):
+    blocks = [_read((300, 2700, 260, 70), word, conf)]
+    assert detect.has_real_text(blocks, shape=SHAPE), word
+    assert filter_ocr_lines(blocks, shape=SHAPE) == blocks
+    assert decide_case(_band(1), blocks, 4.0, ocr_ran=True, shape=SHAPE) == ("C", None)
+
+
+@pytest.mark.parametrize("junk", ["\u0301\u0301", "|\u0301", "--", "\u0e48"])
+def test_marks_and_punctuation_alone_are_not_text(junk):
+    assert not detect.has_real_text([_read((300, 2700, 260, 70), junk, 0.9)], shape=SHAPE)

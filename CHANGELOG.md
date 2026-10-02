@@ -36,6 +36,12 @@ All notable changes to Photoband. The version lives in one place: `photoband/__i
   slivers (Tesseract read a hair as "az") never count as text, a caption or writing on the border.
   A read counts only as a word-like token on a mark the size of writing, read with confidence
   (or, at low confidence, on a line shaped like writing). The same rule applies to every engine.
+- A caption band along one edge (another app's bottom band, a handwritten strip) is recognized
+  without text recognition too: a batch whose pre-flight skips OCR, or the save-time check, no
+  longer plans such a photo as uncaptioned and adds a second band. Marks shaped like writing count
+  whether or not OCR ran; OCR that reads nothing (Windows OCR reads no handwriting) no longer
+  turns them into a plain border. Recognized text in any script counts, including words with
+  combining vowel signs or accents (Bengali, Devanagari, Thai, decomposed é).
 - The Edge loupe no longer turns black with a broken image when the pointer goes past the image
   edge, and a failed load anywhere in the preview (loupe, proxy, thumbnails, erase preview) shows a
   note or retries instead of freezing.
