@@ -42,6 +42,9 @@ def main() -> int:
     work = os.path.join(tempfile.mkdtemp(prefix="pb-readme-"), "Photos")
     os.makedirs(work)
     name = args.name or os.path.basename(args.photo)
+    # a file name only: a path (absolute, or with .. or separators) would copy outside the temp folder
+    if name != os.path.basename(name) or name in ("", ".", "..") or "/" in name or "\\" in name:
+        ap.error("--name must be a plain file name, not a path")
     if os.path.splitext(name)[1].lower() != os.path.splitext(args.photo)[1].lower():
         name += os.path.splitext(args.photo)[1]
     shutil.copy2(args.photo, os.path.join(work, name))

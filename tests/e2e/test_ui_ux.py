@@ -273,3 +273,27 @@ def test_file_menu_from_the_keyboard_and_tab_moves_on(page):
     pw.expect(menu).to_have_count(0)
     tag = pg.evaluate("document.activeElement && document.activeElement.tagName")
     assert tag not in (None, "BODY"), tag
+
+
+def test_thumbnails_come_back_after_the_server_was_unreachable(page, server):
+    # every thumbnail request fails for a while (more than the old single retry); once the server
+    # answers again, the hidden thumbnails load without reopening the folder
+    pg = page
+    failing = {"on": True}
+
+    def handler(route):
+        if failing["on"]:
+            route.abort()
+        else:
+            route.continue_()
+    pg.route("**/api/photo/proxy?*thumb=1*", handler)
+    pg.reload()
+    reopen(pg)
+    pg.wait_for_timeout(5000)  # past the first retries
+    hidden = pg.locator(".strip .thumb img[data-tries]")
+    assert hidden.count() > 0
+    failing["on"] = False
+    pg.evaluate("window.dispatchEvent(new Event('focus'))")
+    pw.expect(pg.locator(".strip .thumb img[data-tries]")).to_have_count(0, timeout=15000)
+    assert pg.evaluate("[...document.querySelectorAll('.strip .thumb img')].every(i => i.naturalWidth > 0 && i.style.visibility !== 'hidden')")
+    pg.unroute("**/api/photo/proxy?*thumb=1*")
