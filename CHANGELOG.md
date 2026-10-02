@@ -32,6 +32,7 @@ All notable changes to Photoband. The version lives in one place: `photoband/__i
 - Batch Restore returns each file to its state just before the batch.
 - Case C (physical caption) overwrite rules are enforced by the backend, and the UI matches them in every mode.
 - Metadata: `%` in file names, XMP over 64 KB to JPEG, and DPI for rotated photos.
+- Face tags from Lightroom on rotated photos (EXIF orientation 5-8) are placed on the faces again: the overlay, the left-to-right name order, `{names:rows}` and the regions in saved copies were all using a swapped frame.
 - Security: allow-list holes in batch staging, `subfolderName`, and batch exclude/restore; typed settings; one-time launch code instead of the token in the browser's command line; decode-budget and IFD-count limits; ExifTool timeouts.
 - Desktop close flushes pending drafts.
 

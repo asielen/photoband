@@ -22,7 +22,9 @@ Decisions worth knowing:
   spot removal, red eye) reference the old geometry and are removed; global
   develop settings stay. Both are reported in the notes.
 * Frames: MWG regions use metadata.region_frame_orientation (AppliedToDimensions
-  decides stored vs upright for orientation 5-8). MP regions have no
+  decides stored vs upright for orientation 5-8, except for Lightroom, whose
+  AppliedToDimensions is the upright size while its boxes are in the stored
+  frame; the overlay, captions and this remap share that one decision). MP regions have no
   AppliedToDimensions and use the file's orientation. IPTC ImageRegion and the
   EXIF/XMP subject area are handled the same way as MP (the stored pixels,
   with the EXIF orientation applied), because that is how they were
