@@ -90,7 +90,7 @@ def main() -> int:
                     if not ed.count():
                         continue
                     ed.click()
-                    pg.keyboard.press("Control+A")
+                    pg.keyboard.press("ControlOrMeta+A")
                     pg.keyboard.press("Backspace")
                     if text:
                         pg.keyboard.type(text)

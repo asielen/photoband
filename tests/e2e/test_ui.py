@@ -112,7 +112,7 @@ def test_open_edit_save(page, server):
     assert pg.locator(".chip.custom").count() == 1
     shot(pg, "02_custom_edit")
     # save copy
-    pg.keyboard.press("Control+s")
+    pg.keyboard.press("ControlOrMeta+s")
     pg.wait_for_selector("text=Saved 01_prophoto16_lzw-captioned.tif", timeout=60000)
     out = os.path.join(server["work"], "01_prophoto16_lzw-captioned.tif")   # next to the original
     assert os.path.exists(out)

@@ -178,13 +178,12 @@ def _lightroom_regions(md: Dict[str, Any]) -> bool:
     UPRIGHT (displayed) size, so for orientation 5-8 its AppliedToDimensions
     looks like an upright-frame declaration while the boxes are not. Its
     regions carry a per-region mwg-rs:Rotation, which is not part of MWG 2.0
-    (ExifTool: "observed in LR6 XMP"); the XMP CreatorTool names it too."""
+    (ExifTool: "observed in LR6 XMP"). Only that evidence on the regions themselves
+    counts: the file-level CreatorTool can outlive the regions (another editor may
+    rewrite them later and keep the tag)."""
     mwg = md.get("XMP-mwg-rs:RegionInfo")
     regions = mwg.get("RegionList") if isinstance(mwg, dict) else None
-    if isinstance(regions, list) and any(isinstance(r, dict) and "Rotation" in r for r in regions):
-        return True
-    tool = _text(md.get("XMP-xmp:CreatorTool")) or ""
-    return "lightroom" in tool.lower()
+    return isinstance(regions, list) and any(isinstance(r, dict) and "Rotation" in r for r in regions)
 
 
 def region_frame_orientation(md: Dict[str, Any], info: ImageInfo) -> int:

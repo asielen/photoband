@@ -168,7 +168,7 @@ def test_command_palette(page):
     assert zoom.inner_text() != fit_text
     # focus somewhere known, so we can check it comes back
     pg.locator(".strip button.cur").focus()
-    pg.keyboard.press("Control+k")
+    pg.keyboard.press("ControlOrMeta+k")
     dlg = pg.get_by_role("dialog", name="Commands")
     dlg.wait_for()
     total = dlg.get_by_role("option").count()
@@ -176,7 +176,7 @@ def test_command_palette(page):
     # disabled commands say why, with the toolbar's reasons
     pg.keyboard.type("undo")
     assert "Nothing to undo" in dlg.get_by_role("option").first.inner_text()
-    pg.keyboard.press("Control+a")
+    pg.keyboard.press("ControlOrMeta+a")
     pg.keyboard.type("zoom fit")
     opts = dlg.get_by_role("option")
     assert 0 < opts.count() < total
@@ -188,7 +188,7 @@ def test_command_palette(page):
     assert zoom.inner_text() == fit_text
     assert pg.evaluate("() => document.activeElement && document.activeElement.getAttribute('role')") == "option"
     # Esc closes it; arrows move the selection
-    pg.keyboard.press("Control+k")
+    pg.keyboard.press("ControlOrMeta+k")
     dlg.wait_for()
     pg.keyboard.press("ArrowDown")
     assert dlg.locator("[role=option][aria-selected=true]").count() == 1

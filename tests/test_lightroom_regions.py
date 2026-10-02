@@ -206,12 +206,14 @@ def test_upright_atd_from_other_tools_still_means_upright_boxes():
                      mode="RGB", orientation=6)
     assert region_frame_orientation(md, info) == 1
     assert parse_regions(md, info)["named"][0]["box"] == pytest.approx([0.475, 0.265, 0.05, 0.07])
-    # either signature alone is enough
+    # Lightroom's per-region Rotation marks its stored-frame boxes
     md["XMP-mwg-rs:RegionInfo"]["RegionList"][0]["Rotation"] = 0
     assert region_frame_orientation(md, info) == 6
     del md["XMP-mwg-rs:RegionInfo"]["RegionList"][0]["Rotation"]
+    # a Lightroom CreatorTool alone is no evidence about the regions: another editor may have
+    # rewritten them (upright, as AppliedToDimensions says) and kept the file-level tag
     md["XMP-xmp:CreatorTool"] = "Adobe Photoshop Lightroom Classic 14.5.1 (Windows)"
-    assert region_frame_orientation(md, info) == 6
+    assert region_frame_orientation(md, info) == 1
 
 
 # --------------------------------------------------------------------------
@@ -219,7 +221,7 @@ def test_upright_atd_from_other_tools_still_means_upright_boxes():
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("orientation", [6, 8])
-@pytest.mark.parametrize("sig", ["both", "rotation", "creator"])
+@pytest.mark.parametrize("sig", ["both", "rotation"])
 def test_overlay_boxes_land_on_faces(tmp_path, orientation, sig):
     p, img = make_scan(tmp_path, orientation, rotation=sig != "creator", creator=sig != "rotation")
     info = probe(p)

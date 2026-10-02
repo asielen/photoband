@@ -177,7 +177,7 @@ def test_tab_never_hides_panels(page):
 def test_panels_toggle_shortcut_and_button(page):
     pg = page
     pg.locator(".strip button.cur").focus()
-    pg.keyboard.press("Control+Backslash")
+    pg.keyboard.press("ControlOrMeta+Backslash")
     pg.wait_for_timeout(300)
     assert pg.locator(".strip").count() == 0 and pg.locator(".insp").count() == 0
     btn = pg.locator("button[aria-label='Show side panels']")
@@ -302,7 +302,7 @@ def test_filmstrip_badge_is_a_shape(page):
     assert badge.get_attribute("aria-label") == "Unsaved edits"
     assert badge.locator("svg").count() == 1
     shot(pg, "08_badge_draft_960")
-    pg.keyboard.press("Control+z")
+    pg.keyboard.press("ControlOrMeta+z")
     pg.keyboard.press("Escape")
 
 
