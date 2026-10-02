@@ -4,6 +4,16 @@
 ;   /DWebView2Bootstrapper=<path to MicrosoftEdgeWebview2Setup.exe>
 ;   /Sphotoband=<signtool command> /DSign=1   (only when signing is configured)
 #define AppName "Photoband"
+#ifndef AppDir
+  #define AppDir "..\..\dist\Photoband"
+#endif
+; the oldest Windows the build runs on: 10.0 (default build, Python 3.12) or 6.3 (the -Target win81 build)
+#ifndef MinWinVersion
+  #define MinWinVersion "10.0"
+#endif
+#ifndef OutputSuffix
+  #define OutputSuffix ""
+#endif
 #ifndef AppVersion
   #error AppVersion is not defined. Build with packaging\windows\build.ps1 (or pass /DAppVersion=x.y.z).
 #endif
@@ -24,7 +34,8 @@ DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\..\dist
-OutputBaseFilename=PhotobandSetup-{#AppVersion}
+OutputBaseFilename=PhotobandSetup-{#AppVersion}{#OutputSuffix}
+MinVersion={#MinWinVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -36,7 +47,7 @@ SignedUninstaller=yes
 #endif
 
 [Files]
-Source: "..\..\dist\Photoband\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+Source: "{#AppDir}\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 #ifdef WebView2Bootstrapper
 Source: "{#WebView2Bootstrapper}"; DestDir: "{tmp}"; DestName: "MicrosoftEdgeWebview2Setup.exe"; Flags: deleteafterinstall; Check: NeedsWebView2
 #endif

@@ -111,9 +111,22 @@ if is_mac:
     min_macos = os.environ.get('PHOTOBAND_MACOS_MIN') or wheel_min_macos(target_arch)
     print(f'macOS build: arch={target_arch}, LSMinimumSystemVersion={min_macos}')
 
+# Windows 8.1 may lack the Universal C Runtime (KB2999226): the win81 build ships its DLLs,
+# from the newest Windows SDK redist on the build machine
+ucrt = []
+if is_win and os.environ.get('PHOTOBAND_BUNDLE_UCRT') == '1':
+    import glob
+    kits = os.path.join(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'), 'Windows Kits', '10', 'Redist')
+    dirs = sorted(glob.glob(os.path.join(kits, '10.*', 'ucrt', 'DLLs', 'x64'))) or glob.glob(os.path.join(kits, 'ucrt', 'DLLs', 'x64'))
+    if not dirs:
+        fail('PHOTOBAND_BUNDLE_UCRT=1 but no Universal C Runtime redist was found (install the Windows 10/11 SDK).')
+    ucrt = [(f, '.') for f in glob.glob(os.path.join(dirs[-1], '*.dll'))]
+    print(f'Bundling {len(ucrt)} Universal C Runtime DLLs from {dirs[-1]}')
+
 a = Analysis(
     [os.path.join(ROOT, 'packaging', 'launcher.py')],
     pathex=[ROOT, os.path.join(ROOT, 'packages', 'captiontokens')],
+    binaries=ucrt,
     datas=datas,
     hiddenimports=hidden,
     excludes=['tkinter', 'matplotlib', 'IPython', 'pytest', 'playwright'],
