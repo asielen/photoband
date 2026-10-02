@@ -356,15 +356,16 @@ def test_save_log_rotation_is_not_raced_by_two_processes(tmp_path):
     # (the second move replaces the first's save.log.1) and lines would be lost.
     import multiprocessing as mp
     n, limit = 200, 15000          # 2 x 200 lines of ~60 bytes = ~24 KB: one rotation
+    # an app folder of its own: the session's shared save.log already holds other tests' saves
+    home = str(tmp_path / "home")
     ctx = mp.get_context("spawn")
-    procs = [ctx.Process(target=_log_lines, args=(os.environ["PHOTOBAND_HOME"], k, n, limit)) for k in range(2)]
+    procs = [ctx.Process(target=_log_lines, args=(home, k, n, limit)) for k in range(2)]
     for pr in procs:
         pr.start()
     for pr in procs:
         pr.join(60)
         assert pr.exitcode == 0
-    from photoband import paths
-    d = paths.sub("logs")
+    d = os.path.join(home, "logs")
     lines = []
     for name in ("save.log", "save.log.1"):
         f = os.path.join(d, name)
