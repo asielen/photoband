@@ -114,17 +114,25 @@ def test_open_edit_save(page, server):
     # save copy
     pg.keyboard.press("Control+s")
     pg.wait_for_selector("text=Saved 01_prophoto16_lzw-captioned.tif", timeout=60000)
-    out = os.path.join(server["work"], "captioned", "01_prophoto16_lzw-captioned.tif")
+    out = os.path.join(server["work"], "01_prophoto16_lzw-captioned.tif")   # next to the original
     assert os.path.exists(out)
     from photoband.imageio import probe
     info = probe(out)
     assert info.dtype == "uint16" and info.compression == "lzw"
     shot(pg, "03_saved")
+    # saving moves on to the next photo: the next tests work on the first one
+    select_photo(pg, "01_prophoto16_lzw.tif")
     assert not [e for e in pg.errors if "favicon" not in e], pg.errors
 
 
 def test_template_switch_keeps_custom(page):
     pg = page
+    # the saved edit went into the copy: edit the original's People line again
+    ed = pg.locator('[aria-label="People"][contenteditable]')
+    ed.click()
+    pg.keyboard.press("End")
+    pg.keyboard.type(" (1952)")
+    pg.wait_for_timeout(400)
     pg.select_option('select[aria-label="Template"]', "museum-card")
     pg.wait_for_timeout(1200)
     shot(pg, "04_museum_card")
@@ -190,7 +198,7 @@ def test_case_c_erase(page):
     pg.wait_for_timeout(3000)
     shot(pg, "13_case_c_erase")
     # overwrite is disabled for case C by default
-    assert pg.locator("button:has-text('Overwrite original')").is_disabled()
+    assert pg.locator("header.tb button.overwrite").is_disabled()
 
 
 def test_case_d_flag(page):
@@ -237,12 +245,14 @@ def test_overwrite_with_backup(page, server):
     pg = page
     select_photo(pg, "04_mp_regions.tif")
     pg.wait_for_timeout(800)
-    pg.click("button:has-text('Overwrite original')")
+    pg.click("header.tb button.overwrite")
     pg.wait_for_selector("text=Overwrite the original?")
     shot(pg, "20_overwrite_confirm")
     pg.click("div.dialog button:has-text('Overwrite')")
     pg.wait_for_selector("text=Overwrote the original", timeout=60000)
-    assert os.path.exists(os.path.join(server["work"], "_originals", "04_mp_regions.tif"))
+    assert os.path.exists(os.path.join(server["work"], "_originals", "04_mp_regions-original.tif"))
+    # overwrite moves on to the next photo: go back to the overwritten one
+    select_photo(pg, "04_mp_regions.tif")
     pg.wait_for_selector("text=Captioned by Photoband", timeout=30000)
     shot(pg, "21_case_a_after_overwrite")
 
@@ -280,4 +290,21 @@ def test_batch(page, server):
     saved = int(re.search(r"(\d+)\s+saved", txt).group(1))
     failed = int(re.search(r"(\d+)\s+failed", txt).group(1))
     assert saved >= 5 and failed == 0, txt
+    assert not [e for e in pg.errors if "favicon" not in e], pg.errors
+    # a second batch over the same folder lists the copies the first one made (they sit next to
+    # the originals): it leaves every one of them alone instead of captioning a copy of a copy
+    pg.click("button:has-text('New batch')")
+    pg.wait_for_timeout(800)
+    pg.click("button:has-text('Check photos')")
+    pg.wait_for_selector("text=ready", timeout=30000)
+    pg.wait_for_function("() => !document.body.innerText.includes('Checking…')", timeout=180000)
+    pg.wait_for_timeout(500)
+    shot(pg, "25_batch_second_run_skips_copies")
+    rows = pg.locator(".prow", has_text="a captioned copy Photoband made")
+    # this batch's copies and the one an earlier test saved in the same folder
+    copies = [n for n in os.listdir(server["work"]) if "-captioned" in n]
+    assert rows.count() == len(copies) >= saved, pg.inner_text(".batch")
+    for i in range(rows.count()):
+        assert "-captioned" in rows.nth(i).inner_text()
+    pg.click("button:has-text('Back')")
     assert not [e for e in pg.errors if "favicon" not in e], pg.errors

@@ -332,6 +332,6 @@ def test_case_c_ignore_keeps_overwrite_off(page):
     pg.wait_for_selector("text=Physical caption on a scan", timeout=30000)
     pg.click("button:has-text('Ignore')")
     pg.wait_for_timeout(500)
-    btn = pg.locator('header.tb button[aria-label="Overwrite original"]')
+    btn = pg.locator('header.tb button.overwrite')
     assert btn.is_disabled()
     assert "overwriting it is turned off" in (btn.get_attribute("data-tip") or "")

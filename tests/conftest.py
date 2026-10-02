@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 import pytest
 from PIL import Image, ImageDraw, ImageFont
@@ -19,6 +20,57 @@ def _home(tmp_path_factory):
     os.environ["PHOTOBAND_NO_SYSTEM_FONTS"] = "1"
     os.environ["PHOTOBAND_NO_NATIVE_DIALOGS"] = "1"
     yield home
+
+
+# ---------------------------------------------------------------------------- platform capabilities
+# Tests that need something a machine may lack skip with the reason instead of failing.
+
+def _can_symlink() -> bool:
+    """Whether this account can create symbolic links (Windows needs Developer Mode or the
+    SeCreateSymbolicLinkPrivilege; without it os.symlink fails with WinError 1314)."""
+    d = tempfile.mkdtemp(prefix="pb-symlink-probe-")
+    try:
+        target = os.path.join(d, "t")
+        open(target, "wb").close()
+        os.symlink(target, os.path.join(d, "l"))
+        return True
+    except (OSError, NotImplementedError, AttributeError):
+        return False
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+CAN_SYMLINK = _can_symlink()
+NO_SYMLINK_REASON = ("this account can't create symbolic links (on Windows: enable Developer Mode or "
+                     "grant SeCreateSymbolicLinkPrivilege)")
+
+
+@pytest.fixture
+def symlink():
+    """``os.symlink``, or skip the test where symbolic links can't be created. Request it in
+    tests that make links; the test runs up to its first link, so earlier checks still count."""
+    def make(src, dst, target_is_directory=False):
+        if not CAN_SYMLINK:
+            pytest.skip(NO_SYMLINK_REASON)
+        os.symlink(src, dst, target_is_directory=target_is_directory)
+    return make
+
+
+def best_time(fn, repeats: int = 3):
+    """(result, seconds) of the fastest of ``repeats`` calls. Speed checks use it so a busy machine
+    (parallel tests, a cold first call) doesn't fail them; a real slowdown still does."""
+    import time
+    best, out = None, None
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        out = fn()
+        dt = time.perf_counter() - t0
+        best = dt if best is None else min(best, dt)
+    return out, best
+
+
+# POSIX permission bits (chmod 0o640 ...): Windows only keeps a read-only flag.
+posix_permissions = pytest.mark.skipif(os.name == "nt", reason="needs POSIX file permission bits (not on Windows)")
 
 
 MAKE_FIXTURES = os.path.join(ROOT, "scripts", "make_fixtures.py")

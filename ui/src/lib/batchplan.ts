@@ -21,3 +21,19 @@ export function caseCOverwriteRefused(mode: PhotoDraft['mode'], bs: BatchSetting
   if (bs.saveMode !== 'overwrite' || mode === 'erase' || allowOverwriteHandwritten) return null
   return 'caption on the scan: overwriting it is off (Settings › Saving)'
 }
+
+/** The reason a batch leaves a photo alone because it is itself a captioned copy Photoband made
+ *  (copies can sit next to their originals, so a later batch over the folder lists them):
+ *  captioning it again would only add a copy of a copy on every run. Whatever the options for
+ *  photos Photoband captioned, and not something that needs a look. Null for anything else.
+ *
+ *  The analysis tells copies from the record, else from the hidden marker's payload (metadata
+ *  stripped from a PNG/TIFF). A Photoband output that says neither (`copyUnknown`: e.g. a JPEG
+ *  whose metadata was stripped keeps its marker but no payload) may be a copy, so it is left alone
+ *  too: it can still be opened and captioned on its own. */
+export const COPY_REASON = 'a captioned copy Photoband made'
+export const MAYBE_COPY_REASON = 'captioned by Photoband before and its metadata was removed, so it may be a copy (open it to caption it again)'
+export function copySkipReason(ex: { case?: unknown; isCopy?: boolean; copyUnknown?: boolean } | null | undefined): string | null {
+  if (ex?.isCopy === true) return COPY_REASON
+  return ex?.copyUnknown === true ? MAYBE_COPY_REASON : null
+}

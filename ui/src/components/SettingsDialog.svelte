@@ -3,6 +3,8 @@
   import { dialogs } from '../lib/dialogs.svelte'
   import { families, loadRegistry } from '../lib/fonts'
   import { app } from '../lib/store.svelte'
+  import { batchRun } from '../lib/batchstate.svelte'
+  import { patchLeaf, writeControl } from '../lib/controls'
   import type { Template } from '../lib/types'
   import Disclosure from './Disclosure.svelte'
   import FormatField from './FormatField.svelte'
@@ -22,12 +24,15 @@
   let tab = $state(dialogs.settingsOpen || 'general')
   const S = $derived(app.settings)
 
-  function set(patch: any) {
-    return app.saveSettings(patch).catch((e) => app.toast('error', e.message))
+  /** Writes a settings patch. With the control's change event: afterwards the control shows what
+   *  is really stored (the old value when the write failed, the cleaned value when the server
+   *  corrected it), since a one-way bound control keeps the typed value otherwise. */
+  function set(patch: any, e?: Event) {
+    return writeControl(e, () => app.saveSettings(patch), () => patchLeaf(app.settings, patch), (er) => app.toast('error', er.message))
   }
   /** The default template also becomes the "last used" one, which new photos prefer. */
-  function setDefault(id: string) {
-    return set({ general: { defaultTemplate: id }, session: { lastTemplate: id } })
+  function setDefault(id: string, e?: Event) {
+    return set({ general: { defaultTemplate: id }, session: { lastTemplate: id } }, e)
   }
   function focusSelect(el: HTMLInputElement) {
     queueMicrotask(() => {
@@ -173,7 +178,7 @@
   }
   function newTemplate() {
     const base = app.template(S.general.defaultTemplate) || app.templates[0]
-    naming = { base, text: uniqueName('New template'), title: 'New template, based on the default, named' }
+    naming = { base, text: uniqueName('New template'), title: `Name for the new template (a copy of “${base.name}”)` }
   }
   async function commitNaming() {
     if (!naming) return
@@ -372,7 +377,12 @@
     if (!app.photos.length) return undefined
     return samples[id] ?? null
   }
+  // the same names as the font menu in the Style panel
+  const SOURCE_NAMES: Record<string, string> = { bundled: 'Bundled', user: 'Your fonts', google: 'Google Fonts', system: 'Installed' }
   const backupWhere = $derived(S.saving.backupFolder || '“_originals” next to each photo')
+  // Saving settings while something saves: a single save uses them as they are, so they wait for it;
+  // a batch saves with the settings it was created with, so changes apply to the next batch
+  const saveLock = $derived(app.saving ? 'Wait until the save finishes: it uses these settings as they are.' : '')
 </script>
 
 <Modal title="Settings" width={940} height="min(720px, calc(100vh - 48px))" noPad onclose={closeSettings}>
@@ -390,7 +400,7 @@
           <div class="set">
             <span class="k">Default template</span>
             <div class="v">
-              <select class="field deftpl" aria-label="Default template" data-tip="The look new photos start with. You can switch any photo to another template in the toolbar." value={S.general.defaultTemplate} onchange={(e) => setDefault((e.target as HTMLSelectElement).value)}>
+              <select class="field deftpl" aria-label="Default template" data-tip="The look new photos start with. You can switch any photo to another template in the toolbar." value={S.general.defaultTemplate} onchange={(e) => setDefault((e.target as HTMLSelectElement).value, e)}>
                 {#each app.templates as t}<option value={t.id}>{t.name}</option>{/each}
               </select>
               <p class="desc">New photos start with this template.</p>
@@ -403,14 +413,14 @@
             <span class="k">Theme</span>
             <div class="v">
               <Segmented label="Theme" value={S.general.theme} options={[{ value: 'system', label: 'Match system', title: 'Follow your computer’s light or dark mode.' }, { value: 'light', label: 'Light', title: 'Always use light windows.' }, { value: 'dark', label: 'Dark', title: 'Always use dark windows.' }]} onchange={(v) => set({ general: { theme: v } })} />
-              <p class="desc">Light or dark windows. The photo preview always sits on neutral gray so band colors look right.</p>
+              <p class="desc">Light or dark windows. The photo preview always sits on neutral grey so band colours look right.</p>
             </div>
           </div>
           <div class="set">
             <span class="k">Tooltips</span>
             <div class="v">
               <label class="switch" data-tip="Turn the short explanations that appear when you point at a control on or off.">
-                <input type="checkbox" role="switch" checked={tipsOn} onchange={(e) => set({ general: { showTooltips: (e.target as HTMLInputElement).checked } })} />
+                <input type="checkbox" role="switch" checked={tipsOn} onchange={(e) => set({ general: { showTooltips: (e.target as HTMLInputElement).checked } }, e)} />
                 <span class="track" aria-hidden="true"></span>
                 Show tooltips
               </label>
@@ -436,7 +446,7 @@
         <div class="pickers">
           <label class="pick"><span class="k">Template</span>
             <select class="field" value={editId} data-tip="The template whose caption formats you are editing." onchange={(e) => switchTemplate((e.target as HTMLSelectElement).value, e.target as HTMLSelectElement)} aria-label="Template to edit">
-              {#each app.templates as t}<option value={t.id}>{t.name}{t.builtin ? ' (built-in)' : ''}</option>{/each}
+              {#each app.templates as t}<option value={t.id}>{t.name}{t.builtin ? '' : ' (yours)'}</option>{/each}
             </select>
           </label>
           <label class="pick"><span class="k">Example photo</span>
@@ -504,8 +514,8 @@
             <div class="trow row">
               <span class="star" class:on={isDef} aria-hidden="true">{isDef ? '★' : ''}</span>
               <div class="grow">
-                <div>{#if renaming === t.id}<input class="field" use:focusSelect bind:value={renameText} onkeydown={(e) => { if (e.key === 'Enter') commitRename(t); if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); renaming = null } }} onblur={() => commitRename(t)} aria-label="Template name" />{:else}<b>{t.name}</b>{/if}{#if t.builtin}<span class="tag" data-tip="Comes with Photoband and can’t be changed. Duplicate it to make your own version.">built-in</span>{/if}{#if isDef}<span class="tag def" data-tip="New photos start with this template.">default</span>{/if}</div>
-                <div class="faint small">{t.description || `${t.blocks.length} parts · ${t.scaleMode}`}</div>
+                <div>{#if renaming === t.id}<input class="field" use:focusSelect bind:value={renameText} onkeydown={(e) => { if (e.key === 'Enter') commitRename(t); if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); renaming = null } }} onblur={() => commitRename(t)} aria-label="Template name" />{:else}<b>{t.name}</b>{/if}{#if !t.builtin}<span class="tag" data-tip="A template you made. Built-in templates (unmarked) come with Photoband and can’t be changed.">yours</span>{/if}{#if isDef}<span class="tag def" data-tip="New photos start with this template.">default</span>{/if}</div>
+                <div class="faint small">{t.description || `${t.blocks.length} part${t.blocks.length === 1 ? '' : 's'} · sizes follow ${t.scaleMode === 'physical' ? 'print size' : 'photo width'}`}</div>
               </div>
               <button class="btn sm ghost" data-tip="Change what each part of this template’s caption says." onclick={async () => { if (editId === t.id || (await guard())) { if (editId !== t.id) { editId = t.id; work = null } tab = 'formats' } }}>Edit formats</button>
               <Menu label="More actions for {t.name}" align="right" items={templateActions(t)}>
@@ -517,12 +527,31 @@
         <p class="faint small">Fonts, sizes and borders are changed on a photo (Style and Layout panels) and kept with “Save as template” or “Update template”. Exported templates include their wording but not font files.</p>
       {:else if tab === 'saving'}
         <h3>Saving</h3>
+        {#if saveLock}<p class="desc warn" role="status">{saveLock}</p>
+        {:else if batchRun.running}<p class="desc" role="status">A batch is saving with the settings it started with: changes here apply to the next batch and to single photos.</p>{/if}
+        <!-- every control of this tab waits while a save runs -->
+        <fieldset class="plain" disabled={!!saveLock}>
+        <section class="grp">
+          <h4>How saving works</h4>
+          <ul class="how">
+            <li><b>Save copy &amp; next</b>: the original is not touched. The captioned photo is saved as a new file, placed and named as set below.</li>
+            <li><b>Overwrite &amp; next</b> with backups on: the photo is first copied to the backup folder ({backupWhere}), then the captioned photo replaces it. For a photo Photoband already captioned, its earlier backup of the untouched original is kept.</li>
+            <li><b>Overwrite &amp; next</b> with backups off: the captioned photo replaces the file, which can’t be recovered.</li>
+          </ul>
+          <p class="desc">The strip under the toolbar shows the exact file each button writes for the open photo.</p>
+        </section>
+        <section class="grp">
+          <h4>Backups (for Overwrite)</h4>
+          <label class="row opt" data-tip={saveLock || 'Strongly recommended: each photo is copied to the backup folder before it is replaced, so it can be put back.'}><input type="checkbox" checked={S.saving.backupOriginals} onchange={(e) => set({ saving: { backupOriginals: (e.target as HTMLInputElement).checked } }, e)} /> Back up each photo before overwriting it</label>
+          <div class="row small sub" class:off={!S.saving.backupOriginals}>Backups go to <span class="path" data-tip={backupWhere}>{backupWhere}</span> <button class="btn sm" data-tip="Pick one folder for all backups." disabled={!S.saving.backupOriginals} onclick={() => pickFolder('backupFolder')}>Choose…</button>{#if S.saving.backupFolder}<button class="btn sm ghost" data-tip="Keep each backup in an “_originals” folder next to its photo." onclick={() => set({ saving: { backupFolder: '' } })}>Use _originals</button>{/if}</div>
+          {#if !S.saving.backupOriginals}<p class="desc warn">Without a backup, an overwritten photo can’t be restored.</p>{/if}
+        </section>
         <section class="grp">
           <h4>Where copies go</h4>
           <div class="col" role="radiogroup" aria-label="Save copies to" bind:this={locGroup}>
-            <label class="row opt" data-tip="Keeps copies tidy: each folder of photos gets its own subfolder of captioned copies."><input type="radio" name="loc" value="subfolder" checked={S.saving.location === 'subfolder'} onchange={() => set({ saving: { location: 'subfolder' } })} /> In a subfolder next to the original, named <input class="field" style="width:140px" value={S.saving.subfolderName} aria-label="Subfolder name" onchange={(e) => set({ saving: { subfolderName: (e.target as HTMLInputElement).value.trim() || 'captioned' } })} /></label>
+            <label class="row opt" data-tip="The copy sits right beside the original, with a different name."><input type="radio" name="loc" value="same" checked={S.saving.location === 'same'} onchange={(e) => set({ saving: { location: 'same' } }, e)} /> In the same folder as the original</label>
+            <label class="row opt" data-tip="Keeps copies tidy: each folder of photos gets its own subfolder of captioned copies."><input type="radio" name="loc" value="subfolder" checked={S.saving.location === 'subfolder'} onchange={(e) => set({ saving: { location: 'subfolder' } }, e)} /> In a subfolder next to the original, named <input class="field" style="width:140px" value={S.saving.subfolderName} aria-label="Subfolder name" onchange={(e) => set({ saving: { subfolderName: (e.target as HTMLInputElement).value.trim() || 'captioned' } }, e)} /></label>
             <div class="row opt"><label class="row" data-tip="Every captioned copy goes into one folder you choose."><input type="radio" name="loc" value="fixed" checked={S.saving.location === 'fixed'} onchange={chooseFixed} /> In one folder</label> <span class="path" data-tip={S.saving.fixedFolder || 'No folder chosen yet.'}>{S.saving.fixedFolder || 'none chosen'}</span> <button class="btn sm" data-tip="Pick the folder for all captioned copies." onclick={async () => { await pickFolder('fixedFolder'); syncLoc() }}>Choose…</button></div>
-            <label class="row opt" data-tip="The copy sits right beside the original, with a different name."><input type="radio" name="loc" value="same" checked={S.saving.location === 'same'} onchange={() => set({ saving: { location: 'same' } })} /> In the same folder as the original</label>
           </div>
           <p class="desc">Your original photos are never changed by Save copy.</p>
         </section>
@@ -531,12 +560,6 @@
           <FormatField single rows={1} value={S.saving.fileName} extraTokens={['template']} label="File name pattern" example={app.photos.length ? (samples.__filename ?? null) : undefined} onchange={(v) => set({ saving: { fileName: v } })} />
           <p class="desc">The name of each copy. Fields like the original file name fill in for each photo; the extension is added for you.</p>
         </section>
-        <section class="grp">
-          <h4>When you overwrite an original</h4>
-          <label class="row opt" data-tip="Strongly recommended: you can always put the original back from the backup."><input type="checkbox" checked={S.saving.backupOriginals} onchange={(e) => set({ saving: { backupOriginals: (e.target as HTMLInputElement).checked } })} /> Keep a backup of the original first</label>
-          <div class="row small sub" class:off={!S.saving.backupOriginals}>Backups go to <span class="path" data-tip={backupWhere}>{backupWhere}</span> <button class="btn sm" data-tip="Pick one folder for all backups." disabled={!S.saving.backupOriginals} onclick={() => pickFolder('backupFolder')}>Choose…</button>{#if S.saving.backupFolder}<button class="btn sm ghost" data-tip="Keep each backup in an “_originals” folder next to its photo." onclick={() => set({ saving: { backupFolder: '' } })}>Use _originals</button>{/if}</div>
-          {#if !S.saving.backupOriginals}<p class="desc warn">Without a backup, an overwritten photo can’t be restored.</p>{/if}
-        </section>
         <Disclosure id="settings.saving.advanced" label="Advanced" tip="File type, name clashes, file dates and safety switches.">
           <section class="grp first">
             <h4>File type</h4>
@@ -544,10 +567,10 @@
               <span class="k">Save as</span>
               <div class="v">
                 <div class="row">
-                  <select class="field" aria-label="Output format" data-tip="The file type of captioned copies. “Same as the original” keeps TIFF as TIFF, JPEG as JPEG." value={S.saving.outputFormat} onchange={(e) => set({ saving: { outputFormat: (e.target as HTMLSelectElement).value } })}>
+                  <select class="field" aria-label="Output format" data-tip="The file type of captioned copies. “Same as the original” keeps TIFF as TIFF, JPEG as JPEG." value={S.saving.outputFormat} onchange={(e) => set({ saving: { outputFormat: (e.target as HTMLSelectElement).value } }, e)}>
                     <option value="same">Same as the original</option><option value="tiff">TIFF</option><option value="jpeg">JPEG</option><option value="png">PNG</option>
                   </select>
-                  <label class="row" class:off={!jpegPossible} data-tip={jpegPossible ? 'Higher keeps more detail and makes bigger files. 95 is a good choice.' : 'Only used for JPEG files. Choose JPEG or “Same as the original” to change it.'}>JPEG quality <input class="field" type="number" min="50" max="100" style="width:64px" disabled={!jpegPossible} value={S.saving.jpegQuality} onchange={(e) => set({ saving: { jpegQuality: Math.max(50, Math.min(100, +(e.target as HTMLInputElement).value || 95)) } })} /></label>
+                  <label class="row" class:off={!jpegPossible} data-tip={jpegPossible ? 'Higher keeps more detail and makes bigger files. 95 is a good choice.' : 'Only used for JPEG files. Choose JPEG or “Same as the original” to change it.'}>JPEG quality <input class="field" type="number" min="50" max="100" style="width:64px" disabled={!jpegPossible} value={S.saving.jpegQuality} onchange={(e) => set({ saving: { jpegQuality: Math.max(50, Math.min(100, +(e.target as HTMLInputElement).value || 95)) } }, e)} /></label>
                 </div>
                 <p class="desc">TIFF and PNG copies keep the photo exactly; JPEG copies are smaller.</p>
               </div>
@@ -560,14 +583,15 @@
               </div>
             </div>
             <h4>File details</h4>
-            <label class="row opt" data-tip="Handy when your photo library sorts by file date."><input type="checkbox" checked={S.saving.keepFileDates} onchange={(e) => set({ saving: { keepFileDates: (e.target as HTMLInputElement).checked } })} /> Give the copy the original’s modified date</label>
-            <label class="row opt" data-tip="Stores only the caption text and band layout invisibly in the pixels (a band marker), never other photo information."><input type="checkbox" checked={S.saving.embedMarker} onchange={(e) => set({ saving: { embedMarker: (e.target as HTMLInputElement).checked } })} /> Mark the band invisibly so Photoband recognizes it later</label>
+            <label class="row opt" data-tip="Handy when your photo library sorts by file date."><input type="checkbox" checked={S.saving.keepFileDates} onchange={(e) => set({ saving: { keepFileDates: (e.target as HTMLInputElement).checked } }, e)} /> Give the copy the original’s modified date</label>
+            <label class="row opt" data-tip="Stores only the caption text and band layout invisibly in the pixels (a band marker), never other photo information."><input type="checkbox" checked={S.saving.embedMarker} onchange={(e) => set({ saving: { embedMarker: (e.target as HTMLInputElement).checked } }, e)} /> Mark the band invisibly so Photoband recognizes it later</label>
             <p class="desc">The mark helps Photoband re-caption a photo even if another program removed its photo information.</p>
             <h4>Safety switches</h4>
-            <label class="row opt" data-tip="Off by default: handwriting on an original print is part of the historical record."><input type="checkbox" checked={S.saving.allowOverwriteHandwritten} onchange={(e) => set({ saving: { allowOverwriteHandwritten: (e.target as HTMLInputElement).checked } })} /> Allow overwriting scans that have a handwritten or printed caption</label>
-            <label class="row opt" data-tip="A multi-page TIFF holds several images. Saving keeps only the first one, so this is off by default."><input type="checkbox" checked={S.saving.allowMultipageSave} onchange={(e) => set({ saving: { allowMultipageSave: (e.target as HTMLInputElement).checked } })} /> Allow saving multi-page TIFFs (keeps only the first page)</label>
+            <label class="row opt" data-tip="Off by default: handwriting on an original print is part of the historical record."><input type="checkbox" checked={S.saving.allowOverwriteHandwritten} onchange={(e) => set({ saving: { allowOverwriteHandwritten: (e.target as HTMLInputElement).checked } }, e)} /> Allow overwriting scans that have a handwritten or printed caption</label>
+            <label class="row opt" data-tip="A multi-page TIFF holds several images. Saving keeps only the first one, so this is off by default."><input type="checkbox" checked={S.saving.allowMultipageSave} onchange={(e) => set({ saving: { allowMultipageSave: (e.target as HTMLInputElement).checked } }, e)} /> Allow saving multi-page TIFFs (keeps only the first page)</label>
           </section>
         </Disclosure>
+        </fieldset>
       {:else if tab === 'fonts'}
         <h3>Fonts</h3>
         <p class="lead">{fontList.length} font families are ready to use in captions. Add more from a font file on this computer or from Google Fonts.</p>
@@ -597,7 +621,7 @@
             <thead><tr><th>Family</th><th>Use</th><th>From</th><th>Styles</th></tr></thead>
             <tbody>
               {#each fontList as f (f.id)}
-                <tr><td>{f.family}{#if f.fallback}<span class="tag" data-tip="Used for characters other fonts don’t have.">fallback</span>{/if}</td><td class="muted">{f.role}</td><td class="muted">{f.source}</td><td class="muted">{f.faces.length}{f.smallCaps ? ' · small caps' : ''}</td></tr>
+                <tr><td>{f.family}{#if f.fallback}<span class="tag" data-tip="Used for characters other fonts don’t have.">fallback</span>{/if}</td><td class="muted">{f.role}</td><td class="muted">{SOURCE_NAMES[f.source] || f.source}</td><td class="muted">{f.faces.length}{f.smallCaps ? ' · small caps' : ''}</td></tr>
               {/each}
             </tbody>
           </table>
@@ -610,7 +634,7 @@
           <div class="set">
             <span class="k">Preview cache</span>
             <div class="v">
-              <label class="row" data-tip="Disk space kept for quick previews of large scans. Older previews are removed when it is full."><input class="field" type="number" min="100" step="100" style="width:90px" aria-label="Preview cache size in MB" value={S.advanced.cacheSizeMB} onchange={(e) => set({ advanced: { cacheSizeMB: Math.max(100, +(e.target as HTMLInputElement).value || 2048) } })} /> MB</label>
+              <label class="row" data-tip="Disk space kept for quick previews of large scans. Older previews are removed when it is full."><input class="field" type="number" min="100" step="100" style="width:90px" aria-label="Preview cache size in MB" value={S.advanced.cacheSizeMB} onchange={(e) => set({ advanced: { cacheSizeMB: Math.max(100, +(e.target as HTMLInputElement).value || 2048) } }, e)} /> MB</label>
               <p class="desc">More space makes reopening big scans faster.</p>
             </div>
           </div>
@@ -653,11 +677,11 @@
         <button class="btn primary" disabled={!saveAsName.trim()} data-tip={saveAsName.trim() ? 'Save these caption formats as your own template.' : 'Type a name for your template first.'} onclick={saveWork}>Save my template</button>
       {:else if dirty}
         <span class="grow faint small" role="status">Unsaved changes to “{work.name}”.</span>
-        <button class="btn ghost" data-tip="Throw away the changes since the last save." onclick={revert}>Revert</button>
+        <button class="btn ghost" data-tip="Throw away the changes since the last save." onclick={revert}>Discard changes</button>
         <button class="btn" onclick={closeSettings}>Done</button>
         <button class="btn primary" data-tip={work.builtin ? 'Built-in templates can’t be changed, so this saves your own copy.' : 'Save the changes to this template.'} onclick={startSave}>{work.builtin ? 'Save as my template…' : 'Save template'}</button>
       {:else}
-        <span class="grow faint small">Changes to formats are kept when you press Save.</span>
+        <span class="grow faint small">Format changes are kept only when you save the template.</span>
         <button class="btn primary" onclick={closeSettings}>Done</button>
       {/if}
     {:else}
@@ -668,6 +692,7 @@
 </Modal>
 
 <style>
+  fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; }
   .layout { display: grid; grid-template-columns: 172px 1fr; height: 100%; min-height: 0; }
   nav { border-right: 1px solid var(--line); padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; background: var(--bg); }
   nav button { text-align: left; border: 0; background: none; padding: 0 10px; min-height: 30px; border-radius: 6px; cursor: pointer; color: var(--fg-2); }
@@ -737,4 +762,6 @@
   .gflist { max-height: 300px; margin-top: 6px; }
   .gfrow { padding: 6px 2px; border-top: 1px solid var(--line); }
   .gsample { font-size: 20px; line-height: 1.3; }
+  .how { margin: 0 0 4px; padding-left: 18px; font-size: 13px; line-height: 1.5; }
+  .how li { margin: 2px 0; }
 </style>

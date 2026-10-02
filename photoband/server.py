@@ -115,10 +115,11 @@ def _sweep_async(folders: List[str]) -> None:
 
 
 # GET routes that may take the token as ?t= (images, fonts, downloads); everything else needs the header.
+# Both are used with fullmatch: "$" would also accept a trailing newline (a path ending in %0A).
 _QUERY_TOKEN_RE = re.compile(
-    r"^/(api/photo/(proxy|crop)|fonts/file/[^/]+|files/.*|api/templates/[^/]+/export|api/batch/[^/]+/report\.csv)$")
+    r"/(api/photo/(proxy|crop)|fonts/file/[^/]+|files/.*|api/templates/[^/]+/export|api/batch/[^/]+/report\.csv)")
 
-_HOST_RE = re.compile(r"^(127\.0\.0\.1|localhost)(:\d{1,5})?$")
+_HOST_RE = re.compile(r"(127\.0\.0\.1|localhost)(:\d{1,5})?")
 
 CSP = ("default-src 'self'; img-src 'self' blob: data:; "
        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
@@ -171,6 +172,15 @@ def _sanitize_settings_patch(patch: Any) -> Dict[str, Any]:
             if k == "fixedFolder" and sav.get("location") == "fixed" and not load_settings()["saving"].get(k):
                 sav.pop("location", None)
     return out
+
+
+_ON_EXISTS = ("increment", "ask", "overwrite")
+
+
+def _batch_on_exists(saving: Dict[str, Any]) -> Optional[str]:
+    """The name-clash rule a batch copy is saved with: a batch can't stop to ask, so "ask" adds a
+    number; otherwise the setting (None). Used by staging and by the batch's save preview."""
+    return "increment" if saving.get("onExists") == "ask" else None
 
 
 def _restart_exiftool() -> None:
@@ -228,12 +238,12 @@ def create_app() -> FastAPI:
     class TokenMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
             # Host first (DNS rebinding), then the token
-            if not _HOST_RE.match(request.headers.get("host") or ""):
+            if not _HOST_RE.fullmatch(request.headers.get("host") or ""):
                 return _secure(JSONResponse({"error": "Forbidden host"}, status_code=403))
             p = request.url.path
             if p.startswith("/api/") or p.startswith("/files/") or p.startswith("/fonts/"):
                 tok = request.headers.get("x-photoband-token")
-                if tok is None and request.method in ("GET", "HEAD") and _QUERY_TOKEN_RE.match(p):
+                if tok is None and request.method in ("GET", "HEAD") and _QUERY_TOKEN_RE.fullmatch(p):
                     # <img>, FontFace url() and plain downloads can't send headers
                     tok = request.query_params.get("t")
                 if not security.token_ok(tok):
@@ -623,9 +633,15 @@ def create_app() -> FastAPI:
 
     @app.post("/api/photo/erase-preview")
     async def photo_erase_preview(body: Dict[str, Any] = Body(...)):
+        if not isinstance(body.get("path"), str):
+            raise UserError("path must be a file path")
         p = security.check(body["path"])
+        _check_erase(body)  # the same mask checks as a save, before anything is decoded
         import anyio
-        data = await anyio.to_thread.run_sync(photos.erase_preview_webp, p, body.get("erase") or {})
+        try:
+            data = await anyio.to_thread.run_sync(photos.erase_preview_webp, p, body.get("erase") or {})
+        except ValueError as e:   # e.g. an oversized brush mask
+            raise HTTPException(400, str(e))
         return Response(data, media_type="image/webp")
 
     @app.post("/api/photo/existing")
@@ -663,17 +679,86 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------ saving
     def _tiles_from_form(form, job) -> List[Tile]:
+        """The text-layer tiles of a save or batch job, checked before anything decodes them.
+        Every entry point that accepts tiles goes through here (single save and batch stage)."""
+        from .composite import TILE_MAX, upload_size
         tiles = []
-        for t in job.get("tiles", []):
+        specs = job.get("tiles", [])
+        if not isinstance(specs, list):
+            raise HTTPException(400, "tiles must be a list")
+        for t in specs:
+            if not isinstance(t, dict) or not isinstance(t.get("name"), str):
+                raise HTTPException(400, "Invalid tile")
+            try:
+                x, y = t["x"], t["y"]
+                if isinstance(x, bool) or isinstance(y, bool):
+                    raise TypeError
+                x, y = int(x), int(y)
+            except (KeyError, TypeError, ValueError):
+                raise HTTPException(400, f"Tile {t['name']}: invalid position")
             f = form.get(t["name"])
             if f is None:
                 raise HTTPException(400, f"Missing tile {t['name']}")
-            tiles.append(Tile(int(t["x"]), int(t["y"]), f))
+            # the UI renders text tiles of at most TILE_MAX px a side: refuse anything bigger
+            # before it is decoded (a tiny PNG can declare a huge image)
+            try:
+                w, h = upload_size(f)
+            except ValueError as e:
+                raise HTTPException(400, f"Tile {t['name']}: {e}")
+            if w > TILE_MAX or h > TILE_MAX:
+                raise HTTPException(400, f"Tile {t['name']} is {w}×{h} px; at most {TILE_MAX} px a side")
+            tiles.append(Tile(x, y, f))
         return tiles
+
+    def _check_erase(job) -> None:
+        """Erase inputs of a save or batch job: a dict, and brush masks no bigger than MASK_MAX a
+        side, judged from the PNG header before anything decodes them (a batch worker would)."""
+        erase = job.get("erase")
+        if erase is None:
+            return
+        if not isinstance(erase, dict):
+            raise HTTPException(400, "erase must be an object")
+        import base64
+        import binascii
+        from .composite import upload_size
+        from .existing import MASK_MAX
+        for k in ("brushAdd", "brushRemove"):
+            v = erase.get(k)
+            if not v:
+                continue
+            if not isinstance(v, str):
+                raise HTTPException(400, f"{k} must be a PNG data URL")
+            data = v.split(",", 1)[1] if v.startswith("data:") and "," in v else v
+            try:
+                w, h = upload_size(base64.b64decode(data))
+            except (ValueError, binascii.Error):
+                continue  # not a readable mask: ignored by the save, as before
+            if w > MASK_MAX or h > MASK_MAX:
+                raise HTTPException(400, f"The brush mask is {w}×{h} px; at most {MASK_MAX} px a side")
+
+    def _check_job_types(job) -> None:
+        """Fields of a save or batch job that are used as given: wrong types are a 400, not a 500."""
+        if not isinstance(job, dict):
+            raise HTTPException(400, "Invalid job")
+        if not isinstance(job.get("path"), str) or not job.get("path"):
+            raise HTTPException(400, "path must be a file path")
+        if not isinstance(job.get("layout"), dict):
+            raise HTTPException(400, "layout must be an object")
+        for k in ("fields", "state"):
+            if job.get(k) is not None and not isinstance(job.get(k), dict):
+                raise HTTPException(400, f"{k} must be an object")
+        if job.get("template_name") is not None and not isinstance(job.get("template_name"), str):
+            raise HTTPException(400, "template_name must be text")
+        _check_erase(job)
 
     async def _read_form(request: Request):
         form = await request.form()
-        job = json.loads(form["job"])
+        if not isinstance(form.get("job"), str):
+            raise HTTPException(400, "Missing job")
+        try:
+            job = json.loads(form["job"])
+        except ValueError:
+            raise HTTPException(400, "Invalid job")
         files = {}
         for k, v in form.multi_items():
             if k != "job" and hasattr(v, "read"):
@@ -686,9 +771,40 @@ def create_app() -> FastAPI:
             security.check(job.get("dest_path") or "")
         return src
 
+    @app.post("/api/save/preview")
+    def api_save_preview(body: Dict[str, Any] = Body(...)):
+        """Where a save would write. ``fields`` (the photo's metadata fields) are read from the photo
+        when not given, the same way the batch check reads them for staging. ``batch``: name copies
+        by the batch's conflict rule (a batch can't ask). ``onExists``: another rule to preview."""
+        from .save import save_preview
+        if not isinstance(body.get("path"), str):
+            raise UserError("path must be a file path")
+        fields = body.get("fields")
+        if fields is not None and not isinstance(fields, dict):
+            raise UserError("fields must be an object")
+        tname = body.get("templateName")
+        if tname is not None and not isinstance(tname, str):
+            raise UserError("templateName must be text")
+        on_exists = body.get("onExists")
+        if on_exists is not None and on_exists not in _ON_EXISTS:
+            raise UserError(f"onExists must be one of {', '.join(_ON_EXISTS)}")
+        src = security.check(body["path"])
+        saving = dict(load_settings().get("saving", {}))
+        if on_exists:
+            saving["onExists"] = on_exists
+        if body.get("batch"):
+            saving["onExists"] = _batch_on_exists(saving) or saving.get("onExists", "increment")
+        try:
+            if fields is None:
+                fields = photos.meta(src)["fields"]
+            return save_preview(src, saving, fields, tname or "")
+        except (OSError, ImageError) as e:
+            raise HTTPException(404, f"Cannot read {src}: {e}")
+
     @app.post("/api/save")
     async def api_save(request: Request):
         job, files = await _read_form(request)
+        _check_job_types(job)
         settings = load_settings()
         src = _allowed_for_write(job, settings)
         req = SaveRequest(path=job["path"], mode=job.get("mode", "copy"), layout=job["layout"],
@@ -732,12 +848,17 @@ def create_app() -> FastAPI:
 
     @app.post("/api/batch/scan")
     def batch_scan(body: Dict[str, Any] = Body(...)):
+        if not isinstance(body.get("folder"), str):
+            raise UserError("folder must be a folder path")
         folder = security.check(body["folder"])
         return batchmod.scan_folder(folder, bool(body.get("includeSubfolders")))
 
     @app.post("/api/batch/preflight")
     def batch_preflight(body: Dict[str, Any] = Body(...)):
-        files = [security.check(p) for p in body.get("paths", [])]
+        paths_ = body.get("paths", [])
+        if not isinstance(paths_, list) or not all(isinstance(p, str) for p in paths_):
+            raise UserError("paths must be a list of file paths")
+        files = [security.check(p) for p in paths_]
         # results are big (metadata + analysis per photo): free finished ones when a new
         # pre-flight starts or after 30 min, and stop the one this replaces
         now = time.time()
@@ -745,18 +866,32 @@ def create_app() -> FastAPI:
             if k == body.get("replaces"):
                 old["cancel"] = True
             # finished ones stay a minute so another window can still collect its last results
-            if (old["cancel"] or now - old.get("finished", now) > 60
+            # (a stopped one stays until the photos it was checking are done: its last results)
+            if ((old["cancel"] and not old["active"]) or now - old.get("finished", now) > 60
                     or now - old.get("started", now) > 1800):
                 old["cancel"] = True
                 _pre.pop(k, None)
         pid = f"pf{int(now * 1000)}"
-        st = {"id": pid, "total": len(files), "results": {}, "cancel": False, "started": now}
+        # active: photos being checked right now. Stop means: start no new ones, let these finish.
+        # lock: a result is stored and its photo leaves "active" under it, so a poll's snapshot of
+        # (stopped, results) is consistent
+        st = {"id": pid, "total": len(files), "results": {}, "cancel": False, "started": now, "active": set(),
+              "lock": threading.Lock()}
         _pre[pid] = st
         want_ocr = bool(body.get("ocr", False))
 
         def one(p):
-            if st["cancel"]:
-                return
+            # joined before the stop check: once stopped, "active" only shrinks
+            with st["lock"]:
+                st["active"].add(p)
+            try:
+                if not st["cancel"]:
+                    check(p)
+            finally:
+                with st["lock"]:
+                    st["active"].discard(p)
+
+        def check(p):
             try:
                 m = photos.meta(p)
                 r: Dict[str, Any] = {"path": p, "meta": m, "ok": True}
@@ -771,7 +906,8 @@ def create_app() -> FastAPI:
                     photos.proxy_paths(p, prio=decodegate.PREFETCH)
             except Exception as e:
                 r = {"path": p, "ok": False, "error": str(e)}
-            st["results"][p] = r
+            with st["lock"]:
+                st["results"][p] = r
 
         for p in files:
             _pre_pool.submit(one, p)
@@ -782,13 +918,22 @@ def create_app() -> FastAPI:
         st = _pre.get(pid)
         if not st:
             raise HTTPException(404)
-        res = list(st["results"].values())
-        if len(res) >= st["total"]:
+        with st["lock"]:
+            # stopped: no photo is being checked any more and none will start; the rest stay
+            # unchecked. Decided before the results are read (and under the lock results are
+            # stored with): "stopped" never comes without the last photos' results.
+            stopped = bool(st["cancel"]) and not st["active"]
+            active = len(st["active"])
+            res = list(st["results"].values())
+        if len(res) >= st["total"] or stopped:
             st.setdefault("finished", time.time())
-        return {"id": pid, "total": st["total"], "done": len(res), "results": res[since:]}
+        return {"id": pid, "total": st["total"], "done": len(res), "results": res[since:],
+                "stopped": stopped, "active": active}
 
     @app.post("/api/batch/preflight/{pid}/cancel")
     def batch_preflight_cancel(pid: str):
+        """Stop after the photos being checked now: they finish (and are reported), no new ones
+        start. Poll until "stopped" to collect the last results."""
         if pid in _pre:
             _pre[pid]["cancel"] = True
         return {"ok": True}
@@ -803,27 +948,46 @@ def create_app() -> FastAPI:
             raise UserError("files must be a list of paths")
         for p in files:
             security.check(p)
-        plan = [x for x in (body.get("plan") or []) if isinstance(x, dict) and x.get("path")]
+        if body.get("plan") is not None and not isinstance(body.get("plan"), list):
+            raise UserError("plan must be a list")
+        plan = [x for x in (body.get("plan") or []) if isinstance(x, dict) and isinstance(x.get("path"), str) and x["path"]]
         for x in plan:
             # restore and resume act on these paths: only photos the user opened
             security.check(x["path"])
         want = set(files)
         unsaved = [x for x in plan if x.get("index") is None and x["path"] not in want]
+        bs = body.get("batchSettings", {})
+        if bs is not None and not isinstance(bs, dict):
+            raise UserError("batchSettings must be an object")
+        if bs and bs.get("saveMode") not in (None, "copy", "overwrite"):
+            raise UserError("saveMode must be copy or overwrite")
+        for k in ("templateId", "folder"):
+            if body.get(k) is not None and not isinstance(body.get(k), str):
+                raise UserError(f"{k} must be text")
+        # the settings the user confirmed: every photo of the batch is saved with these, also one
+        # staged later, retried or resumed after Settings › Saving was changed
         b = batchmod.new_batch({"count": len(files), "files": files, "plan": plan,
-                                "settings": body.get("batchSettings", {}), "templateId": body.get("templateId"),
-                                "folder": body.get("folder", "")}, unsaved=unsaved)
-        return {"id": b.id}
+                                "settings": bs or {}, "templateId": body.get("templateId"),
+                                "folder": body.get("folder") or ""}, unsaved=unsaved, settings=load_settings())
+        return {"id": b.id, "epoch": b.stop_epoch()}
 
     @app.post("/api/batch/{bid}/stage")
     async def batch_stage(bid: str, request: Request):
         job, files = await _read_form(request)
-        settings = load_settings()
-        src = security.check(job["path"])
+        _check_job_types(job)
         b = batchmod.get_batch(bid)
+        settings = b.settings_snapshot() or load_settings()
+        src = security.check(job["path"])
         # a batch writes only where the server decides: a copy at the destination derived from
         # Settings › Saving, or the photo itself. Never a client-chosen path or conflict answer.
         if job.get("mode") not in ("copy", "overwrite"):
             raise HTTPException(400, "A batch saves copies or overwrites the originals.")
+        want_mode = (b.data.get("meta", {}).get("settings") or {}).get("saveMode")
+        if want_mode in ("copy", "overwrite") and job["mode"] != want_mode:
+            # the save mode the user confirmed for this batch, whatever the client sends later
+            raise HTTPException(400, f"This batch {'overwrites the originals' if want_mode == 'overwrite' else 'saves copies'}.")
+        # checked here, not first by the worker that decodes them
+        tiles = [{"x": t.x, "y": t.y, "png": t.png} for t in _tiles_from_form(files, job)]
         job.pop("dest_path", None)
         job.pop("on_exists", None)
         idx = job.get("index")
@@ -853,9 +1017,8 @@ def create_app() -> FastAPI:
             from .save import destination_for, SaveError, source_ids_for_file
             try:
                 out, _fmt = destination_for(src, probe(src), settings["saving"], job.get("fields"),
-                                            job.get("template_name", ""), "increment"
-                                            if settings["saving"].get("onExists") == "ask" else None, notes=notes,
-                                            src_ids=source_ids_for_file(src, job.get("layout")))
+                                            job.get("template_name", ""), _batch_on_exists(settings["saving"]),
+                                            notes=notes, src_ids=source_ids_for_file(src, job.get("layout")))
             except SaveError as e:
                 raise HTTPException(409, str(e))
             # reserved names compare case-insensitively (Windows and macOS file systems)
@@ -881,9 +1044,8 @@ def create_app() -> FastAPI:
             job["dest_path"] = out
             security.allow([out])
         job["settings"] = settings
-        tiles = [{"x": t["x"], "y": t["y"], "png": files[t["name"]]} for t in job.get("tiles", [])]
         b.stage(int(job["index"]), {k: v for k, v in job.items() if k != "tiles"}, tiles)
-        with b._lock:
+        with b._txn():   # the journal's current version (shared with other Photoband processes)
             ent = b.data["entries"][str(int(job["index"]))]
             ent["dest"] = job.get("dest_path") or src
             if notes:
@@ -914,18 +1076,20 @@ def create_app() -> FastAPI:
                 raise HTTPException(400, "Invalid index")
             if not 0 <= idx < int(b.data.get("expected", 0) or 0):
                 raise HTTPException(400, "Invalid index")
-            with b._lock:
+            # checked and labelled in one journal change: a photo another Photoband process saves
+            # meanwhile is never re-labelled
+            with b._txn():
                 cur = dict(b.data.get("entries", {}).get(str(idx)) or {})
-            if cur and (cur.get("state") in ("done", "running", "restored") or cur.get("backup") or cur.get("out")):
-                skipped.append(idx)   # a saved photo is never re-labelled (nor its path changed)
-                continue
-            # the path is the batch's own record of that photo, never the client's
-            path = cur.get("path") or (files_[idx] if idx < len(files_) else "")
-            if not path:
-                p = it.get("path")
-                path = p if isinstance(p, str) and p and canonical_path(p) in planned else ""
-            reason = it.get("reason", "")
-            b.mark(idx, st, path=path, error=reason if isinstance(reason, str) else "")
+                if cur and (cur.get("state") in ("done", "running", "restored") or cur.get("backup") or cur.get("out")):
+                    skipped.append(idx)   # a saved photo is never re-labelled (nor its path changed)
+                    continue
+                # the path is the batch's own record of that photo, never the client's
+                path = cur.get("path") or (files_[idx] if idx < len(files_) else "")
+                if not path:
+                    p = it.get("path")
+                    path = p if isinstance(p, str) and p and canonical_path(p) in planned else ""
+                reason = it.get("reason", "")
+                b.mark(idx, st, path=path, error=reason if isinstance(reason, str) else "")
         return {"ok": True, "skipped": skipped}
 
     @app.post("/api/batch/{bid}/staging-complete")
@@ -933,25 +1097,40 @@ def create_app() -> FastAPI:
         batchmod.get_batch(bid).staging_complete()
         return {"ok": True}
 
+    def _epoch(body: Optional[Dict[str, Any]]) -> Optional[int]:
+        """The stop epoch a run/retry request was issued under (from the batch's create reply or
+        status). A Stop since then wins: the request is refused with {stopped: true}."""
+        ep = (body or {}).get("epoch") if isinstance(body, dict) else None
+        if ep is None:
+            return None
+        if isinstance(ep, bool) or not isinstance(ep, int) or ep < 0:
+            raise UserError("epoch must be a whole number")
+        return ep
+
     @app.post("/api/batch/{bid}/run")
-    def batch_run(bid: str):
+    def batch_run(bid: str, body: Optional[Dict[str, Any]] = Body(None)):
         try:
-            batchmod.get_batch(bid).start()
+            batchmod.get_batch(bid).start(epoch=_epoch(body))
         except batchmod.BatchBusy as e:
             raise HTTPException(409, str(e))
+        except batchmod.BatchStopped:
+            return {"ok": False, "stopped": True}
         return {"ok": True}
 
     @app.post("/api/batch/{bid}/cancel")
     def batch_cancel(bid: str):
-        batchmod.get_batch(bid).cancel()
-        return {"ok": True}
+        b = batchmod.get_batch(bid)
+        b.cancel()
+        return {"ok": True, "epoch": b.stop_epoch()}
 
     @app.post("/api/batch/{bid}/retry")
-    def batch_retry(bid: str):
+    def batch_retry(bid: str, body: Optional[Dict[str, Any]] = Body(None)):
         try:
-            batchmod.get_batch(bid).retry_failed()
+            batchmod.get_batch(bid).retry_failed(epoch=_epoch(body))
         except batchmod.BatchBusy as e:
             raise HTTPException(409, str(e))
+        except batchmod.BatchStopped:
+            return {"ok": False, "stopped": True}
         return {"ok": True}
 
     @app.post("/api/batch/{bid}/restore")
@@ -960,12 +1139,17 @@ def create_app() -> FastAPI:
         force (then the edited file is kept as <name>-before-restore). Per-file results."""
         body = body or {}
         idx = body.get("indices")
+        if idx is not None and not (isinstance(idx, list) and all(isinstance(i, int) and not isinstance(i, bool) for i in idx)):
+            raise UserError("indices must be a list of whole numbers")
         return batchmod.get_batch(bid).restore_originals(force=bool(body.get("force")),
                                                          indices=[int(i) for i in idx] if idx else None)
 
     @app.post("/api/batch/{bid}/discard")
     def batch_discard(bid: str):
-        batchmod.discard_batch(bid)
+        try:
+            batchmod.discard_batch(bid)
+        except batchmod.BatchBusy as e:
+            raise HTTPException(409, str(e))
         return {"ok": True}
 
     @app.get("/api/batch/{bid}")

@@ -4,7 +4,8 @@
 
     {
       "title": str | None, "caption": str | None, "creator": str | None,
-      "date": "1952-06" | PartialDate | None,
+      "date": "1952-06" | PartialDate | None,      # when the photo was taken, never the scan date
+      "digitized": "2023:05:01 12:00:00" | None,   # when it was scanned / the file was made
       "sublocation": str, "city": str, "state": str, "country": str,
       "keywords": [str, ...],
       "keyword_paths": ["People|Ann", ...],   # optional, Lightroom hierarchy
@@ -24,7 +25,7 @@ from dataclasses import dataclass, field
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from .dates import PartialDate, check_format, format_date, parse_date
+from .dates import PartialDate, check_format, format_date, render_date
 from .faces import Face, cluster_rows, order_names
 from .parser import (Group, Issue, Literal, Style, Token, escape_value, markup_to_plain,
                      parse, split_list, unescape_value)
@@ -46,8 +47,11 @@ TOKENS: List[TokenInfo] = [
     TokenInfo("title", "Photo title (XMP dc:Title, IPTC ObjectName, Headline, XPTitle)", "{title}", ["case", "max"]),
     TokenInfo("caption", "Photo description (XMP dc:Description, IPTC Caption, ImageDescription)", "{caption}", ["case", "max"]),
     TokenInfo("creator", "Photographer or creator", "{creator}", ["case", "max"]),
-    TokenInfo("date", "Photo date; partial dates drop missing parts", "{date:mmmm d, yyyy}", ["case"],
-              ["auto", "yyyy", "yy", "mmmm", "mmm", "mm", "m", "dd", "d", "iso"]),
+    TokenInfo("date", "When the photo was taken (XMP DateCreated, EXIF DateTimeOriginal, IPTC DateCreated; never "
+              "the scan date); partial dates drop missing parts, approximate ones (\"circa 1950\") print as written",
+              "{date:mmmm d, yyyy}", ["case"], ["auto", "yyyy", "yy", "mmmm", "mmm", "mm", "m", "dd", "d", "iso"]),
+    TokenInfo("digitized", "When the photo was scanned or the file was made (EXIF/XMP CreateDate, DateTimeDigitized)",
+              "{digitized:yyyy-mm-dd}", ["case"], ["auto", "yyyy", "yy", "mmmm", "mmm", "mm", "m", "dd", "d", "iso"]),
     TokenInfo("today", "Today's date", "{today:yyyy-mm-dd}", ["case"],
               ["auto", "yyyy", "yy", "mmmm", "mmm", "mm", "m", "dd", "d", "iso"]),
     TokenInfo("names", "Names from face regions, left to right", "{names}", ["sep", "last", "order", "case", "max"],
@@ -70,6 +74,7 @@ _TOKEN_INFO = {t.name: t for t in TOKENS}
 # Options accepted beyond those listed for the autocomplete.
 _EXTRA_OPTIONS = {"names": ["row_labels", "row_sep"]}
 _OPTION_VALUES = {"case": ("upper", "lower", "title"), "order": ("lr", "rl", "meta")}
+DATE_TOKENS = ("date", "digitized", "today")
 
 
 @dataclass
@@ -136,6 +141,13 @@ def _int(v) -> int:
     return max(0, n)
 
 
+def _max_chars(v) -> Optional[int]:
+    """The ``max=N`` option's N: a whole number in ASCII digits, or None. The check and the
+    renderer both use this, so they agree; ``isdigit`` let "²" through to ``int``, which raised."""
+    m = re.fullmatch(r"\s*([0-9]+)\s*", v) if isinstance(v, str) else None
+    return int(m.group(1)) if m else None
+
+
 def _apply_text_options(value: str, opts: Dict[str, str]) -> str:
     case = opts.get("case", "").lower()
     if case == "upper":
@@ -144,14 +156,9 @@ def _apply_text_options(value: str, opts: Dict[str, str]) -> str:
         value = value.lower()
     elif case == "title":
         value = " ".join(w[:1].upper() + w[1:] for w in value.split(" "))
-    mx = opts.get("max")
-    if mx:
-        try:
-            n = int(mx)
-        except ValueError:
-            n = 0
-        if n > 0 and len(value) > n:
-            value = value[:1] if n == 1 else value[: n - 1].rstrip() + "…"
+    n = _max_chars(opts.get("max"))
+    if n and len(value) > n:
+        value = value[:1] if n == 1 else value[: n - 1].rstrip() + "…"
     return value
 
 
@@ -223,7 +230,7 @@ def check_token(tok: Token) -> List[Issue]:
 
     fmt = tok.fmt
     if fmt:
-        if tok.name in ("date", "today"):
+        if tok.name in DATE_TOKENS:
             msg = check_format(fmt)
             if msg:
                 bad(msg)
@@ -240,7 +247,7 @@ def check_token(tok: Token) -> List[Issue]:
                 bad(f"{{{tok.name}}} takes no options (\"{k}\")")
         elif k in _OPTION_VALUES and v.lower() not in _OPTION_VALUES[k]:
             bad(f"Unknown {k}=\"{v}\" (use {', '.join(_OPTION_VALUES[k])})")
-        elif k == "max" and not (v.strip().isdigit() and int(v) > 0):
+        elif k == "max" and not _max_chars(v):
             bad(f"max must be a positive whole number (\"{v}\")")
     return out
 
@@ -269,8 +276,8 @@ class Resolver:
         f = self.f
         if n in ("title", "caption", "creator", "city", "state", "country"):
             return _apply_text_options(_s(f.get(n)).strip(), o)
-        if n == "date":
-            return _apply_text_options(format_date(parse_date(f.get("date")), fmt), o)
+        if n in ("date", "digitized"):
+            return _apply_text_options(render_date(f.get(n), fmt), o)
         if n == "today":
             return _apply_text_options(format_date(PartialDate.from_date(self.today), fmt), o)
         if n == "names":

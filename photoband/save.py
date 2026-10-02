@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import threading
+from collections import OrderedDict
 import json
 import logging
 import math
@@ -39,12 +41,13 @@ from .exiftool import ExifToolError, get as get_exiftool
 from .imageio import (EXT_FOR, ImageError, ImageInfo, load_upright, output_format_for,
                       pixel_hash, probe, read_pixels, upright)
 from .util import (LockBusy, canonical_path, copy_xattrs, creation_time_ns, dir_writable,
-                   file_lock, file_sha256, fsync_dir, is_readonly, place_exclusive, quick_hash, replace_with_retry,
-                   set_creation_time)
+                   file_lock, file_sha256, fsync_dir, held_open_elsewhere, is_readonly, place_exclusive, quick_hash,
+                   replace_with_retry, set_creation_time, temp_prefix)
 
 log = logging.getLogger(__name__)
 
 BACKUP_DIRNAME = "_originals"
+BACKUP_SUFFIX = "-original"           # _originals/scan.tif -> _originals/scan-original.tif
 BACKUP_MARKER = ".photoband-backups"   # dropped into every folder that holds backups
 
 
@@ -58,10 +61,15 @@ def same_file(a: str, b: str) -> bool:
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
-def _copy_mode(src: str, dst: str) -> None:
-    """Give the temp file (mkstemp creates it 0600) the source's permission bits."""
+def _copy_mode(src: str, dst: str, writable: bool = False) -> None:
+    """Give the temp file (mkstemp creates it 0600) the source's permission bits. ``writable``
+    keeps the owner's write bit: a copy of a read-only (protected) original is a new file, and a
+    read-only copy could not be fsynced, cleaned up or replaced by a later save (Windows)."""
     try:
-        shutil.copymode(src, dst)
+        mode = os.stat(src).st_mode & 0o7777
+        if writable:
+            mode |= 0o200
+        os.chmod(dst, mode)
     except OSError:
         pass
 
@@ -358,6 +366,126 @@ def backup_path_for(src: str, saving: Dict) -> str:
         stem, ext = os.path.splitext(os.path.basename(os.path.realpath(src)))
         return os.path.join(folder, f"{stem}__{h}{ext}")
     real = os.path.realpath(src)
+    stem, ext = os.path.splitext(os.path.basename(real))
+    return os.path.join(os.path.dirname(real), BACKUP_DIRNAME, f"{stem}{BACKUP_SUFFIX}{ext}")
+
+
+def save_preview(src: str, saving: Dict, fields: Optional[Dict], template_name: str) -> Dict[str, Any]:
+    """Where each kind of save would write, for the UI. Nothing is written; hashes are cached.
+
+    copy: the copy's path (as Save copy would name it now); copyExists: the name is taken and the
+    user will be asked. backup: the exact file Overwrite keeps (an existing backup it reuses, or
+    the new one's name; None with backups off); backupKind: "original" when that file is the
+    untouched original, "current" when it is this already-captioned file as it is now;
+    backupExists: the original is already backed up there. pixelSource: "backup" when saving takes
+    the photo from the verified original backup (originalBackup). captioned: the file is this app's
+    output: it has a Photoband record, or (metadata stripped) the analysis made when it was opened
+    found the hidden marker. Without the record nothing about its original is known, so a backup
+    made now holds the captioned file as it is ("current"), never "the untouched original"."""
+    real = os.path.realpath(src)
+    out: Dict[str, Any] = {"overwrite": src, "copyExists": False, "copyError": ""}
+    try:
+        out["copy"], _ = destination_for(src, probe(real), saving, fields, template_name)
+    except SaveError as e:
+        if e.code == "exists":
+            out["copy"], out["copyExists"] = str(e), True
+        else:
+            out["copy"], out["copyError"] = "", str(e)
+    # the backup and the pixel source are decided by the same code the save runs (plan_backup,
+    # find_original_backup), with hashes cached per file version so a preview stays cheap
+    rec = _record_of(real)
+    captioned = bool(rec) or photoband_output_without_record(real)
+    out["captioned"] = captioned
+    if saving.get("backupOriginals", True):
+        try:
+            plan = plan_backup(real, saving, rec, sha_fn=_cached_sha256)
+        except OSError:
+            plan = None
+        if plan is None:
+            out["backup"], out["backupKind"] = None, ""
+        elif plan.reuse:
+            # an existing backup is kept: the untouched original, or a copy identical to the file now
+            out["backup"] = plan.reuse
+            out["backupKind"] = "original" if plan.original or not captioned else "current"
+        else:
+            out["backup"] = _next_versioned(plan.base)
+            # a new backup holds the file as it is now: for a photo Photoband already captioned in
+            # place that is not the untouched original
+            out["backupKind"] = "current" if captioned else "original"
+    else:
+        out["backup"], out["backupKind"] = None, ""
+    out["backupExists"] = out["backupKind"] == "original" and bool(out["backup"]) and os.path.exists(out["backup"])
+    # the save also requires the file to still be this app's output (its photo region unchanged):
+    # check that on the pixels the editor already holds; without them it is only "probably"
+    bk = find_original_backup(real, saving, rec, sha_fn=_cached_sha256) if rec else None
+    source = "file"
+    if bk:
+        from .photos import _peek_full
+        arr, _ = _peek_full(real, probe(real))
+        source = "unverified" if arr is None else "backup" if is_app_output(rec, arr) else "file"
+    out["pixelSource"], out["originalBackup"] = source, (bk if source != "file" else None)
+    return out
+
+
+_SHA_CACHE: "OrderedDict[Tuple[str, int, int], str]" = OrderedDict()
+_SHA_LOCK = threading.Lock()
+
+
+def _cached_sha256(path: str) -> str:
+    """SHA-256 of a file, remembered per (file, size, mtime) for previews."""
+    st = os.stat(path)
+    key = (canonical_path(path), st.st_size, st.st_mtime_ns)
+    with _SHA_LOCK:
+        if key in _SHA_CACHE:
+            _SHA_CACHE.move_to_end(key)
+            return _SHA_CACHE[key]
+    sha = file_sha256(path)
+    with _SHA_LOCK:
+        _SHA_CACHE[key] = sha
+        while len(_SHA_CACHE) > 256:
+            _SHA_CACHE.popitem(last=False)
+    return sha
+
+
+def opened_full_hash(path: str, size: int, mtime_ns: int) -> Optional[str]:
+    """The full SHA-256 of ``path`` as it was at (size, mtime_ns), if it was hashed then."""
+    with _SHA_LOCK:
+        return _SHA_CACHE.get((canonical_path(path), size, mtime_ns))
+
+
+_OPEN_HASHER = None
+
+
+def hash_in_background(path: str) -> None:
+    """Hash an opened photo once, off the request thread, so a later save can tell a
+    modified-time touch from a real edit by its whole content. One worker: flipping through a
+    folder queues the photos instead of reading them all at once."""
+    global _OPEN_HASHER
+    if _OPEN_HASHER is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _OPEN_HASHER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pb-open-hash")
+
+    def run():
+        try:
+            _cached_sha256(path)
+        except OSError:
+            pass
+    _OPEN_HASHER.submit(run)
+
+
+def _next_versioned(base: str) -> str:
+    """The name store_copy gives a new backup: base, or base-2, base-3 ... when taken."""
+    i = 1
+    while os.path.exists(_versioned(base, i)):
+        i += 1
+    return _versioned(base, i)
+
+
+def _legacy_backup_base(src: str, saving: Dict) -> Optional[str]:
+    """Backups made before they were named <stem>-original<ext>: _originals/<name>."""
+    if saving.get("backupFolder"):
+        return None
+    real = os.path.realpath(src)
     return os.path.join(os.path.dirname(real), BACKUP_DIRNAME, os.path.basename(real))
 
 
@@ -421,42 +549,165 @@ def _legacy_backup_matches(rec: Dict, backup: str) -> bool:
         return False
 
 
+# --------------------------------------------------------------------------
+# re-saving from the original backup (no JPEG generation loss on re-captions)
+# --------------------------------------------------------------------------
+
+def _rect(v) -> Optional[Tuple[int, int, int, int]]:
+    try:
+        x, y, w, h = (int(t) for t in v)
+        return (x, y, w, h)
+    except (TypeError, ValueError):
+        return None
+
+
+def _original_rects(rec: Dict, bw: int, bh: int) -> List[Tuple[int, int, int, int]]:
+    """Where the record's photo region (photoOffset/originalSize) may sit in the upright backup
+    (``bw`` x ``bh``): the recorded ``originalRect``, else the region the first caption took from
+    the original (erase: same canvas, band/rebuild: layout sourceRect or the whole image). The
+    caller checks each against the record's photoHash."""
+    ow, oh = (_rect(list(rec.get("originalSize") or []) + [0, 0]) or (0, 0, 0, 0))[:2]
+    c = [_rect(rec.get("originalRect"))]
+    if rec.get("mode") == "erase":
+        if list(rec.get("canvas") or []) == [bw, bh]:
+            c.append(_rect(list(rec.get("photoOffset") or []) + [ow, oh]))
+    else:
+        c += [_rect((rec.get("layout") or {}).get("sourceRect")), (0, 0, bw, bh)]
+    out = []
+    for r in c:
+        if r and r not in out and r[2:] == (ow, oh) and ow > 0 and oh > 0 and r[0] >= 0 and r[1] >= 0 \
+                and r[0] + r[2] <= bw and r[1] + r[3] <= bh:
+            out.append(r)
+    return out
+
+
+def _backup_candidates(real: str, saving: Dict) -> List[str]:
+    """Existing backups of ``real`` (legacy names first, newest last), as plan_backup sees them."""
+    base = backup_path_for(real, saving)
+    legacy = _legacy_backup_base(real, saving)
+    return (backup_versions(legacy) if legacy else []) + backup_versions(base)
+
+
+def find_original_backup(real: str, saving: Dict, rec: Optional[Dict],
+                         sha_fn: Callable[[str], str] = file_sha256) -> Optional[str]:
+    """The backup holding the record's ``originalFile`` (same size and SHA-256), when that is the
+    untouched original (not a backup of an already captioned file, ``captioned``)."""
+    of = (rec or {}).get("originalFile") or {}
+    if of.get("captioned"):
+        return None
+    try:
+        size = int(of.get("size", -1))
+    except (TypeError, ValueError):
+        return None
+    if not of.get("sha256") or size <= 0:
+        return None
+    for v in reversed(_backup_candidates(real, saving)):
+        try:
+            if os.path.getsize(v) == size and sha_fn(v) == of["sha256"]:
+                return v
+        except OSError:
+            continue
+    return None
+
+
+@dataclass
+class OriginalPhoto:
+    path: str                          # the verified backup
+    sha: str
+    rect: Tuple[int, int, int, int]    # the photo region in the current (upright) file
+    orig_rect: Tuple[int, int, int, int]   # the same region in the upright backup
+    pixels: Optional[np.ndarray]       # backup[orig_rect] (dropped once used)
+
+
+def original_photo(real: str, saving: Dict, rec: Optional[Dict], arr: np.ndarray) -> Tuple[Optional[OriginalPhoto], str]:
+    """The untouched original pixels of this file's photo region, from its backup, or (None, why).
+
+    ``rec`` must already be verified as describing ``arr`` (is_app_output). Used only when everything
+    matches exactly: backup SHA-256 = the record's originalFile, the backup region hashes to the
+    record's photoHash, and sample format and channels agree."""
+    if not rec or not rec.get("originalFile"):
+        return None, "no original recorded"
+    if isinstance(rec["originalFile"], dict) and rec["originalFile"].get("captioned"):
+        return None, "the backup holds an earlier captioned version, not the untouched original"
+    bk = find_original_backup(real, saving, rec)
+    if not bk:
+        return None, "the backup is missing or was changed"
+    try:
+        st = os.stat(bk)
+        a, _ = load_upright(bk)
+        st2 = os.stat(bk)
+        if (st2.st_size, st2.st_mtime_ns) != (st.st_size, st.st_mtime_ns):
+            return None, "the backup changed while it was read"
+    except Exception as e:  # an optional speed-up: any failure (also MemoryError) falls back to the file
+        return None, f"the backup could not be read: {e}"
+    rect = _rect(list(rec.get("photoOffset") or []) + list(rec.get("originalSize") or []))
+    if not rect:
+        return None, "the record has no photo region"
+    if a.dtype != arr.dtype or a.shape[2] != arr.shape[2]:
+        return None, "the backup has another sample format"
+    for r in _original_rects(rec, a.shape[1], a.shape[0]):
+        x, y, w, h = r
+        reg = a[y:y + h, x:x + w]
+        if pixel_hash(reg) == rec.get("photoHash"):
+            return OriginalPhoto(bk, (rec.get("originalFile") or {}).get("sha256", ""), rect, r,
+                                 np.ascontiguousarray(reg)), ""
+    return None, "the backup's photo does not match this file's photo"
+
+
+def _shown_path(p: str, near: str) -> str:
+    """``p`` relative to the photo's folder when it is inside it (_originals/x-original.jpg)."""
+    try:
+        r = os.path.relpath(p, os.path.dirname(near))
+        return p if r.startswith("..") else r
+    except ValueError:      # another drive
+        return p
+
+
 @dataclass
 class BackupPlan:
     base: str
     sha: str
     size: int
     reuse: Optional[str] = None
+    original: bool = False        # reuse holds the record's untouched original
 
 
-def plan_backup(src: str, saving: Dict, prev_rec: Optional[Dict] = None) -> BackupPlan:
+def plan_backup(src: str, saving: Dict, prev_rec: Optional[Dict] = None,
+                known: Optional[Tuple[str, str]] = None, sha_fn: Callable[[str], str] = file_sha256) -> BackupPlan:
     """Decide whether an existing backup already holds this file's original.
 
     ``prev_rec`` is the source's photoband record, passed only when the source was verified to
     be this app's output (is_app_output). Then the backup whose SHA-256 matches the record's
     ``originalFile`` is reused. Otherwise an existing backup is reused only if it is
-    byte-identical to the current file; anything else gets a new versioned backup."""
+    byte-identical to the current file; anything else gets a new versioned backup.
+    ``known``: (path, sha256) of a backup hashed moments ago (original_photo), not hashed again.
+    ``sha_fn``: how files are hashed (save_preview passes a cached one; saves always hash afresh)."""
     real = os.path.realpath(src)
     base = backup_path_for(real, saving)
-    versions = backup_versions(base)
+    # older backups of this file count as existing ones, so an original is never backed up twice
+    versions = _backup_candidates(real, saving)
+    legacy = _legacy_backup_base(real, saving)
     size = os.path.getsize(real)
     if prev_rec:
         of = prev_rec.get("originalFile") or {}
         if of.get("sha256"):
             for v in reversed(versions):
                 try:
-                    if os.path.getsize(v) == int(of.get("size", -1)) > 0 and file_sha256(v) == of["sha256"]:
-                        return BackupPlan(base, of["sha256"], int(of["size"]), reuse=v)
+                    if os.path.getsize(v) == int(of.get("size", -1)) > 0 and \
+                            (known[1] if known and same_file(v, known[0]) else sha_fn(v)) == of["sha256"]:
+                        # a backup recorded as already captioned is reused, but is not "the original"
+                        return BackupPlan(base, of["sha256"], int(of["size"]), reuse=v,
+                                          original=not of.get("captioned"))
                 except OSError:
                     continue
-        elif versions and os.path.basename(versions[0]).lower() == os.path.basename(base).lower() \
+        elif versions and os.path.basename(versions[0]).lower() in {os.path.basename(b).lower() for b in (base, legacy) if b} \
                 and os.path.getsize(versions[0]) > 0 and _legacy_backup_matches(prev_rec, versions[0]):
             v = versions[0]
-            return BackupPlan(base, file_sha256(v), os.path.getsize(v), reuse=v)
-    sha = file_sha256(real)
+            return BackupPlan(base, sha_fn(v), os.path.getsize(v), reuse=v, original=True)
+    sha = sha_fn(real)
     for v in reversed(versions):
         try:
-            if os.path.getsize(v) == size > 0 and file_sha256(v) == sha:
+            if os.path.getsize(v) == size > 0 and sha_fn(v) == sha:
                 return BackupPlan(base, sha, size, reuse=v)
         except OSError:
             continue
@@ -481,7 +732,7 @@ def store_copy(src: str, base: str, expect_sha: Optional[str] = None) -> str:
     d = os.path.dirname(base)
     os.makedirs(d, exist_ok=True)
     _mark_backup_folder(d)
-    fd, tmp = tempfile.mkstemp(prefix=".pbbak-", suffix=".partial", dir=d)
+    fd, tmp = tempfile.mkstemp(prefix=temp_prefix(".pbbak-"), suffix=".partial", dir=d)
     try:
         h = hashlib.sha256()
         n = 0
@@ -550,12 +801,18 @@ def ensure_backup(src: str, saving: Dict, plan: Optional[BackupPlan] = None) -> 
     return store_copy(real, plan.base, expect_sha=plan.sha)
 
 
+def labelled_backup_base(path: str, saving: Dict, label: str) -> str:
+    """<backups>/<stem>-<label><ext>: a copy kept beside the backups that is not the original
+    (one name rule for every such copy: replaced, before-batch, before-restore)."""
+    stem, ext = os.path.splitext(backup_path_for(path, saving))
+    stem = stem[:-len(BACKUP_SUFFIX)] if stem.endswith(BACKUP_SUFFIX) else stem
+    return f"{stem}-{label}{ext}"
+
+
 def keep_aside(path: str, saving: Dict, label: str = "replaced") -> str:
     """Keep a copy of a file that is about to be replaced (not a Photoband output) next to the
     backups: <backups>/<stem>-<label><ext>."""
-    base = backup_path_for(path, saving)
-    stem, ext = os.path.splitext(base)
-    return store_copy(os.path.realpath(path), f"{stem}-{label}{ext}")
+    return store_copy(os.path.realpath(path), labelled_backup_base(path, saving, label))
 
 
 # metadata writing lives in metawrite.py
@@ -573,13 +830,17 @@ LOG_ROTATE_BYTES = 10 * 1024 * 1024
 def _append_rotating(name: str, text: str) -> None:
     """Append to logs/<name>; past 10 MB the file is first moved to <name>.1 (one old file kept)."""
     p = os.path.join(paths.sub("logs"), name)
-    try:
-        if os.path.exists(p) and os.path.getsize(p) > LOG_ROTATE_BYTES:
-            os.replace(p, p + ".1")
-        with open(p, "a", encoding="utf-8") as fh:
-            fh.write(text)
-    except OSError:
-        log.debug("could not write %s", p, exc_info=True)
+    from .shared_state import interprocess_lock
+    # two windows: without the lock both could rotate (the second move replaces the first's .1)
+    # or one could append to the file the other is moving
+    with interprocess_lock(p + ".lock"):
+        try:
+            if os.path.exists(p) and os.path.getsize(p) > LOG_ROTATE_BYTES:
+                os.replace(p, p + ".1")
+            with open(p, "a", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError:
+            log.debug("could not write %s", p, exc_info=True)
 
 
 def append_log(entry: Dict) -> None:
@@ -664,9 +925,15 @@ _PAYLOAD_LAYOUT_KEYS = ("version", "mode", "sourceRect", "canvas", "photoRect", 
 
 
 def payload_for_marker(rec: Dict) -> bytes:
-    """What the fragile payload carries: only what is printed plus layout.
+    """What the fragile payload carries: only what is printed plus layout, and how the file was
+    saved (``saveMode``: a copy or the photo captioned in place), which decides whether a batch may
+    caption the file again (existing.provenance) and must not change when the metadata is stripped.
     Never originalText or other metadata. Block text is kept only for blocks
-    that were actually laid out (have runs); any other block is stored empty."""
+    that were actually laid out (have runs); any other block is stored empty.
+
+    The JSON is additive: readers ignore keys they don't know, and a payload without a key (one
+    written before it existed) reads as "unknown". See photoband/record.py for every record field
+    and whether it survives metadata stripping."""
     lay_in = rec.get("layout") or {}
     lay = {k: lay_in[k] for k in _PAYLOAD_LAYOUT_KEYS if k in lay_in}
     runs = lay_in.get("runs")
@@ -683,6 +950,8 @@ def payload_for_marker(rec: Dict) -> bytes:
          "overrides": rec.get("overrides"), "layout": lay,
          "originalSize": rec.get("originalSize"), "photoOffset": rec.get("photoOffset"),
          "canvas": rec.get("canvas"), "photoHash": rec.get("photoHash")}
+    if rec.get("saveMode") in ("copy", "overwrite"):
+        p["saveMode"] = rec["saveMode"]
     return zlib.compress(json.dumps(p, separators=(",", ":"), ensure_ascii=False).encode("utf-8"), 9)
 
 
@@ -698,7 +967,8 @@ def decode_marker_payload(b: Optional[bytes]) -> Optional[Dict]:
 
 def _permission_error(e: PermissionError, target: str) -> SaveError:
     w = getattr(e, "winerror", None)
-    if w == 32:
+    if w == 32 or (w == 5 and not is_readonly(target) and held_open_elsewhere(target)):
+        # replacing a file another app holds open is "access denied" on Windows, not a sharing violation
         return SaveError("The file is open in another app. Close it there and try again; your edits are kept.",
                          code="locked")
     if w == 5:
@@ -711,22 +981,36 @@ def _permission_error(e: PermissionError, target: str) -> SaveError:
     return SaveError("Permission denied while writing the file. Your edits are kept.", code="denied")
 
 
-def cached_case(path: str, info: Optional[ImageInfo] = None) -> Optional[str]:
-    """The existing-text case (A/B/C/D/None) of ``path`` from the analysis the app already made
-    when the photo was opened or pre-flighted (memory or disk cache); "" when none is cached."""
+def cached_existing(path: str, info: Optional[ImageInfo] = None) -> Optional[Dict]:
+    """The existing-text analysis the app already made of ``path`` when the photo was opened or
+    pre-flighted (memory or disk cache, this version of the file only); None when none is cached."""
     try:
         from . import photos
         info = info or probe(path)
         with photos._lock:
             hit = photos._cache.get(photos._key(path, info))
         if hit and hit.get("existing") is not None:
-            return hit["existing"].get("case")
+            return hit["existing"]
         res, _ = photos._load_existing(path, info, False)
-        if res is not None:
-            return res.get("case")
+        if isinstance(res, dict):
+            return res
     except Exception:
         log.debug("no cached analysis for %s", path, exc_info=True)
-    return ""
+    return None
+
+
+def cached_case(path: str, info: Optional[ImageInfo] = None) -> Optional[str]:
+    """The existing-text case (A/B/C/D/None) of ``path`` from the analysis the app already made
+    when the photo was opened or pre-flighted (memory or disk cache); "" when none is cached."""
+    ex = cached_existing(path, info)
+    return ex.get("case") if ex is not None else ""
+
+
+def photoband_output_without_record(path: str) -> bool:
+    """True when the cached analysis of ``path`` found this app's hidden marker although the file
+    has no record (its metadata was stripped): it IS a captioned file, only its record is gone."""
+    ex = cached_existing(path)
+    return bool(ex) and ex.get("source") in ("marker", "marker+payload")
 
 
 def detect_case(path: str, info: ImageInfo, md: Dict, arr: np.ndarray) -> Optional[str]:
@@ -795,15 +1079,30 @@ def keep_creation_time(path: str, src_stat: os.stat_result) -> bool:
     return _creation_time_kept(path, want)
 
 
-def _check_expected(req: SaveRequest, info: ImageInfo, qh: str) -> None:
-    exp = req.expected_stat
-    if exp:
-        vals = list(exp)
-        if (info.size_bytes, info.mtime_ns) != (int(vals[0]), int(vals[1])):
-            raise SaveError("The file changed on disk after it was opened.", code="changed")
-        if len(vals) > 2 and vals[2] and str(vals[2]) != qh:
-            raise SaveError("The file changed on disk after it was opened.", code="changed")
-    if req.expected_hash and req.expected_hash != qh:
+def _unchanged(path: str, size: int, mtime_ns: int, want: Tuple, opened_hash: Optional[str]) -> bool:
+    """Is the file still the one opened as ``want`` (size, mtime_ns[, quick_hash])? Same size and
+    modified time: yes, without reading it (the owner's choice). Otherwise the content decides,
+    so a sync, backup or antivirus tool that only touched the modified time doesn't block the save:
+    the whole file against its full hash from when it was opened (taken in the background when the
+    photo opens), or, before that hash exists, the quick hash (first and last MB)."""
+    vals = list(want)
+    size0, mtime0 = int(vals[0]), int(vals[1])
+    if (size, mtime_ns) == (size0, mtime0):
+        return True
+    if size != size0:
+        return False
+    full = opened_full_hash(path, size0, mtime0)
+    if full:
+        return file_sha256(path) == full
+    h = (str(vals[2]) if len(vals) > 2 and vals[2] else None) or opened_hash
+    return bool(h) and quick_hash(path) == h
+
+
+def _check_expected(req: SaveRequest, real: str, info: ImageInfo) -> None:
+    if req.expected_stat and not _unchanged(real, info.size_bytes, info.mtime_ns, req.expected_stat, None):
+        raise SaveError("The file changed on disk after it was opened.", code="changed")
+    # batch jobs carry only the content fingerprint taken when the batch was staged
+    if req.expected_hash and not req.expected_stat and req.expected_hash != quick_hash(real):
         raise SaveError("The file changed on disk after it was opened.", code="changed")
 
 
@@ -840,8 +1139,7 @@ def save(req: SaveRequest) -> SaveResult:
                 raise SaveError("This photo is being saved by another Photoband window or batch. Try again when it "
                                 "finishes.", code="busy")
         info = probe(real)
-        qh0 = quick_hash(real)
-        _check_expected(req, info, qh0)
+        _check_expected(req, real, info)
         if info.save_blocked:
             raise SaveError(info.save_blocked, code="blocked")
         if info.pages > 1 and not saving.get("allowMultipageSave"):
@@ -912,6 +1210,26 @@ def save(req: SaveRequest) -> SaveResult:
             # with a handwritten caption is protected whatever it says
             if detect_case(real, info, md, arr) == "C":
                 _refuse_case_c(saving, batch_erase)
+        # an earlier output of this app (verified now, before any pixel is swapped)
+        md_rec = record.from_metadata(md)
+        prev = md_rec if is_app_output(md_rec, arr) else None
+        # its photo region is put back from the untouched original backup, so a re-caption is
+        # always one generation from the original (JPEG); the geometry stays the current file's
+        orig: Optional[OriginalPhoto] = None
+        if prev and prev.get("originalFile"):
+            orig, why = original_photo(real, saving, prev, arr)
+            if orig is None:
+                res.notes.append(f"The original backup was not used ({why}); the photo was taken from this file")
+        elif md_rec and md_rec.get("originalFile"):
+            res.notes.append("The original backup was not used (this file was changed since Photoband saved it); "
+                             "the photo was taken from this file")
+        if orig is not None:
+            if not arr.flags.writeable:
+                arr = px_cache["arr"] = arr.copy()
+            x, y, w, h = orig.rect
+            arr[y:y + h, x:x + w] = orig.pixels
+            orig.pixels = None
+            res.notes.append(f"Photo taken from the original backup ({_shown_path(orig.path, real)})")
         if info.orientation != 1:
             res.notes.append(f"Rotated upright from EXIF orientation {info.orientation}")
         lay = req.layout
@@ -963,13 +1281,22 @@ def save(req: SaveRequest) -> SaveResult:
         # the record carries the original's identity forward through re-captions)
         plan: Optional[BackupPlan] = None
         if req.mode == "overwrite":
-            prev = record.from_metadata(md)
-            prev = prev if is_app_output(prev, arr) else None
             if saving.get("backupOriginals", True):
-                plan = plan_backup(real, saving, prev)
+                plan = plan_backup(real, saving, prev, known=(orig.path, orig.sha) if orig else None)
                 rec["originalFile"] = {"sha256": plan.sha, "size": plan.size}
+                if not plan.original and (md_rec is not None or photoband_output_without_record(real)):
+                    # the backup holds this file as it is, already captioned by this app (its untouched
+                    # original wasn't found, it was changed elsewhere, or its record was stripped): say
+                    # so, so no later save or preview takes it for the untouched original
+                    rec["originalFile"]["captioned"] = True
             elif prev and prev.get("originalFile"):
                 rec["originalFile"] = prev["originalFile"]
+            # where the new photo region sits in that original, when it is all original pixels
+            if orig is not None and (rec.get("originalFile") or {}).get("sha256") == orig.sha:
+                ox, oy, ow, oh = orig.rect
+                nx, ny, nw, nh = (int(v) for v in (comp.photo_rect if lay.get("mode") == "erase" else source_rect))
+                if ox <= nx and oy <= ny and nx + nw <= ox + ow and ny + nh <= oy + oh:
+                    rec["originalRect"] = [orig.orig_rect[0] + nx - ox, orig.orig_rect[1] + ny - oy, nw, nh]
 
         # hidden marker
         embed = req.embed_marker if req.embed_marker is not None else saving.get("embedMarker", True)
@@ -1024,7 +1351,7 @@ def save(req: SaveRequest) -> SaveResult:
         # encode to a temp file next to the destination
         from . import imageio as _imageio
         d = os.path.dirname(out_path)
-        fd, tmp = tempfile.mkstemp(prefix=".pbtmp-", suffix=EXT_FOR[out_fmt], dir=d)
+        fd, tmp = tempfile.mkstemp(prefix=temp_prefix(".pbtmp-"), suffix=EXT_FOR[out_fmt], dir=d)
         os.close(fd)
         q = int(saving.get("jpegQuality", 95))
         res.notes += _imageio.write_image(tmp, canvas, info, out_fmt, q)
@@ -1089,8 +1416,6 @@ def save(req: SaveRequest) -> SaveResult:
             res.notes.append("Verified: photo pixels identical to the source")
         del v_arr, v_photo
         ref = None
-        # mkstemp files are 0600: keep the original's permissions (and give copies the same)
-        _copy_mode(real, tmp)
         if req.mode == "overwrite":
             failed = copy_xattrs(real, tmp)
             if failed:
@@ -1100,8 +1425,12 @@ def save(req: SaveRequest) -> SaveResult:
                     res.notes.append("The file was hard-linked; its other links keep the old file")
             except OSError:
                 pass
+        # flushed while the temp file is still ours to write: the permissions of a read-only
+        # original (copied next) would make it impossible to open for writing
         with open(tmp, "rb+") as fh:
             os.fsync(fh.fileno())
+        # mkstemp files are 0600: keep the original's permissions (a copy stays writable)
+        _copy_mode(real, tmp, writable=req.mode != "overwrite")
 
         # back up, then replace
         if req.mode == "overwrite":
@@ -1113,14 +1442,16 @@ def save(req: SaveRequest) -> SaveResult:
                     # caption); the batch must be able to put back the file as it is NOW
                     cur_sha = file_sha256(real)
                     if cur_sha != plan.sha:
-                        b0, e0 = os.path.splitext(plan.base)
-                        restore = store_copy(real, f"{b0}-before-batch{e0}", expect_sha=cur_sha)
+                        restore = store_copy(real, labelled_backup_base(real, saving, "before-batch"),
+                                             expect_sha=cur_sha)
                         res.restore_path = restore
                 if req.on_backup:
                     req.on_backup(restore)
             # the source must not have changed while we worked
             st = os.stat(real)
-            if (st.st_size, st.st_mtime_ns) != (info.size_bytes, info.mtime_ns) or quick_hash(real) != qh0:
+            exp = list(req.expected_stat or ())
+            opened_hash = (exp[2] if len(exp) > 2 else None) or req.expected_hash
+            if not _unchanged(real, st.st_size, st.st_mtime_ns, (info.size_bytes, info.mtime_ns), opened_hash):
                 raise SaveError("The file changed on disk during the save; nothing was written.", code="changed")
         elif replace_existing and os.path.exists(out_path) and not is_output_of(out_path, real, src_ids):
             # the user confirmed replacing this file, but it is not an earlier copy of this photo
@@ -1217,7 +1548,10 @@ def _erase_inputs(arr: np.ndarray, erase: Dict[str, Any]):
     if erase.get("photoRect"):
         band.photo_rect = tuple(int(v) for v in erase["photoRect"])
     blocks = blocks_from_json(erase.get("blocks") or [])
-    add = decode_mask_png(erase.get("brushAdd"))
-    rem = decode_mask_png(erase.get("brushRemove"))
+    try:
+        add = decode_mask_png(erase.get("brushAdd"))
+        rem = decode_mask_png(erase.get("brushRemove"))
+    except ValueError as e:   # an oversized brush mask: a clear refusal, not an "unexpected error"
+        raise SaveError(str(e), code="mask")
     mask = build_mask(arr, band, blocks, grow=int(erase.get("grow", 2)), add_mask=add, remove_mask=rem)
     return mask, band

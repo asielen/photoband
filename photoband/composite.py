@@ -34,6 +34,18 @@ class LayoutError(ValueError):
     pass
 
 
+TILE_MAX = 4096          # px a side, as ui/src/lib/render.ts TILE_MAX
+
+
+def upload_size(data: bytes) -> Tuple[int, int]:
+    """(width, height) of an uploaded image from its header, without decoding the pixels."""
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            return im.size
+    except Exception as e:
+        raise ValueError(f"not a readable image ({e})")
+
+
 @dataclass
 class Tile:
     x: int

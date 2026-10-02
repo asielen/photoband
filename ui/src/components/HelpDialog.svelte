@@ -32,7 +32,7 @@
   const startSteps: { icon: string; title: string; text: string; key?: string[] }[] = [
     { icon: 'folder', title: 'Open your photos', text: 'Choose Open, then a folder or a few photos. They appear in the list on the left.', key: [modKey, 'Shift', 'O'] },
     { icon: 'pen', title: 'Check the caption', text: 'The caption is filled in from each photo’s information. Click the caption in the preview, or type in the panel on the right, to change it.', key: ['E'] },
-    { icon: 'save', title: 'Save a copy', text: 'Save copy writes a captioned copy next to the original. Your original photo is never changed by it.', key: [modKey, 'S'] },
+    { icon: 'save', title: 'Save a copy', text: 'Save copy & next writes a captioned copy next to the original and opens the next photo. Your original photo is never changed by it.', key: [modKey, 'S'] },
     { icon: 'batch', title: 'Many photos? Use Batch', text: 'Batch captions a whole folder in three steps: choose the photos, check them, save.' },
   ]
   function openFolder() {
@@ -50,9 +50,8 @@
       rows: [
         [[[mod, 'O']], 'Open files'],
         [[[mod, 'Shift', 'O']], 'Open folder'],
-        [[[mod, 'S']], 'Save copy'],
+        [[[mod, 'S'], [mod, 'Enter']], 'Save a copy and go to the next photo'],
         [[[mod, 'Shift', 'S']], 'Save copy as…'],
-        [[[mod, 'Enter']], 'Save copy and go to the next photo'],
         [[[mod, 'Shift', 'Enter']], 'Overwrite the original and go to the next photo'],
       ],
     },
@@ -119,6 +118,12 @@
   ]
   const licenseName: Record<string, string> = { OFL: 'SIL OFL 1.1', APACHE2: 'Apache 2.0', 'APACHE-2.0': 'Apache 2.0', UFL: 'Ubuntu Font Licence 1.0' }
   let log = $state<any[]>([])
+  const MODE: Record<string, string> = { copy: 'Saved a copy', copyAs: 'Saved a copy as', overwrite: 'Overwrote the original' }
+  /** The hidden band data, in words: it lets Photoband re-edit the caption later. */
+  function markerText(m: any): string {
+    if (m?.robust) return m.payload ? 'hidden band data added' : 'hidden band mark added (without the caption text)'
+    return m?.reason ? `no hidden band data (${m.reason})` : 'no hidden band data'
+  }
   let lic = $state<any[]>([])
   $effect(() => {
     if (which === 'log') get('/api/log').then((l) => (log = l))
@@ -176,7 +181,7 @@
         {#each log as e}
           <div class="entry" class:bad={!e.ok}>
             <div class="row"><b aria-label={e.ok ? 'Saved' : 'Failed'}>{e.ok ? '✓' : '✕'}</b><span class="grow path">{e.output || e.source}</span><span class="faint">{e.time?.replace('T', ' ')}</span></div>
-            <div class="small muted">{e.mode} · {e.format || '—'}{e.ms ? ` · ${(e.ms / 1000).toFixed(1)} s` : ''}{e.backup ? ` · backup: ${e.backup}` : ''} · hidden marker: {e.marker?.robust ? (e.marker.payload ? 'marker + payload' : 'marker only') : e.marker?.reason || 'no'}</div>
+            <div class="small muted">{MODE[e.mode] || e.mode} · {e.format || '—'}{e.ms ? ` · ${(e.ms / 1000).toFixed(1)} s` : ''}{e.backup ? ` · original backed up to ${e.backup}` : ''} · {markerText(e.marker)}</div>
             {#if e.error}<div class="small err">{e.error}</div>{/if}
             {#each e.notes || [] as n}<div class="small faint">{n}</div>{/each}
           </div>

@@ -43,7 +43,7 @@ Screenshots are written to `tests/_artifacts/ui/`.
 | 8 | Re-caption restores the editor state without stacking bands | ✅ | Tested on TIFF and JPEG over repeated re-captions, including after a lossless rotation in another app. |
 | 9 | A stripped-metadata file from this app is detected, read and rebuilt without losing photo pixels | ✅ | Marker + payload → case A. JPEG re-save → marker edge + OCR. |
 | 10 | A handwritten Polaroid caption is read, erased on a copy with no visible patch, and kept as originalText | ✅ synthetic / ⚠️ real | Passes on synthetic scans (local-background inpainting plus grain). Real cursive needs Apple Vision, which was written but is **unverified**. Tesseract reads print well and handwriting poorly. |
-| 11 | Text over the photo is flagged and never erased | ✅ | Case D: 30/30 date stamps flagged, low false-positive rate. |
+| 11 | Text over the photo is flagged and never erased | ⚠️ | Not officially supported: best-effort warning only. Case D: 30/30 date stamps flagged with Tesseract; without it, coloured stamps are flagged unverified and other printed text isn't looked for. Never erased either way. |
 | 12 | Near-white sky at the photo edge is not mistaken for a band | ✅ | Fixture 14 and the reviewer's harder set. |
 | 13 | Killing the app mid-edit and relaunching restores the draft | ✅ | Drafts autosave within about 0.8–3 s. Tested with a reload. |
 | 14 | Killing the app mid-save leaves the original intact | ✅ | 55 random SIGKILLs during a 100 MB overwrite: 0 corrupt files, 0 bad backups. |
@@ -107,7 +107,9 @@ Six reviewers (backend spec conformance, UI/UX, correctness, security, code qual
 
 ## Open items for the owner
 
-- **Pin the ExifTool download:** `scripts/vendor.lock.json` names 13.25 with `sha256: "TBD-verify"` (exiftool.org was unreachable from the build sandbox). `fetch_vendor.py` refuses to run until the hashes are filled in, or with `--no-verify`.
+- **Text over the photo / bundle Tesseract? (deferred, to discuss).** Detecting text over the photo is not officially supported for now (a best-effort warning). Caption OCR uses the OS engine (Windows OCR, Apple Vision) and works without Tesseract. Text printed over the photo (case D: date-stamp verification, general printed text) is Tesseract-only, so without it a coloured stamp is flagged unverified and other printed text isn't looked for. Findings from the evaluation:
+  - Windows: upstream 5.5.3 (`tesseract-ocr-w64-setup-5.5.3.20260724.exe`, GitHub digest sha256 `bee9e3434bd94fd65387d9be28cd467a41f61b1275383b55b0f59a1331270ae4`) extracts with 7-Zip; a stripped bundle (exe + 33 DLLs + tessdata_fast `eng.traineddata` + `tessdata/configs/tsv`) adds ~8 MB to the installer, ~26 MB installed, ~0.5 s per photo for the case D scan. No test regressions. Licences: Apache-2.0 plus GPL-2+ (libjbig) and LGPL DLLs, fine for a separate executable but they need notices and source pointers in THIRD_PARTY_NOTICES.md. The spec already picks up `vendor/tesseract`; fetch_vendor.py, vendor.lock.json and build.ps1 would need a Tesseract step.
+  - macOS: bundling means Homebrew dylibs per architecture, rewritten load paths, codesigning and notarization. Porting `detect_text_over_photo` to Vision is likely cheaper.
 - **Pin the Google Fonts commit** in `scripts/fetch_fonts.py` (`TBD-pin`). Only needed to refresh the committed fonts.
 - **Spec wording to update** to match deliberate decisions:
   - "Unsaved edits prompt before navigating away" → edits autosave as drafts; leaving a photo shows a notice, and Close all asks first.

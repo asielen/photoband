@@ -27,6 +27,12 @@ needs_et = pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool
 # 1. % in the source file name
 # --------------------------------------------------------------------------
 
+def _app_tmp_names() -> set:
+    """Names in $PHOTOBAND_HOME/tmp; empty when nothing has created the folder yet."""
+    d = os.path.join(os.environ["PHOTOBAND_HOME"], "tmp")
+    return set(os.listdir(d)) if os.path.isdir(d) else set()
+
+
 @needs_et
 @pytest.mark.parametrize("name", ["Grandma%20from%201950.jpg", "100%.jpg", "a%d%f%e%c%2f.jpg"])
 def test_percent_in_source_name_keeps_metadata(tmp_path, name):
@@ -36,14 +42,13 @@ def test_percent_in_source_name_keeps_metadata(tmp_path, name):
     for decoy in ("Grandma0from1950.jpg", "100.jpg", "a.jpg"):
         mkimg(str(tmp_path / decoy))
         cli("-overwrite_original", "-Artist=WRONG", str(tmp_path / decoy))
-    before = set(os.listdir(os.path.join(os.environ["PHOTOBAND_HOME"], "tmp"))) \
-        if os.path.isdir(os.path.join(os.environ["PHOTOBAND_HOME"], "tmp")) else set()
+    before = _app_tmp_names()
     res, _ = do_save(p)
     md = md_of(res.out_path)
     assert md.get("IFD0:Artist") == "Robert"
     assert md.get("IFD0:Copyright") == "Family archive"
     assert md.get("XMP-dc:Title") == "Lake"
-    after = set(os.listdir(os.path.join(os.environ["PHOTOBAND_HOME"], "tmp")))
+    after = _app_tmp_names()   # the save need not have made the folder (no stand-in link was needed)
     assert not [f for f in after - before if f.startswith("src-")], "temp link left behind"
 
 

@@ -10,11 +10,14 @@ file twice.
 from __future__ import annotations
 
 import concurrent.futures as cf
+import contextlib
+import copy
 import csv
 import io
 import logging
 import multiprocessing
 import os
+import re
 import shutil
 import signal
 import sys
@@ -22,11 +25,13 @@ import tempfile
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from . import paths
-from .util import (LockBusy, PidLock, _pid_alive, atomic_write_bytes, atomic_write_json, canonical_path,
-                   file_identity, file_lock, fsync_dir, read_json, replace_with_retry, sweep_temp)
+from .shared_state import interprocess_lock, stamp
+from .shared_state import write_json as atomic_write_json
+from .util import (LockBusy, PidLock, _pid_alive, atomic_write_bytes, canonical_path, file_identity, file_lock,
+                   fsync_dir, read_json, replace_with_retry, sweep_temp, temp_prefix)
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +40,8 @@ log = logging.getLogger(__name__)
 TERMINAL = {"done", "failed", "skipped", "changed", "excluded", "held", "blocked", "notPrepared"}
 # pre-flight statuses of photos that are not saved -> journal state
 _UNSAVED_STATE = {"skipped": "skipped", "blocked": "blocked", "error": "blocked", "excluded": "excluded",
-                  "flagged": "held", "held": "held", "pending": "notPrepared"}
+                  "flagged": "held", "held": "held", "pending": "notPrepared",
+                  "unchecked": "skipped"}
 
 
 class BatchBusy(Exception):
@@ -46,8 +52,14 @@ class BatchNotFound(KeyError):
     """No batch with that id (or an invalid id)."""
 
 
+class BatchStopped(Exception):
+    """A run or retry was requested before the latest Stop (its stop epoch is out of date): the
+    Stop wins, whatever order the requests reach the server in."""
+
+
 def _bdir(bid: str) -> str:
-    if not bid or not isinstance(bid, str) or len(bid) > 64 or not all(c.isalnum() or c == "-" for c in bid):
+    # ASCII only (str.isalnum would also take "é", "²", "５"); real ids: YYYYmmdd-HHMMSS-<6 hex>
+    if not isinstance(bid, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", bid):
         raise BatchNotFound(bid)
     return paths.sub("batches", bid)
 
@@ -278,20 +290,101 @@ class Batch:
         self.dir = _bdir(bid)
         self.jpath = os.path.join(self.dir, "journal.json")
         self._lock = threading.RLock()
+        # The journal is shared with every other Photoband process that opens this batch (another
+        # window, a relaunched app). self.data is this process's copy of it: refresh() reads it
+        # again when another process replaced the file since (_jstamp: the version self.data is),
+        # and every change is a _txn(): under the journal lock, applied to the file's current
+        # version, so no process writes back a stale copy over another's newer journal.
+        self._jstamp = stamp(self.jpath)
         self.data: Dict[str, Any] = read_json(self.jpath) or {}
+        self._txn_depth = 0
         self._cancel = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._staging_done = threading.Event()
         self._run_lock: Optional[PidLock] = None
+        # Stop is persisted as an epoch in stop.json (not in the journal, which the process running
+        # the batch rewrites from memory). Every Stop raises it; a run/retry request carries the
+        # epoch it was issued under and is refused when a Stop came since. A run started under
+        # _run_epoch stops as soon as the file shows a newer one (a Stop from any process).
+        self._stop_path = os.path.join(self.dir, "stop.json")
+        self._run_epoch: Optional[int] = None
+        self._start_lock = threading.Lock()
+        self._stop_seen_t = 0.0
 
     # -- persistence ---------------------------------------------------------
-    def _write(self):
+    def refresh(self) -> bool:
+        """Read the journal again if another process wrote it since this copy was read or
+        written (a run, Stop, retry, restore or discard in another Photoband window). True when
+        reloaded. Cheap (one stat) when nothing changed."""
         with self._lock:
+            for _ in range(3):
+                cur = stamp(self.jpath)
+                if cur is None or cur == self._jstamp:
+                    return False
+                d = read_json(self.jpath)
+                if stamp(self.jpath) != cur:
+                    continue   # replaced while it was read: read the newer one
+                if not isinstance(d, dict) or not d:
+                    return False
+                self.data = d
+                self._jstamp = cur
+                return True
+            return False
+
+    @contextlib.contextmanager
+    def _txn(self) -> Iterator[Dict[str, Any]]:
+        """A change to the journal: under this process's lock and the journal lock shared with
+        other processes, starting from the journal's current version on disk. Nested: one lock."""
+        with self._lock:
+            if self._txn_depth:
+                self._txn_depth += 1
+                try:
+                    yield self.data
+                finally:
+                    self._txn_depth -= 1
+                return
+            with interprocess_lock(os.path.join(self.dir, "journal.lock")):
+                self.refresh()
+                self._txn_depth = 1
+                try:
+                    yield self.data
+                finally:
+                    self._txn_depth = 0
+
+    def _write(self):
+        with self._txn():
             self.data["updated"] = time.time()
+            self.data["pid"] = os.getpid()   # the last writer (see incomplete_batches)
             atomic_write_json(self.jpath, self.data)
+            # still under the journal lock: no other process wrote in between
+            self._jstamp = stamp(self.jpath)
+
+    def stop_epoch(self) -> int:
+        """How many times this batch was stopped (by any Photoband process)."""
+        d = read_json(self._stop_path)
+        try:
+            return int(d.get("epoch", 0)) if isinstance(d, dict) else 0
+        except (TypeError, ValueError):
+            return 0
+
+    def _stop_requested(self) -> bool:
+        """Stop was pressed since the current run started (here or in another process)."""
+        if self._cancel.is_set():
+            return True
+        if self._run_epoch is not None and self.stop_epoch() != self._run_epoch:
+            self._cancel.set()
+            return True
+        return False
+
+    def settings_snapshot(self) -> Optional[Dict[str, Any]]:
+        """The app settings the batch was created with: each of its photos (also one staged later,
+        retried or resumed) is saved with these, whatever is changed in Settings meanwhile."""
+        s = read_json(os.path.join(self.dir, "settings.json"))
+        return s if isinstance(s, dict) and s else None
 
     @classmethod
-    def create(cls, meta: Dict[str, Any], unsaved: Optional[List[Dict[str, Any]]] = None) -> "Batch":
+    def create(cls, meta: Dict[str, Any], unsaved: Optional[List[Dict[str, Any]]] = None,
+               settings: Optional[Dict[str, Any]] = None) -> "Batch":
         """meta.count photos will be staged as indices 0..count-1. ``unsaved``: the rest of the
         pre-flight plan (skipped, blocked, excluded, held back), journaled now with their reasons
         so the summary and the report list every photo."""
@@ -306,6 +399,8 @@ class Batch:
                                  "error": "; ".join(u.get("reasons") or []), "out": "", "backup": "", "notes": []}
         b.data = {"id": bid, "created": time.time(), "meta": meta, "entries": entries, "state": "staging",
                   "expected": count + len(entries)}
+        if settings:
+            atomic_write_json(os.path.join(b.dir, "settings.json"), settings)
         b._write()
         return b
 
@@ -321,13 +416,17 @@ class Batch:
         job = dict(job)
         job["tiles"] = tl
         atomic_write_json(os.path.join(jd, "job.json"), job)
-        with self._lock:
-            self.data["entries"][str(index)] = {"index": index, "path": job["path"], "state": "staged",
-                                                "error": "", "out": "", "backup": "", "notes": [], "job": True}
+        with self._txn():
+            # staged after Stop (it was being prepared then): kept, not run. Retry/resume runs it.
+            stopped = self._stop_requested()
+            self.data["entries"][str(index)] = {"index": index, "path": job["path"],
+                                                "state": "cancelled" if stopped else "staged",
+                                                "error": "Stopped before it was saved" if stopped else "",
+                                                "out": "", "backup": "", "notes": [], "job": True}
             self._write()
 
     def mark(self, index: int, state: str, **kw) -> None:
-        with self._lock:
+        with self._txn():
             e = self.data["entries"].setdefault(str(index), {"index": index, "path": kw.get("path", "")})
             if e.get("path"):
                 kw.pop("path", None)   # an entry's photo never changes (restore writes to it)
@@ -357,6 +456,7 @@ class Batch:
         return b if b and os.path.isfile(b) else ""
 
     def summary(self) -> Dict[str, Any]:
+        self.refresh()
         with self._lock:
             ents = [dict(e) for e in self.data.get("entries", {}).values()]
             expected = self.data.get("expected", len(ents))
@@ -364,25 +464,28 @@ class Batch:
             state = self.data.get("state")
             staging_complete = bool(self.data.get("stagingComplete"))
         counts: Dict[str, int] = {}
-        can_restore = False
+        # photos "Restore originals" would put back: the UI shows this number, never its own guess
+        restorable = 0
         for e in ents:
             counts[e["state"]] = counts.get(e["state"], 0) + 1
-            if e.get("backup"):
-                can_restore = True
-            elif e["state"] in ("failed", "changed", "cancelled"):
-                # a replace that happened although the entry says otherwise (e.g. finished by an
-                # earlier attempt): its backup is journaled next to the job
-                if os.path.isfile(os.path.join(self._jobdir(e["index"]), "backup.json")):
-                    can_restore = True
+            if e["state"] != "restored":
+                if e.get("backup"):
+                    restorable += 1
+                elif e["state"] in ("failed", "changed", "cancelled"):
+                    # a replace that happened although the entry says otherwise (e.g. finished by an
+                    # earlier attempt): its backup is journaled next to the job
+                    if os.path.isfile(os.path.join(self._jobdir(e["index"]), "backup.json")):
+                        restorable += 1
             if e["state"] in ("failed", "cancelled"):
                 e["hasJob"] = self.has_job(e["index"])
         return {"id": self.id, "state": state, "counts": counts, "expected": expected, "meta": meta,
                 "stagingComplete": staging_complete, "error": self.data.get("error", ""),
-                "entries": sorted(ents, key=lambda e: e["index"]), "canRestore": can_restore}
+                "entries": sorted(ents, key=lambda e: e["index"]), "canRestore": restorable > 0,
+                "restorable": restorable, "epoch": self.stop_epoch()}
 
     # -- running --------------------------------------------------------------
     def staging_complete(self):
-        with self._lock:
+        with self._txn():
             self.data["stagingComplete"] = True
             self._write()
         self._staging_done.set()
@@ -397,48 +500,80 @@ class Batch:
             out.add(os.path.dirname(p))
         return sorted(out)
 
-    def start(self, workers: Optional[int] = None) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        lk = PidLock(os.path.join(self.dir, "run.lock"))
-        try:
-            lk.acquire()
-        except LockBusy:
-            # held by an app that was just killed (not reaped yet): take it over
-            if not isinstance(read_json(lk.path), dict) or _lock_holder(lk.path) is not None:
-                raise BatchBusy("This batch is already running in another Photoband window.")
-            try:
-                os.unlink(lk.path)
-            except OSError:
-                pass
+    def _check_epoch(self, epoch: Optional[int]) -> int:
+        """The current stop epoch. BatchStopped when ``epoch`` (the one a run/retry request was
+        issued under) is out of date. None: not checked (callers inside this process)."""
+        cur = self.stop_epoch()
+        if epoch is not None and int(epoch) != cur:
+            raise BatchStopped("The batch was stopped.")
+        return cur
+
+    def _requeue(self) -> None:
+        """Failed and stopped photos with a staged job run again (call under self._lock)."""
+        for e in self.data["entries"].values():
+            if e["state"] in ("failed", "cancelled") and self.has_job(e["index"]):
+                e["state"] = "retry"
+                e["error"] = ""
+        self.data["stagingComplete"] = True
+
+    def start(self, workers: Optional[int] = None, epoch: Optional[int] = None, requeue: bool = False) -> None:
+        """Run the queue. ``epoch``: the stop epoch the request was issued under; a Stop since then
+        wins (BatchStopped) and nothing is changed. ``requeue``: failed and stopped photos run
+        again, changed only once the run is sure to start (the run lock is ours, no Stop since)."""
+        with self._start_lock:
+            if self._thread and self._thread.is_alive():
+                if requeue:
+                    with self._txn():
+                        self._check_epoch(epoch)
+                        self._requeue()
+                        self._write()
+                    self._staging_done.set()
+                return
+            lk = PidLock(os.path.join(self.dir, "run.lock"))
             try:
                 lk.acquire()
             except LockBusy:
-                raise BatchBusy("This batch is already running in another Photoband window.")
-        self._run_lock = lk
-        try:
-            try:
-                sweep_temp(self.folders())  # temp files left by a killed run
-            except Exception:
-                log.debug("temp sweep failed", exc_info=True)
-            self._cancel.clear()
-            with self._lock:
-                prev = self.data.get("state")
-                self.data["state"] = "running"
-                self.data.pop("error", None)
+                # held by an app that was just killed (not reaped yet): take it over
+                if not isinstance(read_json(lk.path), dict) or _lock_holder(lk.path) is not None:
+                    raise BatchBusy("This batch is already running in another Photoband window.")
                 try:
-                    self._write()
-                except BaseException:
-                    self.data["state"] = prev
-                    raise
-            if self.data.get("stagingComplete"):
-                self._staging_done.set()
-            self._thread = threading.Thread(target=self._run_locked, args=(workers,), daemon=True)
-            self._thread.start()
-        except BaseException:
-            # never keep the run lock of a run that did not start
-            self._release_run_lock()
-            raise
+                    os.unlink(lk.path)
+                except OSError:
+                    pass
+                try:
+                    lk.acquire()
+                except LockBusy:
+                    raise BatchBusy("This batch is already running in another Photoband window.")
+            self._run_lock = lk
+            try:
+                try:
+                    sweep_temp(self.folders())  # temp files left by a killed run
+                except Exception:
+                    log.debug("temp sweep failed", exc_info=True)
+                with self._txn():
+                    # checked and cleared under the lock cancel() takes: a Stop is either before
+                    # this (refused here) or after it (sets the flag the run loop reads)
+                    cur = self._check_epoch(epoch)
+                    before = copy.deepcopy(self.data)
+                    if requeue:
+                        self._requeue()
+                    self.data["state"] = "running"
+                    self.data.pop("error", None)
+                    try:
+                        self._write()
+                    except BaseException:
+                        self.data = before
+                        raise
+                    self._run_epoch = cur
+                    self._cancel.clear()
+                if self.data.get("stagingComplete"):
+                    self._staging_done.set()
+                self._thread = threading.Thread(target=self._run_locked, args=(workers,), daemon=True)
+                self._thread.start()
+            except BaseException:
+                # never keep the run lock of a run that did not start
+                self._release_run_lock()
+                raise
 
     def _release_run_lock(self) -> None:
         lk, self._run_lock = self._run_lock, None
@@ -450,13 +585,15 @@ class Batch:
 
     def _run_locked(self, workers: Optional[int]):
         try:
-            self._run(workers)
+            # again when photos were queued (a retry) after this pass found the queue empty
+            while self._run(workers):
+                pass
         except BaseException as e:
             # e.g. the disk filled up while the journal was written: stop, and say so (the UI
             # would otherwise poll a batch that stays "running" forever)
             log.error("batch %s stopped", self.id, exc_info=True)
             msg = f"The batch stopped: {e.strerror or e}" if isinstance(e, OSError) else f"The batch stopped: {e}"
-            with self._lock:
+            with self._txn():
                 for ent in self.data.get("entries", {}).values():
                     if ent.get("state") in ("staged", "retry", "running"):
                         ent["state"] = "cancelled"
@@ -472,13 +609,43 @@ class Batch:
             self._release_run_lock()
 
     def cancel(self):
-        self._cancel.set()
+        """Stop after the photos being saved now: no new photo starts, the ones in progress
+        finish (each is written to a temp file and put in place atomically, so none is left half
+        written) and queued ones become "cancelled" (Retry runs them). Photos staged after this
+        are kept as "cancelled" too. Not running here (stopped while photos were still being
+        prepared for a retry or resume): the queue is stopped right away.
+
+        The Stop is persisted first (stop.json): a run or retry requested before it is refused
+        even when it reaches the server later, and a run in another Photoband process stops too."""
+        with self._txn():
+            self._cancel.set()
+            atomic_write_json(self._stop_path, {"epoch": self.stop_epoch() + 1, "time": time.time()})
+            if self._thread and self._thread.is_alive():
+                return
+            if self.run_elsewhere():
+                # running in another Photoband window: it reads stop.json, stops and journals the
+                # outcome; this window's summary() reads that journal (refresh), never its own copy
+                return
+            n = 0
+            for e in self.data.get("entries", {}).values():
+                if e.get("state") in ("staged", "retry"):
+                    e["state"] = "cancelled"
+                    e["error"] = "Stopped before it was saved"
+                    n += 1
+            if n or self.data.get("state") in ("running", "staging"):
+                self.data["state"] = "cancelled"
+            self._write()
+
+    def run_elsewhere(self) -> bool:
+        """Another live Photoband process is running this batch (holds its run lock)."""
+        return _lock_holder(os.path.join(self.dir, "run.lock")) not in (None, os.getpid())
 
     def _pending(self) -> List[int]:
         with self._lock:
             return sorted(int(k) for k, e in self.data["entries"].items() if e["state"] in ("staged", "retry"))
 
-    def _run(self, workers: Optional[int]):
+    def _run(self, workers: Optional[int]) -> bool:
+        """One pass over the queue. True when photos were queued again after it ended (run again)."""
         waiting = set(self._recover_running())
         cpu = os.cpu_count() or 2
         n = max(1, int(workers)) if workers else max(1, min(cpu, 4))
@@ -492,6 +659,11 @@ class Batch:
             while True:
                 if self._cancel.is_set():
                     break
+                if time.time() - self._stop_seen_t > 0.25:
+                    # a Stop pressed in another Photoband process (stop.json)
+                    self._stop_seen_t = time.time()
+                    if self._stop_requested():
+                        break
                 if waiting and time.time() - last_wait > 0.5:
                     # entries another process (a worker of the killed run) is still saving
                     last_wait = time.time()
@@ -537,15 +709,19 @@ class Batch:
                     self._record_result(idx, fut.result())
                 except Exception as e:
                     self._record_result(idx, {"ok": False, "error": str(e), "code": "crash"})
-        with self._lock:
+        with self._txn():
             if self._cancel.is_set():
                 for e in self.data["entries"].values():
                     if e["state"] in ("staged", "retry"):
                         e["state"] = "cancelled"
+                        e["error"] = "Stopped before it was saved"
                 self.data["state"] = "cancelled"
+            elif any(e["state"] in ("staged", "retry") for e in self.data["entries"].values()):
+                return True  # queued (a retry) after the loop found nothing left: never left behind
             else:
                 self.data["state"] = "finished"
             self._write()
+        return False
 
     def _record_result(self, idx: int, r: Dict[str, Any]):
         if r.get("ok"):
@@ -563,6 +739,12 @@ class Batch:
             return
         if r.get("code") == "changed":
             self.mark(idx, "changed", error="Changed during batch")
+        elif r.get("code") == "exists":
+            # save() reports the conflicting path as the error (for the editor's "Replace?" dialog)
+            name = os.path.basename(str(r.get("error") or "")) or "The output file"
+            self.mark(idx, "failed", code="exists",
+                      error=f"{name} appeared after the batch was prepared and was not replaced. Rename or move "
+                            f"it, then use Retry.")
         else:
             self.mark(idx, "failed", error=r.get("error", "Unknown error"), code=r.get("code", ""))
 
@@ -638,18 +820,11 @@ class Batch:
                 self._recover_one(idx)
         return waiting
 
-    def retry_failed(self):
+    def retry_failed(self, epoch: Optional[int] = None):
         """Failed and stopped photos run again. Entries that were never staged (no job) can't
-        run here: the UI stages them again from the kept pre-flight plan first."""
-        with self._lock:
-            for e in self.data["entries"].values():
-                if e["state"] in ("failed", "cancelled") and self.has_job(e["index"]):
-                    e["state"] = "retry"
-                    e["error"] = ""
-            self.data["stagingComplete"] = True
-            self._write()
-        self._staging_done.set()
-        self.start()
+        run here: the UI stages them again from the kept pre-flight plan first. Nothing changes
+        when the run can't start (BatchBusy) or a Stop came after the request (BatchStopped)."""
+        self.start(epoch=epoch, requeue=True)
 
     def restore_originals(self, force: bool = False, indices: Optional[List[int]] = None) -> Dict[str, Any]:
         """Put backed-up originals back. A file edited since the batch wrote it is skipped
@@ -657,6 +832,7 @@ class Batch:
         <backups>/<name>-before-restore<ext>. Returns per-file results."""
         from .save import store_copy
         results: List[Dict[str, Any]] = []
+        self.refresh()
         with self._lock:
             ents = sorted(self.data.get("entries", {}).values(), key=lambda e: e["index"])
             planned = self.planned_paths()
@@ -687,6 +863,13 @@ class Batch:
                 if not bid or bid[0] == 0:
                     r.update(result="missing-backup", message="The backup file is missing or empty")
                     continue
+                # held from before the "edited since the batch" check until the file is put back:
+                # a save that finishes in between would otherwise be restored over unseen
+                try:
+                    lk = file_lock(target).acquire()
+                except LockBusy:
+                    r.update(result="error", message="This photo is being saved right now; try again when it finishes")
+                    continue
                 cur = file_identity(target) if os.path.exists(target) else None
                 if cur and cur[0] == bid[0] and cur[2] == bid[2]:
                     r.update(result="unchanged", message="Already the original")
@@ -703,12 +886,11 @@ class Batch:
                     r.update(result="skipped-edited", message="Edited since the batch; not restored")
                     self.mark(e["index"], e["state"], restoreResult="skipped-edited")
                     continue
-                lk = file_lock(target).acquire()
                 if edited:
                     stem, ext = os.path.splitext(os.path.basename(target))
                     r["aside"] = store_copy(target, os.path.join(os.path.dirname(b), f"{stem}-before-restore{ext}"))
                 d = os.path.dirname(target)
-                fd, tmp = tempfile.mkstemp(prefix=".pbrestore-", suffix=os.path.splitext(target)[1], dir=d)
+                fd, tmp = tempfile.mkstemp(prefix=temp_prefix(".pbrestore-"), suffix=os.path.splitext(target)[1], dir=d)
                 with os.fdopen(fd, "wb") as out, open(b, "rb") as inp:
                     shutil.copyfileobj(inp, out, 4 * 1024 * 1024)
                     out.flush()
@@ -840,11 +1022,16 @@ def _run_job(bid: str, idx: int, d: str, job: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # -- registry ----------------------------------------------------------------------
+# a batch in "staging" last journaled by another live process less than this long ago is being
+# prepared there (photos are journaled as each one is staged)
+STAGING_IDLE_S = 600.0
 _batches: Dict[str, Batch] = {}
 _reg_lock = threading.Lock()
 
 
 def get_batch(bid: str) -> Batch:
+    """This process's Batch for ``bid``, its journal copy revalidated against the file (another
+    Photoband process may have run, stopped, retried, restored or discarded it since)."""
     with _reg_lock:
         b = _batches.get(bid)
         if b is None:
@@ -852,11 +1039,14 @@ def get_batch(bid: str) -> Batch:
             if not b.data:
                 raise BatchNotFound(bid)
             _batches[bid] = b
-        return b
+            return b
+    b.refresh()
+    return b
 
 
-def new_batch(meta: Dict[str, Any], unsaved: Optional[List[Dict[str, Any]]] = None) -> Batch:
-    b = Batch.create(meta, unsaved)
+def new_batch(meta: Dict[str, Any], unsaved: Optional[List[Dict[str, Any]]] = None,
+              settings: Optional[Dict[str, Any]] = None) -> Batch:
+    b = Batch.create(meta, unsaved, settings)
     with _reg_lock:
         _batches[b.id] = b
     return b
@@ -869,7 +1059,7 @@ def incomplete_batches() -> List[Dict[str, Any]]:
         data = read_json(os.path.join(root, bid, "journal.json"))
         if not data:
             continue
-        if data.get("state") in ("running", "staging") and bid not in _batches:
+        if data.get("state") in ("running", "staging") and bid not in _batches and not _open_elsewhere(bid, data):
             ents = list(data.get("entries", {}).values())
             expected = int(data.get("expected", len(ents)) or 0)
             pending = sum(1 for e in ents if e["state"] not in TERMINAL and e["state"] != "restored")
@@ -882,8 +1072,25 @@ def incomplete_batches() -> List[Dict[str, Any]]:
     return out
 
 
+def _open_elsewhere(bid: str, data: Dict[str, Any]) -> bool:
+    """The batch is being run, or prepared, by another live Photoband process right now: not
+    one to offer for resume (its journal says "running"/"staging" because it is)."""
+    if _lock_holder(os.path.join(paths.sub("batches"), bid, "run.lock")) not in (None, os.getpid()):
+        return True
+    try:
+        pid = int(data.get("pid") or 0)
+        recent = time.time() - float(data.get("updated") or 0) < STAGING_IDLE_S
+    except (TypeError, ValueError):
+        return False
+    # being staged in another window: its photos are prepared and journaled one by one
+    return data.get("state") == "staging" and recent and pid not in (0, os.getpid()) and _pid_alive(pid)
+
+
 def discard_batch(bid: str) -> None:
     b = get_batch(bid)
-    with b._lock:
+    with b._txn():
+        if (b._thread and b._thread.is_alive()) or b.run_elsewhere():
+            # the run's end would write its own state over "discarded"
+            raise BatchBusy("This batch is still saving. Stop it first.")
         b.data["state"] = "discarded"
         b._write()

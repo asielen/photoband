@@ -151,9 +151,9 @@ def test_disabled_control_explains_why(page, server):
     # a scan with a handwritten caption: Overwrite is off, and its tooltip says why
     select_photo(pg, "12_scanned_polaroid_handwriting.tif")
     pg.wait_for_selector("text=Physical caption on a scan", timeout=30000)
-    over = pg.locator('header.tb button[aria-label="Overwrite original"]')
+    over = pg.locator('header.tb button.overwrite')
     assert over.is_disabled()
-    text, _ = tip_for(pg, 'header.tb button[aria-label="Overwrite original"]')
+    text, _ = tip_for(pg, 'header.tb button.overwrite')
     assert "overwriting it is turned off" in text
     shot(pg, "03_tip_disabled_overwrite")
     select_photo(pg, "01_prophoto16_lzw.tif")

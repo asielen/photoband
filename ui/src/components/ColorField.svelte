@@ -2,7 +2,8 @@
   let { value, onchange, label = '', a11yLabel = '', changed = false, onreset }: {
     value: string; onchange: (v: string) => void; label?: string; /** accessible name when there is no visible label */ a11yLabel?: string; changed?: boolean; onreset?: () => void
   } = $props()
-  const name = $derived(label || a11yLabel || 'Color')
+  // a11yLabel names the colour when the visible label is generic ("Colour")
+  const name = $derived(a11yLabel || label || 'Text')
   let hex = $state('')
   $effect(() => { hex = (value || '#000000').toUpperCase() })
   function commitHex() {
@@ -16,9 +17,9 @@
 
 <span class="cf">
   {#if label}<span class="lbl">{label}</span>{/if}
-  <input type="color" value={value} oninput={(e) => onchange((e.target as HTMLInputElement).value)} aria-label="{name} color" data-tip="Pick the {name.toLowerCase()} colour" />
-  <input class="field hex" bind:value={hex} onblur={commitHex} onkeydown={(e) => e.key === 'Enter' && commitHex()} aria-label="{name} color, hex value" maxlength="7" data-tip="Or type a colour code, such as #FFFFFF for white" />
-  {#if changed}<button class="dot" data-tip="Changed for this photo. Click to use the template's colour." aria-label="Reset {name.toLowerCase()} color to the template" onclick={() => onreset?.()}></button>{/if}
+  <input type="color" value={value} oninput={(e) => onchange((e.target as HTMLInputElement).value)} aria-label="{name} colour" data-tip="Pick the {name.toLowerCase()} colour" />
+  <input class="field hex" bind:value={hex} onblur={commitHex} onkeydown={(e) => e.key === 'Enter' && commitHex()} aria-label="{name} colour, hex value" maxlength="7" data-tip="Or type a colour code, such as #FFFFFF for white" />
+  {#if changed}<button class="dot" data-tip="Changed for this photo. Click to use the template's colour." aria-label="Reset {name.toLowerCase()} colour to the template" onclick={() => onreset?.()}></button>{/if}
 </span>
 
 <style>

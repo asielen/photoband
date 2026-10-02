@@ -6,6 +6,7 @@ typed names. A draft whose file really changed is kept (listed as not valid) so 
 offer it, and is pruned only after 60 days."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import os
@@ -15,12 +16,15 @@ import unicodedata
 from typing import Any, Dict, List, Optional
 
 from . import paths
-from .util import atomic_write_json, canonical_path, quick_hash, read_json
+from .shared_state import interprocess_lock
+from .shared_state import write_json as atomic_write_json
+from .util import canonical_path, quick_hash, read_json
 
 log = logging.getLogger(__name__)
 
 PRUNE_AFTER_DAYS = 60
 _lock = threading.RLock()   # an autosave and a compare-and-delete must not interleave
+_held = threading.local()   # draft locks this thread holds (the lock file is not reentrant)
 
 
 def _key(path: str) -> str:
@@ -40,6 +44,27 @@ def _legacy_p(path: str) -> str:
     return os.path.join(paths.sub("drafts"), h + ".json")
 
 
+@contextlib.contextmanager
+def _locked(path: str):
+    """This photo's draft is read, compared and written by one process at a time: another
+    Photoband window autosaves it, a batch in another process clears it after saving the photo.
+    A check-then-write (compare-and-delete, the stat refresh) is atomic across those processes."""
+    lp = os.path.join(paths.sub("drafts"), ".drafts.lock")   # one for all drafts: held for ms
+    held = getattr(_held, "keys", None)
+    if held is None:
+        held = _held.keys = set()
+    with _lock:
+        if lp in held:
+            yield
+            return
+        with interprocess_lock(lp):
+            held.add(lp)
+            try:
+                yield
+            finally:
+                held.discard(lp)
+
+
 def _read(path: str) -> Optional[Dict[str, Any]]:
     """The stored draft record for ``path``; a draft under the old key is moved to the new one."""
     p = _p(path)
@@ -52,11 +77,15 @@ def _read(path: str) -> Optional[Dict[str, Any]]:
     d = read_json(old)
     if not d:
         return None
-    try:
-        atomic_write_json(p, d)
-        os.unlink(old)
-    except OSError:
-        log.debug("could not migrate draft %s", old, exc_info=True)
+    with _locked(path):
+        cur = read_json(p)
+        if cur:
+            return cur   # saved under the new key meanwhile (another window): that one is newer
+        try:
+            atomic_write_json(p, d)
+            os.unlink(old)
+        except OSError:
+            log.debug("could not migrate draft %s", old, exc_info=True)
     return d
 
 
@@ -91,7 +120,7 @@ def _check(d: Dict[str, Any]) -> bool:
 
 
 def save_draft(path: str, state: Dict[str, Any]) -> None:
-    with _lock:
+    with _locked(path):
         _save_draft(path, state)
 
 
@@ -113,12 +142,16 @@ def load_draft(path: str) -> Optional[Dict[str, Any]]:
     if not _check(d):
         return None  # the file changed since the draft was made; kept for list_drafts
     if d.get("stat") != _stat(path):
-        # same content, only the stat moved (mtime touch): remember the new stat
-        d["stat"] = _stat(path)
-        try:
-            atomic_write_json(_p(path), d)
-        except OSError:
-            log.debug("could not refresh draft stat", exc_info=True)
+        # same content, only the stat moved (mtime touch): remember the new stat. Written back
+        # only over the very draft read here: a newer autosave (this or another process) wins.
+        with _locked(path):
+            cur = read_json(_p(path))
+            if cur == d:
+                cur["stat"] = _stat(path)
+                try:
+                    atomic_write_json(_p(path), cur)
+                except OSError:
+                    log.debug("could not refresh draft stat", exc_info=True)
     return d.get("state")
 
 
@@ -129,13 +162,14 @@ def load_draft_any(path: str) -> Optional[Dict[str, Any]]:
 
 
 def delete_draft(path: str) -> None:
-    for p in {_p(path), _legacy_p(path)}:
-        try:
-            os.unlink(p)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            log.debug("could not delete draft %s", p, exc_info=True)
+    with _locked(path):
+        for p in {_p(path), _legacy_p(path)}:
+            try:
+                os.unlink(p)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                log.debug("could not delete draft %s", p, exc_info=True)
 
 
 def list_drafts() -> List[Dict[str, Any]]:
@@ -178,7 +212,7 @@ def delete_draft_if(path: str, state_hash: str, unhashed: bool = False) -> bool:
     state's hash, stored as state["_hash"]); a draft edited since is kept. ``unhashed``: a draft
     stored without a hash is deleted too. Compares whatever the file's state, so it works after
     an overwrite changed the file's identity. True if deleted."""
-    with _lock:
+    with _locked(path):
         st = load_draft_any(path)
         if st is None or not state_hash:
             return False

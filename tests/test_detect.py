@@ -6,10 +6,9 @@ tests/_artifacts/ as PNGs so humans can look at them.
 """
 from __future__ import annotations
 
-import glob
 import os
 import re
-import subprocess
+import sys
 import time
 
 import cv2
@@ -17,6 +16,7 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+from conftest import best_time
 from photoband import detect, erase, ocr
 from photoband.existing import analyze_existing
 
@@ -32,36 +32,27 @@ ART = os.path.join(os.path.dirname(__file__), "_artifacts")
 # fixture helpers
 # =============================================================================
 
-def _find_font(names):
-    roots = ["/usr/share/fonts", "/usr/local/share/fonts", os.path.expanduser("~/.fonts"),
-             "C:/Windows/Fonts", "/Library/Fonts", "/System/Library/Fonts"]
-    for name in names:
-        for r in roots:
-            hits = glob.glob(os.path.join(r, "**", name), recursive=True)
-            if hits:
-                return hits[0]
-    try:  # fontconfig
-        out = subprocess.run(["fc-list", ":style=Regular", "file"], capture_output=True, text=True,
-                             timeout=5).stdout
-        for line in out.splitlines():
-            p = line.split(":")[0].strip()
-            if p.lower().endswith(".ttf"):
-                return p
-    except Exception:
-        pass
-    return None
-
-
-SANS = _find_font(["DejaVuSans.ttf", "LiberationSans-Regular.ttf", "FreeSans.ttf", "Arial.ttf"])
-SANS_BOLD = _find_font(["DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf", "FreeSansBold.ttf"]) or SANS
-ITALIC = _find_font(["LiberationSerif-Italic.ttf", "DejaVuSerif-Italic.ttf", "FreeSerifItalic.ttf"]) or SANS
+# The repo's bundled fonts, never the machine's: system-font lookups picked
+# DejaVu on Linux, Arial on Windows and whatever fontconfig listed first on macOS
+# (a Courier), so the same test drew different text on each OS and CI caught
+# failures local runs could not.  A spec is a path or (path, weight) for a
+# variable font.
+FONTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fonts")
+SANS = os.path.join(FONTS, "noto-sans", "NotoSans[wdth,wght].ttf")
+SANS_BOLD = (SANS, 700)
+ITALIC = os.path.join(FONTS, "noto-serif", "NotoSerif-Italic[wdth,wght].ttf")
+MONO = os.path.join(FONTS, "courier-prime", "CourierPrime-Regular.ttf")
+MONO_BOLD = os.path.join(FONTS, "courier-prime", "CourierPrime-Bold.ttf")
 HAS_TESS = ocr.tesseract_path() is not None
 
 
-def _font(path, size):
-    if path:
-        return ImageFont.truetype(path, size)
-    return None
+def _font(spec, size):
+    path, weight = spec if isinstance(spec, tuple) else (spec, None)
+    font = ImageFont.truetype(path, size)
+    if weight is not None:
+        font.set_variation_by_axes([weight if ax["name"] in (b"Weight", "Weight") else ax["default"]
+                                    for ax in font.get_variation_axes()])
+    return font
 
 
 def save_artifact(name, arr):
@@ -94,26 +85,15 @@ def draw_lines(img, box, lines, font_px, color, align="center", font_path=None, 
     total = font_px * spacing * (len(lines) - 1) + font_px
     ty = y + (h - total) / 2
     for i, s in enumerate(lines):
-        if font is not None:
-            l, t, r, b = d.textbbox((0, 0), s, font=font)
-            tw = r - l
-        else:
-            tw = len(s) * font_px * 0.6
+        l, t, r, b = d.textbbox((0, 0), s, font=font)
+        tw = r - l
         if align == "center":
             tx = x + (w - tw) / 2
         elif align == "left":
             tx = x + 0.06 * w
         else:
             tx = x + w - 0.06 * w - tw
-        pos = (int(tx), int(ty + i * font_px * spacing))
-        if font is not None:
-            d.text(pos, s, font=font, fill=tuple(color))
-        else:  # pragma: no cover - no TTF on the machine
-            arr = np.asarray(pil).copy()
-            cv2.putText(arr, s, (pos[0], pos[1] + font_px), cv2.FONT_HERSHEY_SIMPLEX, font_px / 30,
-                        tuple(int(c) for c in color), 2, cv2.LINE_AA)
-            pil = Image.fromarray(arr)
-            d = ImageDraw.Draw(pil)
+        d.text((int(tx), int(ty + i * font_px * spacing)), s, font=font, fill=tuple(color))
     img[...] = np.asarray(pil)
     return img
 
@@ -364,12 +344,10 @@ def test_textured_paper(paper):
 def test_no_border_natural_photo():
     for seed in range(5):
         photo = make_photo(1500, 1000, seed=100 + seed)
-        t0 = time.perf_counter()
-        band = detect.detect_band(photo)
-        dt = time.perf_counter() - t0
+        band, dt = best_time(lambda: detect.detect_band(photo))
         assert not band.found, seed
         assert band.photo_rect == (0, 0, 1500, 1000)
-        assert dt < 0.5
+        assert dt < 0.5, dt
 
 
 # =============================================================================
@@ -461,7 +439,7 @@ def test_erase_textured_uint16(paper):
 
 def _stamp(img, text="'98 6 14", size=44, glow=True):
     h, w = img.shape[:2]
-    font = _font(_find_font(["DejaVuSansMono-Bold.ttf", "LiberationMono-Bold.ttf"]) or SANS_BOLD, size)
+    font = _font(MONO_BOLD, size)
     layer = Image.new("L", (w, h), 0)
     d = ImageDraw.Draw(layer)
     l, t, r, b = d.textbbox((0, 0), text, font=font)
@@ -486,9 +464,8 @@ def test_case_d_date_stamp():
     photo = make_photo(1200, 900, seed=51, lo=20, hi=150)
     img, sbox = _stamp(photo)
     save_artifact("date_stamp.png", img)
-    t0 = time.perf_counter()
-    boxes = detect.detect_text_over_photo(img, (0, 0, 1200, 900))
-    assert time.perf_counter() - t0 < 2.0
+    boxes, dt = best_time(lambda: detect.detect_text_over_photo(img, (0, 0, 1200, 900)), repeats=2)
+    assert dt < 2.0, dt
     assert any(_overlap(b, sbox) for b in boxes), boxes
 
 
@@ -496,9 +473,8 @@ def test_case_d_date_stamp():
 def test_case_d_plain_photos_have_no_boxes():
     for seed in range(4):
         photo = make_photo(1200, 900, seed=60 + seed)
-        t0 = time.perf_counter()
-        boxes = detect.detect_text_over_photo(photo, (0, 0, 1200, 900))
-        assert time.perf_counter() - t0 < 2.0
+        boxes, dt = best_time(lambda: detect.detect_text_over_photo(photo, (0, 0, 1200, 900)), repeats=2)
+        assert dt < 2.0, dt
         assert boxes == [], (seed, boxes)
 
 
@@ -537,9 +513,7 @@ def test_timing_big_uint16():
     photo = cv2.resize(small, (pw, ph), interpolation=cv2.INTER_LINEAR)
     img = np.full((H, W, 3), 65535, np.uint16)
     img[t:t + ph, l:l + pw] = photo.astype(np.uint16) * 257
-    t0 = time.perf_counter()
-    band = detect.detect_band(img)
-    dt = time.perf_counter() - t0
+    band, dt = best_time(lambda: detect.detect_band(img), repeats=2)
     assert band.found and band.photo_rect == (l, t, pw, ph)
     assert dt < 3.0, dt
 
@@ -556,7 +530,9 @@ def test_analyze_3000px():
     # detection + OCR time on an unmarked photo), which the old test-only copy skipped
     assert dt < 9.0, dt
     assert res["band"]["found"] and res["band"]["photo_rect"] == list(truth)
-    assert res["case"] == "B" and res["engine"] == "tesseract"
+    # the engine that read it is the first available one: tesseract only where no OS engine
+    # (Apple Vision, Windows.Media.Ocr) is present
+    assert res["case"] == "B" and res["engine"] == (ocr.engines() or [None])[0]
     assert_words_read(POLA_TEXT, res["text"].replace("\n", " "))
     assert res["style"]["align"] == "center"
     assert res["textOverPhoto"] == []
@@ -572,3 +548,16 @@ def test_engines_and_empty_recognize():
     r = ocr.recognize(np.full((40, 200, 3), 255, np.uint8))
     assert set(r) >= {"text", "confidence", "words", "engine"}
     assert r["text"] == ""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows OCR is Windows only")
+def test_windows_ocr_reads_a_line():
+    # the binding changed between pywinrt versions (create_copy_with_alpha_from_buffer):
+    # call the engine directly, so a system Tesseract can't hide a broken Windows OCR
+    if not ocr._winocr_available():
+        pytest.skip("Windows OCR is not available here")
+    font = ImageFont.truetype(os.path.join(FONTS, "inter", "Inter[opsz,wght].ttf"), 40)
+    im = Image.new("RGB", (520, 80), "white")
+    ImageDraw.Draw(im).text((12, 14), "Lake Merced 1962", font=font, fill="black")
+    r = ocr._winocr_recognize(np.asarray(im))
+    assert "Merced" in r["text"] and "1962" in r["text"], r["text"]

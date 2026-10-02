@@ -18,6 +18,7 @@ crop's pixel coordinates (x, y, w, h).
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -33,6 +34,8 @@ try:
     import cv2
 except Exception as exc:  # pragma: no cover
     raise ImportError("photoband.ocr needs opencv-python") from exc
+
+log = logging.getLogger(__name__)
 
 TARGET_TEXT_HEIGHT = 64      # px: full line height (ascender..descender) -> x-height ~ 32-40
 PAD = 16                     # white border added around crops for Tesseract
@@ -95,6 +98,23 @@ def _text_rows(gray_inked: np.ndarray) -> List[tuple]:
     return runs
 
 
+def _fit_scale(scale: float, shape, maxdim: int, border: int) -> float:
+    """``scale`` lowered so that the scaled image *plus* a ``border`` px border (both
+    sides together) stays within ``maxdim`` px on its longer side."""
+    longest = max(1, int(max(shape[:2])))
+    return min(float(scale), max(1, maxdim - border) / float(longest))
+
+
+def _fits(shape, maxdim: int, border: int) -> bool:
+    """Whether the image, unscaled, plus the border is within the limit (so a scale
+    close to 1 may skip the resize)."""
+    return int(max(shape[:2])) + border <= maxdim
+
+
+# Tesseract (Leptonica) refuses images with a side over 32767 px ("Image too large").
+TESSERACT_MAX_DIM = 32767
+
+
 def _prepare(img8: np.ndarray):
     """-> (prepared grey image, scale, pad, n_lines)"""
     rgb = _to_rgb8(img8)
@@ -115,7 +135,9 @@ def _prepare(img8: np.ndarray):
     else:
         n_lines, line_h = 1, float(g.shape[0])
     scale = float(np.clip(TARGET_TEXT_HEIGHT / max(line_h, 1.0), 0.35, 6.0))
-    if abs(scale - 1.0) > 0.05:
+    # the size limit applies to the image Tesseract gets, after the 2 * PAD border
+    scale = _fit_scale(scale, g.shape, TESSERACT_MAX_DIM, 2 * PAD)
+    if abs(scale - 1.0) > 0.05 or not _fits(g.shape, TESSERACT_MAX_DIM, 2 * PAD):
         interp = cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA
         g = cv2.resize(g, (max(1, round(g.shape[1] * scale)), max(1, round(g.shape[0] * scale))),
                        interpolation=interp)
@@ -232,17 +254,39 @@ def tesseract_recognize(img8: np.ndarray, psm: Optional[int] = None, whitelist: 
 # Apple Vision (macOS)
 # =============================================================================
 
-@lru_cache(maxsize=1)
+def _probe_once(fn):
+    """Cache an availability probe's answer, but only a definitive one: True, False, or
+    a missing package (ImportError). Any other exception (a COM hiccup, a busy
+    service) answers False for this call only, so one transient error does not turn
+    the engine off for the rest of the process."""
+    box: list = []
+
+    def probe() -> bool:
+        if box:
+            return box[0]
+        try:
+            ok = bool(fn())
+        except ImportError:
+            ok = False
+        except Exception as exc:
+            log.debug("OCR availability probe %s failed: %s", fn.__name__, exc)
+            return False
+        box.append(ok)
+        return ok
+
+    probe.cache_clear = box.clear  # type: ignore[attr-defined]
+    probe.__name__ = fn.__name__
+    return probe
+
+
+@_probe_once
 def _vision_available() -> bool:
     if sys.platform != "darwin":
         return False
-    try:
-        import Vision  # noqa: F401  (pyobjc-framework-Vision)
-        import Quartz  # noqa: F401  (pyobjc-framework-Quartz)
-        from Foundation import NSData  # noqa: F401
-        return hasattr(Vision, "VNRecognizeTextRequest")
-    except Exception:
-        return False
+    import Vision  # noqa: F401  (pyobjc-framework-Vision)
+    import Quartz  # noqa: F401  (pyobjc-framework-Quartz)
+    from Foundation import NSData  # noqa: F401
+    return hasattr(Vision, "VNRecognizeTextRequest")
 
 
 def _vision_recognize(img8: np.ndarray) -> dict:
@@ -323,18 +367,15 @@ def _vision_recognize(img8: np.ndarray) -> dict:
 # Windows.Media.Ocr
 # =============================================================================
 
-@lru_cache(maxsize=1)
+@_probe_once
 def _winocr_available() -> bool:
     if sys.platform != "win32":
         return False
-    try:
-        from winrt.windows.media.ocr import OcrEngine  # noqa: F401
-        from winrt.windows.graphics.imaging import SoftwareBitmap  # noqa: F401
-        from winrt.windows.storage.streams import DataWriter  # noqa: F401
-        eng = OcrEngine.try_create_from_user_profile_languages()
-        return eng is not None
-    except Exception:
-        return False
+    from winrt.windows.media.ocr import OcrEngine  # noqa: F401
+    from winrt.windows.graphics.imaging import SoftwareBitmap  # noqa: F401
+    from winrt.windows.storage.streams import DataWriter  # noqa: F401
+    eng = OcrEngine.try_create_from_user_profile_languages()
+    return eng is not None
 
 
 def _winocr_recognize(img8: np.ndarray) -> dict:
@@ -348,12 +389,13 @@ def _winocr_recognize(img8: np.ndarray) -> dict:
     h0, w0 = rgb.shape[:2]
     # Windows OCR works best with ~ 20-40 px cap height; it also caps the image size
     scale = float(np.clip(60.0 / max(1, h0), 1.0, 4.0))
+    padv = 16
+    # the limit is on the bitmap handed over, i.e. after the 2 * padv border is added
     maxdim = int(getattr(OcrEngine, "max_image_dimension", 10000) or 10000)
-    scale = min(scale, maxdim / float(max(h0, w0) + 32))
-    if abs(scale - 1.0) > 0.01:
+    scale = _fit_scale(scale, (h0, w0), maxdim, 2 * padv)
+    if abs(scale - 1.0) > 0.01 or not _fits((h0, w0), maxdim, 2 * padv):
         rgb = cv2.resize(rgb, (max(1, round(w0 * scale)), max(1, round(h0 * scale))),
                          interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA)
-    padv = 16
     rgb = cv2.copyMakeBorder(rgb, padv, padv, padv, padv, cv2.BORDER_REPLICATE)
     H, W = rgb.shape[:2]
     bgra = np.ascontiguousarray(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGRA))
@@ -364,8 +406,9 @@ def _winocr_recognize(img8: np.ndarray) -> dict:
     except TypeError:
         writer.write_bytes(list(bgra.tobytes()))    # older bindings want a list of ints
     buf = writer.detach_buffer()
-    bmp = SoftwareBitmap.create_copy_from_buffer(buf, BitmapPixelFormat.BGRA8, W, H,
-                                                 BitmapAlphaMode.PREMULTIPLIED)
+    # pywinrt >= 3 names the overload with an alpha mode create_copy_with_alpha_from_buffer
+    make = getattr(SoftwareBitmap, "create_copy_with_alpha_from_buffer", None) or SoftwareBitmap.create_copy_from_buffer
+    bmp = make(buf, BitmapPixelFormat.BGRA8, W, H, BitmapAlphaMode.PREMULTIPLIED)
     engine = OcrEngine.try_create_from_user_profile_languages()
     if engine is None:
         raise RuntimeError("no OCR language installed")
@@ -404,14 +447,26 @@ _ADAPTERS = {
     "tesseract": (lambda: tesseract_path() is not None,
                   lambda img: tesseract_recognize(img)),
 }
+# Engines turned off for the rest of the process, and engines that have read at least
+# one crop. Only an engine that has never worked here is turned off: a binding problem
+# fails on every crop, so an engine that has succeeded once and then raises had a
+# problem with that crop, not with its binding.
 _broken: set = set()
+_ok: set = set()
 _broken_lock = threading.Lock()
+
+
+ENGINE_ORDER = ("vision", "winocr", "tesseract")   # preference order
+
+
+def _rank(name: str) -> tuple:
+    return (ENGINE_ORDER.index(name) if name in ENGINE_ORDER else len(ENGINE_ORDER), name)
 
 
 def engines() -> List[str]:
     """Available engines in preference order, e.g. ``["tesseract"]``."""
     out = []
-    for name in ("vision", "winocr", "tesseract"):
+    for name in ENGINE_ORDER:
         try:
             if name not in _broken and _ADAPTERS[name][0]():
                 out.append(name)
@@ -422,8 +477,9 @@ def engines() -> List[str]:
 
 def recognize(img8: np.ndarray) -> dict:
     """Recognise one line/block crop (8-bit RGB or grey).  Tries each engine in
-    order; an engine that raises is skipped (and remembered as broken if it fails
-    on import-level problems).  Never raises: returns empty text if all fail."""
+    order; an engine that raises is skipped for this crop (and turned off for the
+    process when it fails on a binding-level problem before ever having worked).
+    Never raises: returns empty text if all fail."""
     img = np.asarray(img8)
     if img.size == 0 or min(img.shape[:2]) < 2:
         return dict(_EMPTY)
@@ -434,10 +490,18 @@ def recognize(img8: np.ndarray) -> dict:
         try:
             r = _ADAPTERS[name][1](img)
             r["engine"] = name
+            if name not in _ok:
+                with _broken_lock:
+                    _ok.add(name)
             return r
-        except (ImportError, AttributeError) as exc:
+        except (ImportError, AttributeError, TypeError) as exc:
+            # a missing or changed binding fails the same way on every crop: stop using the
+            # engine - unless it has worked before, then only this crop failed
             with _broken_lock:
-                _broken.add(name)
+                if name not in _ok:
+                    if name not in _broken:
+                        log.warning("OCR engine %s does not work here (%s); using the next one", name, exc)
+                    _broken.add(name)
             last_err = exc
         except Exception as exc:
             last_err = exc
@@ -458,17 +522,20 @@ def _crop8(arr: np.ndarray, box, pad: int) -> tuple:
     return _to_rgb8(crop), (x0, y0)
 
 
-def recognize_blocks(arr, blocks, crop_fn=None) -> None:
+def recognize_blocks(arr, blocks, crop_fn=None) -> List[str]:
     """Fill ``TextLine.text / confidence / words`` in place (word boxes in
     full-resolution image coordinates).  Lines are recognised in parallel.
 
     ``crop_fn(line) -> (rgb8 crop, (x0, y0)) | None`` supplies a cleaned crop
     (e.g. :func:`photoband.detect.line_ocr_crop`: only the line's own ink, clipped
-    to its band); None falls back to a padded crop of the line box."""
+    to its band); None falls back to a padded crop of the line box.
+
+    Returns the engines that read the lines, most used first."""
     arr = np.asarray(arr)
     lines = [ln for b in blocks for ln in b.lines]
     if not lines:
-        return
+        return []
+    used: List[str] = []
 
     def work(ln):
         got = None
@@ -483,6 +550,8 @@ def recognize_blocks(arr, blocks, crop_fn=None) -> None:
             pad = max(6, int(0.35 * ln.box[3]))
             crop, (ox, oy) = _crop8(arr, ln.box, pad)
         r = recognize(crop)
+        if r.get("engine"):
+            used.append(r["engine"])
         ln.text = r.get("text", "").replace("\n", " ").strip()
         ln.confidence = float(r.get("confidence", 0.0))
         ln.words = [{"text": w["text"], "confidence": float(w["confidence"]),
@@ -496,3 +565,5 @@ def recognize_blocks(arr, blocks, crop_fn=None) -> None:
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             list(ex.map(work, lines))
+    # most used first; a tie goes to the preferred engine (set order depends on the hash seed)
+    return sorted(set(used), key=lambda e: (-used.count(e), _rank(e)))

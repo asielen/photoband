@@ -39,9 +39,9 @@ You will only see this if the release you downloaded is not code-signed.
 2. **Check the caption.** It is filled in from each photo's information. To change it, type in the box on the right or click the caption in the preview.
 3. **Pick a look.** Choose a **Template** at the top, e.g. *Classic Polaroid* or *Museum card*. The *Style* and *Layout* tabs fine-tune it.
 4. **Save.**
-   - **Save copy** (`Ctrl+S` / `⌘S`) writes a new file next to the original.
-   - **Save copy & next** (`Ctrl+Enter` / `⌘Enter`) does the same, then opens the next photo.
-   - **Overwrite original** replaces the file and keeps a backup in an `_originals` folder. Its ▾ menu has **Overwrite original & next**.
+   - **Save copy & next** (`Ctrl+S` / `⌘S`) writes a new file next to the original, then opens the next photo.
+   - **Overwrite & next** (`Ctrl+Shift+Enter` / `⌘⇧Enter`) replaces the file, keeping a backup in an `_originals` folder, then opens the next photo.
+   - *Save copy as…* (`Ctrl+Shift+S`) and a copy without the hidden band data are in the command palette (`Ctrl+K`).
 5. **Many photos?** Click **Batch**. Then choose the photos, let Photoband check them, and save them all at once. *Restore originals* undoes an overwrite batch.
 
 **Tips**

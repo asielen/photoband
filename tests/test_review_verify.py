@@ -5,6 +5,7 @@ overwrite message."""
 import hashlib
 import os
 import shutil
+import sys
 import threading
 import time
 
@@ -53,6 +54,7 @@ def _copy(fixtures_dir, name, dst):
 
 def _save(path, mode="copy", saving=None, text="Ann, Bea and Carl", source_rect=None, **kw):
     s = load_settings()
+    s["saving"]["location"] = "subfolder"   # these tests were written for copies in a "captioned" subfolder
     s["saving"].update(saving or {})
     arr, info = load_upright(path)
     pw, ph = (source_rect[2], source_rect[3]) if source_rect else (arr.shape[1], arr.shape[0])
@@ -325,7 +327,7 @@ def test_exiftool_follows_the_symlink(tmp_path, fixtures_dir):
     assert not [n for n in os.listdir(str(d)) if n.startswith(".pbtmp")]
 
 
-def test_stale_source_links_are_swept_but_fresh_ones_are_kept(tmp_path):
+def test_stale_source_links_are_swept_but_fresh_ones_are_kept(tmp_path, symlink):
     photo = tmp_path / "old.tif"
     photo.write_bytes(b"photo")
     old = time.time() - 86400
@@ -342,7 +344,7 @@ def test_stale_source_links_are_swept_but_fresh_ones_are_kept(tmp_path):
     app_tmp.mkdir()
     s1 = app_tmp / f"src-{int(time.time()) - 7200}-aaa.tif"
     s2 = app_tmp / f"src-{int(time.time())}-bbb.tif"
-    os.symlink(str(photo), str(s1))
+    symlink(str(photo), str(s1))
     os.link(str(photo), str(s2))
     legacy = app_tmp / "src-0123456789abcdef.tif"
     legacy.write_bytes(b"copy")
@@ -354,10 +356,10 @@ def test_stale_source_links_are_swept_but_fresh_ones_are_kept(tmp_path):
 
 # ------------------------------------------------------------------ 4/5. in-app browser roots
 
-def test_fs_list_offers_only_roots_it_opens(client, tmp_path, monkeypatch):
+def test_fs_list_offers_only_roots_it_opens(client, tmp_path, monkeypatch, symlink):
     vols = tmp_path / "Volumes"
     vols.mkdir()
-    os.symlink("/", str(vols / "Macintosh HD"))
+    symlink("/", str(vols / "Macintosh HD"), target_is_directory=True)
     (vols / "Photos SSD").mkdir()
     monkeypatch.setattr(security, "mounted_volumes",
                         lambda: [str(vols / "Macintosh HD"), str(vols / "Photos SSD")])
@@ -389,11 +391,19 @@ def test_fs_list_reaches_the_last_folder_after_a_restart(client, monkeypatch):
         shutil.rmtree(base, ignore_errors=True)
 
 
-def test_last_folder_roots_stop_at_top_level_folders():
+def test_last_folder_roots_stop_at_top_level_folders(tmp_path):
+    assert security.last_folder_roots(None) == []
+    if sys.platform == "win32":
+        # "/" is the current drive's root on Windows, and drive roots are browsable there by
+        # design (system folders are refused by may_browse): the chain stops at the drive root
+        roots = security.last_folder_roots(str(tmp_path))
+        drive = os.path.splitdrive(roots[0])[0]
+        assert drive and roots[-1] == os.path.normcase(drive + os.sep)
+        assert all(os.path.dirname(a) == b for a, b in zip(roots, roots[1:])), roots
+        return
     roots = security.last_folder_roots("/etc/ssl")
     assert "/" not in roots and "/etc" not in roots
     assert security.last_folder_roots("/") == []
-    assert security.last_folder_roots(None) == []
 
 
 def test_unc_input_still_refused_unless_known(client, monkeypatch):

@@ -28,7 +28,9 @@ CACHE_MAX = 64
 
 
 def _key(path: str, info: ImageInfo) -> str:
-    return f"{os.path.abspath(path)}|{info.size_bytes}|{info.mtime_ns}"
+    # the file id too (as probe's own cache): a file replaced by another process (a save in
+    # another window, a batch worker) with the same size and modified time is another file
+    return f"{os.path.abspath(path)}|{info.size_bytes}|{info.mtime_ns}|{info.file_id}"
 
 
 def list_photos(paths_or_folder: List[str], include_sub: bool = False) -> List[Dict[str, Any]]:
@@ -80,6 +82,9 @@ def meta(path: str) -> Dict[str, Any]:
         _cache.move_to_end(k)
         while len(_cache) > CACHE_MAX:
             _cache.popitem(last=False)
+    # the whole-file hash a save compares against if the modified time changes meanwhile
+    from .save import hash_in_background
+    hash_in_background(path)
     return res
 
 
@@ -172,11 +177,11 @@ def _safe_proxy(p):
 
 # existing-text analysis results are also cached on disk next to the proxy (same key), so
 # re-opens and batch pre-flight don't analyze again. Bump when analyze_existing changes.
-ANALYSIS_VERSION = 1
+ANALYSIS_VERSION = 2   # 2: provenance (isCopy/copyUnknown) on every path; record from a marker payload
 
 
 def _existing_cache_file(path: str, info: ImageInfo, ocr: bool) -> str:
-    key = proxy.cache_key(path, info.size_bytes, info.mtime_ns)
+    key = proxy.cache_key(path, info.size_bytes, info.mtime_ns, info.file_id)
     tag = ""
     if ocr:
         try:
@@ -355,7 +360,11 @@ def erase_preview_webp(path: str, erase: Dict[str, Any], long_edge: int = 2560) 
     from .save import _erase_inputs
     from .erase import INPAINT_RADIUS, erase_in_place, shift_band
     arr, info = full_array(path)
-    mask, band = _erase_inputs(arr, erase)
+    from .save import SaveError
+    try:
+        mask, band = _erase_inputs(arr, erase)
+    except SaveError as e:   # e.g. an oversized brush mask: the endpoint answers 400
+        raise ValueError(str(e))
     ys, xs = np.nonzero(mask)
     out = arr
     if len(ys):

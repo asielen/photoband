@@ -173,13 +173,13 @@ def test_reopen_last_folder_only(client, tree):
     assert client.post("/api/fs/allow", json={"paths": [str(tree / "other")]}).status_code == 403
 
 
-def test_check_returns_realpath(client, tree):
+def test_check_returns_realpath(client, tree, symlink):
     link = tree / "link"
-    os.symlink(tree / "pics", link)
+    symlink(tree / "pics", link, target_is_directory=True)
     security.allow_root(str(link))
     assert security.check(str(link / "a.jpg")) == os.path.realpath(tree / "pics" / "a.jpg")
     # a symlink inside an allowed folder can't point outside it
-    os.symlink(tree / "other" / "secret.jpg", tree / "pics" / "escape.jpg")
+    symlink(tree / "other" / "secret.jpg", tree / "pics" / "escape.jpg")
     with pytest.raises(PermissionError):
         security.check(str(tree / "pics" / "escape.jpg"))
 
@@ -280,7 +280,15 @@ def test_open_folder_reveals_never_launches(client, tree, monkeypatch):
     a = next(e for e in lst["entries"] if e["name"] == "a.jpg")
     client.post("/api/fs/allow", json={"picks": [a["pick"]]})
     assert client.post("/api/open-folder", json={"which": "file", "path": a["path"]}).status_code == 200
-    assert calls and calls[-1] == ["xdg-open", os.path.realpath(tree / "pics")]
+    # what _reveal starts on this OS (the argv for each OS is checked with reveal_argv below)
+    real = os.path.realpath(tree / "pics" / "a.jpg")
+    if sys.platform == "win32":
+        want = f'explorer /select,"{real}"'   # one token: explorer's own parsing of /select,
+    elif sys.platform == "darwin":
+        want = ["open", "-R", real]
+    else:
+        want = ["xdg-open", os.path.dirname(real)]
+    assert calls and calls[-1] == want
     assert server.reveal_argv("/x/Evil.app", "darwin") == ["open", "-R", "/x/Evil.app"]
     assert server.reveal_argv("C:\\x\\run.exe", "win32") == ["explorer", "/select,C:\\x\\run.exe"]
     app_dir = tree / "pics" / "Thing.app"
@@ -400,9 +408,19 @@ EVIL_DIR_NAME = 'dir" & (do shell script "id") & "'
 EVIL_NAME = 'Grandma 1962" & (do shell script "open -a Calculator") & "-captioned.jpg'
 
 
-def test_osascript_argv_has_no_interpolation(tmp_path):
+def _evil_dir(tmp_path):
+    """A real folder named EVIL_DIR_NAME (osascript_argv only passes on folders that exist), or
+    skip where the file system can't hold '"' in a name (Windows; osascript is macOS-only)."""
     d = tmp_path / EVIL_DIR_NAME
-    d.mkdir()
+    try:
+        d.mkdir()
+    except OSError:
+        pytest.skip("this file system can't hold '\"' in a folder name (Windows)")
+    return d
+
+
+def test_osascript_argv_has_no_interpolation(tmp_path):
+    d = _evil_dir(tmp_path)
     for kind in dialogs.KINDS:
         argv = dialogs.osascript_argv(kind, EVIL_T, str(d), EVIL_NAME)
         assert argv[:3] == ["osascript", "-e", dialogs.OSASCRIPT]
@@ -424,8 +442,7 @@ def test_osascript_runs_fixed_script(monkeypatch, tmp_path):
         stdout = "/tmp/x.jpg\n"
         stderr = ""
     monkeypatch.setattr(dialogs, "_run", lambda args, timeout=600: captured.setdefault("args", args) and R())
-    d = tmp_path / EVIL_DIR_NAME
-    d.mkdir()
+    d = _evil_dir(tmp_path)
     assert dialogs._osascript("save-file", EVIL_T, str(d), EVIL_NAME) == ["/tmp/x.jpg"]
     assert captured["args"][2] == dialogs.OSASCRIPT
 

@@ -454,7 +454,7 @@ export function computeLayout(inp: LayoutInput): LayoutResult {
       if (fbChars.length && mg.fallback)
         warnings.push({ kind: 'glyph', block: b.id, message: `${b.name}: ${fbChars.slice(0, 6).join(' ')} ${fbChars.length === 1 ? 'is' : 'are'} missing from ${family(rf.id)?.family}; drawn with ${mg.fallback}.` })
     }
-    if (inp.gray && isColored(st.color)) warnings.push({ kind: 'color', block: b.id, message: `${b.name}: colored text becomes gray in this grayscale file.` })
+    if (inp.gray && isColored(st.color)) warnings.push({ kind: 'color', block: b.id, message: `${b.name}: coloured text becomes grey in this greyscale file.` })
   }
 
   const faceOf = (bl: BlockLayout, bold: boolean, italic: boolean) => {
@@ -622,7 +622,7 @@ export function computeLayout(inp: LayoutInput): LayoutResult {
         shrink = s
         contentH = Math.max(...res.heights)
       } else {
-        warnings.push({ kind: 'overflow', message: 'The text overflows the fixed-height band.' })
+        warnings.push({ kind: 'overflow', message: 'The text overflows the fixed-height band. Shorten it, make the band taller, or choose Shrink to fit.' })
       }
     }
   }
@@ -664,7 +664,7 @@ export function computeLayout(inp: LayoutInput): LayoutResult {
       }
     }
     if (inp.gray && (isColored(L.bandColor) || isColored(L.borderColor)))
-      warnings.push({ kind: 'color', message: 'The band color becomes gray in this grayscale file.' })
+      warnings.push({ kind: 'color', message: 'The band colour becomes grey in this greyscale file.' })
   }
 
   // --- position lines --------------------------------------------------------

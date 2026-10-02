@@ -9,7 +9,7 @@ import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import paths
-from .util import atomic_write_json
+from .shared_state import interprocess_lock, write_json
 
 DEFAULTS: Dict[str, Any] = {
     "general": {
@@ -19,7 +19,7 @@ DEFAULTS: Dict[str, Any] = {
         "showTooltips": True,        # hover / keyboard-focus explanations on controls
     },
     "saving": {
-        "location": "subfolder",     # subfolder | fixed | same
+        "location": "same",          # same | subfolder | fixed
         "subfolderName": "captioned",
         "fixedFolder": "",
         "fileName": "{stem}-captioned",
@@ -28,7 +28,7 @@ DEFAULTS: Dict[str, Any] = {
         "jpegQuality": 95,
         "keepFileDates": False,
         "backupOriginals": True,
-        "backupFolder": "",          # empty = "_originals" subfolder next to the file
+        "backupFolder": "",          # empty = "_originals" subfolder next to the file, as <stem>-original<ext>
         "embedMarker": True,
         "allowMultipageSave": False,
         "allowOverwriteHandwritten": False,
@@ -179,16 +179,18 @@ def save_settings(patch: Dict[str, Any]) -> Dict[str, Any]:
     patch = clean(patch, bad=bad)
     if bad:
         log.warning("settings: ignored invalid values for %s", ", ".join(bad))
-    with _lock:
+    # another Photoband window saves settings.json too: the patch is merged into the file as it is
+    # now, under a lock shared with those processes, so neither window's change is lost
+    with _lock, interprocess_lock(_path() + ".lock"):
         cur = load_settings()
         new = _merge(cur, patch)
-        atomic_write_json(_path(), new)
+        write_json(_path(), new)
         return new
 
 
 def reset_settings() -> Dict[str, Any]:
-    with _lock:
-        atomic_write_json(_path(), DEFAULTS)
+    with _lock, interprocess_lock(_path() + ".lock"):
+        write_json(_path(), DEFAULTS)
         return copy.deepcopy(DEFAULTS)
 
 

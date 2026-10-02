@@ -106,6 +106,24 @@ def test_date_parsing_anchor_and_compact():
     assert parse_date("1952:06:14 10:00:00").iso() == "1952-06-14"
 
 
+@pytest.mark.parametrize("value", ["1950s", "1950's", "1950-1955", "1950–55", "1950/1955", "1952-06/07",
+                                   "1950 1955", "1952?"])
+def test_fuzzy_dates_are_not_read_as_exact(value):
+    # a decade or a range must not print as one exact year ("1950s" -> "1950")
+    assert parse_date(value) is None
+
+
+@pytest.mark.parametrize("value,iso", [
+    ("1952", "1952"), ("1952-06", "1952-06"), ("1952:06:14 10:00:00", "1952-06-14"),
+    ("1952:06:14 10:00:00.25", "1952-06-14"), ("1952-06-14T10:00:00+02:00", "1952-06-14"),
+    ("1952:06:14 10:00:00-05:00", "1952-06-14"), ("1952-06-14T10:00Z", "1952-06-14"),
+    ("19520614T100000", "1952-06-14"), ("1952:06:00 00:00:00", "1952-06"), ("1952:06:14   :  :  ", "1952-06-14"),
+    ("1952:  :  ", "1952"), (" 1952-06-14 ", "1952-06-14"),
+])
+def test_exiftool_dates_still_parse(value, iso):
+    assert parse_date(value).iso() == iso
+
+
 def test_today_formats_complete():
     from captiontokens import TOKENS
     today = next(t for t in TOKENS if t.name == "today")

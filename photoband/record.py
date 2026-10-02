@@ -1,4 +1,40 @@
-"""The photoband XMP record: what this app needs to re-open its own output exactly."""
+"""The photoband XMP record: what this app needs to re-open its own output exactly.
+
+When a file's metadata is stripped, the record is gone but the hidden band marker
+(photoband/marker.py) may remain: on PNG/TIFF with its payload (save.payload_for_marker),
+on JPEG and after any lossy step without. Every decision made from a record field must
+therefore either read the same value from the payload, or be explicitly conservative
+when the field is missing (never treat such a file as safe to replace, reuse or caption
+again as an ordinary photo). Per field:
+
+==================  ===============================  ====================================================
+field               decisions that read it           without the record
+==================  ===============================  ====================================================
+saveMode            existing.provenance: isCopy       payload carries it. No payload (JPEG): copyUnknown,
+                    (a batch never captions copies)   and the batch leaves the file alone as a maybe-copy.
+template, overrides editor state of case A            payload carries them (blocks: printed text only).
+blocks, templateId
+mode (erase)        editor: re-edit in place          payload layout.mode; existing returns ``record``
+                    (ex.record.mode) vs rebuild       built from the payload, so the editor decides alike.
+photoHash, canvas,  case A match, is_app_output       payload carries them (case A via marker+payload).
+photoOffset,        (re-save from the backup,         save() reads only the record: no record = not a
+originalSize        backup reuse)                     verified output, so the photo is taken from the file
+                                                      and a fresh backup of the file as it is is made.
+outputPhotoHash     case A after Orientation edits    not carried; marker rect + hash used instead.
+sourceKey           save.is_output_of ("overwrite"    not carried (a path hash is metadata). No record =
+                    replaces an earlier copy)         never an earlier copy: the copy gets a new name.
+originalFile,       re-save from the original         not carried. No record = no verified original: the
+originalRect        backup, plan_backup reuse,        file itself is the pixel source and is backed up as
+                    save_preview pixelSource          it is; save_preview says "current", never
+                                                      "the untouched original" (captioned from the
+                                                      analysis's marker when the record is gone).
+originalText        kept in the next save's record    not carried, by design (never metadata in the
+                                                      band); a re-save of a stripped file loses it.
+batchJob            batch restore: "our output"       not carried; no record = not restored (treated
+                                                      as edited since), the safe side.
+lossyRecaption      (informational)                   set from the file format on both paths.
+==================  ===============================  ====================================================
+"""
 from __future__ import annotations
 
 import base64

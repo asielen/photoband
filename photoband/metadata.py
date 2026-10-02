@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from captiontokens.dates import parse_date
@@ -131,7 +132,10 @@ def _list(v) -> List[str]:
 FIELD_SOURCES = {
     "title": ["XMP-dc:Title", "IPTC:ObjectName", "XMP-photoshop:Headline", "EXIF:XPTitle"],
     "caption": ["XMP-dc:Description", "IPTC:Caption-Abstract", "EXIF:ImageDescription", "EXIF:XPComment"],
-    "date": ["XMP-photoshop:DateCreated", "EXIF:DateTimeOriginal", "IPTC:DateCreated", "XMP-xmp:CreateDate"],
+    # when the photo was taken; never the scan / file date, which has its own field below
+    "date": ["XMP-photoshop:DateCreated", "EXIF:DateTimeOriginal", "IPTC:DateCreated", "XMP-exif:DateTimeOriginal"],
+    # when it was scanned or the file was made: on a scan this is the scan date
+    "digitized": ["EXIF:CreateDate", "XMP-xmp:CreateDate", "XMP-exif:DateTimeDigitized", "IPTC:DigitalCreationDate"],
     "creator": ["XMP-dc:Creator", "IPTC:By-line", "EXIF:Artist"],
     "sublocation": ["XMP-iptcCore:Location", "IPTC:Sub-location"],
     "city": ["XMP-photoshop:City", "IPTC:City"],
@@ -289,14 +293,16 @@ def normalize(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
     fields: Dict[str, Any] = {}
     sources: Dict[str, str] = {}
     for key, srcs in FIELD_SOURCES.items():
-        if key == "date":
-            # first source whose value parses; "0000:00:00" must not block IPTC/XMP
+        if key in ("date", "digitized"):
+            # first source whose value parses; "0000:00:00" must not block IPTC/XMP, but
+            # a real value that is no exact date ("1950s", "circa 1950") stops the search:
+            # it prints as written, and a lower source must not stand in for it
             v = src = None
             first = None
             for cand, c in _iter_sources(md, srcs):
                 if first is None:
                     first = (cand, c)
-                if parse_date(_text(cand)) is not None:
+                if parse_date(_text(cand)) is not None or re.search(r"[1-9]", _text(cand) or ""):
                     v, src = cand, c
                     break
             if v is None and first is not None:

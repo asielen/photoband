@@ -10,6 +10,7 @@
   import { dialogs } from '../lib/dialogs.svelte'
   import { actions } from '../lib/actions'
   import { post } from '../lib/api'
+  import { dateRowText } from '../lib/datetext'
 
   let { s }: { s: PhotoSession } = $props()
 
@@ -86,6 +87,22 @@
     ['metadata', 'Metadata', 'The details found in the file (read-only)'],
   ] as const
 
+  // tab pattern: one tab stop, arrows / Home / End move between tabs
+  function tabKey(e: KeyboardEvent) {
+    const i = TABS.findIndex(([id]) => id === app.inspectorTab)
+    let j = -1
+    if (e.key === 'ArrowRight') j = (i + 1) % TABS.length
+    else if (e.key === 'ArrowLeft') j = (i - 1 + TABS.length) % TABS.length
+    else if (e.key === 'Home') j = 0
+    else if (e.key === 'End') j = TABS.length - 1
+    if (j < 0) return
+    e.preventDefault()
+    e.stopPropagation()
+    const list = e.currentTarget as HTMLElement
+    app.inspectorTab = TABS[j][0]
+    queueMicrotask(() => list.querySelectorAll<HTMLButtonElement>('[role=tab]')[j]?.focus())
+  }
+
   const fontGroups = $derived.by(() => {
     void app.fontsVersion
     const g: Record<string, typeof families> = { bundled: [], user: [], google: [], system: [] }
@@ -101,8 +118,7 @@
     if (r.id === 'ok') await app.saveOverridesAsTemplate(s, true)
   }
   async function updateTemplate() {
-    if (!base) return
-    if (base.builtin) return saveAsTemplate()
+    if (!base || base.builtin) return
     const ok = await dialogs.confirm('Update template', `Change “${base.name}” for every photo that uses it?`, 'Update template')
     if (ok) await app.saveOverridesAsTemplate(s, false)
   }
@@ -123,15 +139,21 @@
     return `binary · ${n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`}`
   }
   const raw = $derived((s.meta?.raw || []).map(([k, v]) => [k, humanize(v)] as [string, string]).filter(([k, v]) => !rawFilter || (k + ' ' + v).toLowerCase().includes(rawFilter.toLowerCase())))
-  // the date as captions print it ({date}), not the raw metadata value
+  // the dates as captions print them ({date}, {digitized}), not the raw metadata values
   let dateText = $state('')
+  let scanText = $state('')
   $effect(() => {
     const f = s.meta?.fields
     dateText = ''
-    if (!f?.date) return
+    scanText = ''
+    if (!f?.date && !f?.digitized) return
     let live = true
-    post<Record<string, { plain?: string; text?: string }>>('/api/resolve', { fields: f, formats: { date: '{date}' } })
-      .then((r) => { if (live) dateText = r.date?.plain || r.date?.text || '' })
+    post<Record<string, { plain?: string; text?: string }>>('/api/resolve', { fields: f, formats: { date: '{date}', digitized: '{digitized}' } })
+      .then((r) => {
+        if (!live) return
+        dateText = r.date?.plain || r.date?.text || ''
+        scanText = r.digitized?.plain || r.digitized?.text || ''
+      })
       .catch(() => {})
     return () => { live = false }
   })
@@ -141,7 +163,8 @@
     return [
       ['Title', f.title, src.title],
       ['Caption', f.caption, src.caption],
-      ['Date', dateText && dateText !== f.date ? `${dateText} (${f.date})` : f.date, src.date],
+      ['Date', dateRowText(dateText, f.date), src.date],
+      ['Scan date', dateRowText(scanText, f.digitized), src.digitized],
       ['Creator', f.creator, src.creator],
       ['Location', [f.sublocation, f.city, f.state, f.country].filter(Boolean).join(', '), src.city || src.sublocation],
       ['Keywords', (f.keywords || []).join(', '), ''],
@@ -150,15 +173,16 @@
 </script>
 
 <aside class="insp">
-  <div class="tabs" role="tablist" aria-label="Caption panel">
+  <!-- svelte-ignore a11y_interactive_supports_focus -->
+  <div class="tabs" role="tablist" aria-label="Caption panel" onkeydown={tabKey}>
     {#each TABS as [id, label, tip]}
-      <button role="tab" aria-selected={app.inspectorTab === id} class:on={app.inspectorTab === id} data-tip={tip} onclick={() => (app.inspectorTab = id)}>{label}</button>
+      <button role="tab" id="insp-tab-{id}" aria-selected={app.inspectorTab === id} aria-controls="insp-panel" tabindex={app.inspectorTab === id ? 0 : -1} class:on={app.inspectorTab === id} data-tip={tip} onclick={() => (app.inspectorTab = id)}>{label}</button>
     {/each}
   </div>
 
-  <div class="body scroll">
+  <div class="body scroll" id="insp-panel" role="tabpanel" aria-labelledby="insp-tab-{app.inspectorTab}">
     {#if !eff}
-      <p class="faint pad">No template.</p>
+      <p class="faint pad">This photo’s template is missing. Choose another one from Template in the toolbar.</p>
     {:else if app.inspectorTab === 'text'}
       <div class="col pad stack">
         {#each eff.blocks as b (b.id)}
@@ -286,8 +310,8 @@
               <NumField label="Text width" value={L.textMaxWidth} unit="%" min={10} max={100} step={1} changed={lo('textMaxWidth')} onreset={() => resetL('textMaxWidth')} onchange={(v) => setL({ textMaxWidth: v })} tip="Longest line, as a % of the band width" />
             </div>
             <div class="lrow row">
-              <span class="lk" data-tip="Where the text sits when the band is taller than the text">Text align</span>
-              <Segmented value={L.vAlign} small options={[{ value: 'top', label: 'Top', tip: 'Text at the top of the band' }, { value: 'middle', label: 'Middle', tip: 'Text in the middle of the band' }, { value: 'bottom', label: 'Bottom', tip: 'Text at the bottom of the band' }]} onchange={(v) => setL({ vAlign: v })} label="Text align (vertical)" />
+              <span class="lk" data-tip="Where the text sits when the band is taller than the text">Vertical</span>
+              <Segmented value={L.vAlign} small options={[{ value: 'top', label: 'Top', tip: 'Text at the top of the band' }, { value: 'middle', label: 'Middle', tip: 'Text in the middle of the band' }, { value: 'bottom', label: 'Bottom', tip: 'Text at the bottom of the band' }]} onchange={(v) => setL({ vAlign: v })} label="Vertical position of the text" />
             </div>
           </section>
           <section class="col">
@@ -295,7 +319,7 @@
             <div class="row wrap">
               <Segmented value={String(L.columns.count)} small options={[{ value: '1', label: 'One', tip: 'All caption lines in one column' }, { value: '2', label: 'Two', tip: 'Split the caption lines into a left and a right column' }]} onchange={(v) => setL({ columns: { count: +v } })} label="Columns" />
               {#if L.columns.count === 2}
-                <NumField label="Split" value={L.columns.split} unit="%" min={10} max={90} step={1} onchange={(v) => setL({ columns: { split: v } })} tip="Width of the left column, as a % of the band" />
+                <NumField label="Split" value={L.columns.split} unit="%" min={10} max={90} step={1} changed={lo('columns.split')} onreset={() => resetL('columns.split')} onchange={(v) => setL({ columns: { split: v } })} tip="Width of the left column, as a % of the band" />
               {/if}
             </div>
             {#if L.columns.count === 2}
@@ -311,16 +335,16 @@
             <label class="row check" data-tip="A thin rule between the photo and the caption"><input type="checkbox" checked={L.divider.enabled} onchange={(e) => setL({ divider: { enabled: (e.target as HTMLInputElement).checked } })} /> Hairline divider above the band</label>
             {#if L.divider.enabled}
               <div class="row wrap sub">
-                <NumField label="Width" value={L.divider.width} kind="len" {mode} displayUnit={unit} {photoW} {dpi} min={0.01} step={0.01} onchange={(v) => setL({ divider: { width: v } })} tip="Thickness of the divider" />
-                <NumField label="Inset" value={L.divider.inset} kind="len" {mode} displayUnit={unit} {photoW} {dpi} min={0} onchange={(v) => setL({ divider: { inset: v } })} tip="Gap between the ends of the divider and the band edges" />
-                <ColorField label="Colour" value={L.divider.color} onchange={(v) => setL({ divider: { color: v } })} />
+                <NumField label="Width" value={L.divider.width} kind="len" {mode} displayUnit={unit} {photoW} {dpi} min={0.01} step={0.01} changed={lo('divider.width')} onreset={() => resetL('divider.width')} onchange={(v) => setL({ divider: { width: v } })} tip="Thickness of the divider" />
+                <NumField label="Inset" value={L.divider.inset} kind="len" {mode} displayUnit={unit} {photoW} {dpi} min={0} changed={lo('divider.inset')} onreset={() => resetL('divider.inset')} onchange={(v) => setL({ divider: { inset: v } })} tip="Gap between the ends of the divider and the band edges" />
+                <ColorField label="Colour" a11yLabel="Divider" value={L.divider.color} changed={lo('divider.color')} onreset={() => resetL('divider.color')} onchange={(v) => setL({ divider: { color: v } })} />
               </div>
             {/if}
             <label class="row check" data-tip="A thin outline around the photo itself"><input type="checkbox" checked={L.keyline.enabled} onchange={(e) => setL({ keyline: { enabled: (e.target as HTMLInputElement).checked } })} /> Keyline around the photo</label>
             {#if L.keyline.enabled}
               <div class="row wrap sub">
-                <NumField label="Width" value={L.keyline.width} kind="len" {mode} displayUnit={unit} {photoW} {dpi} min={0.01} step={0.01} onchange={(v) => setL({ keyline: { width: v } })} tip="Thickness of the keyline" />
-                <ColorField label="Colour" value={L.keyline.color} onchange={(v) => setL({ keyline: { color: v } })} />
+                <NumField label="Width" value={L.keyline.width} kind="len" {mode} displayUnit={unit} {photoW} {dpi} min={0.01} step={0.01} changed={lo('keyline.width')} onreset={() => resetL('keyline.width')} onchange={(v) => setL({ keyline: { width: v } })} tip="Thickness of the keyline" />
+                <ColorField label="Colour" a11yLabel="Keyline" value={L.keyline.color} changed={lo('keyline.color')} onreset={() => resetL('keyline.color')} onchange={(v) => setL({ keyline: { color: v } })} />
               </div>
             {/if}
           </section>
@@ -371,7 +395,7 @@
   {#if eff && (app.inspectorTab === 'style' || app.inspectorTab === 'layout')}
     <div class="foot row">
       <button class="btn sm ghost" disabled={noOverrides} data-tip={noOverrides ? NO_CHANGES : "Keep this photo's style and layout as a new template"} data-tip-side="top" onclick={saveAsTemplate}>Save as template</button>
-      <button class="btn sm ghost" disabled={noOverrides} onclick={updateTemplate} data-tip-side="top" data-tip={noOverrides ? NO_CHANGES : base?.builtin ? 'Built-in templates are read-only, so this saves a new template instead.' : `Change “${base?.name}” for every photo that uses it`}>Update template</button>
+      <button class="btn sm ghost" disabled={noOverrides || !!base?.builtin} onclick={updateTemplate} data-tip-side="top" data-tip={base?.builtin ? `“${base.name}” is built in and can’t be changed. Use Save as template to keep these changes.` : noOverrides ? NO_CHANGES : `Change “${base?.name}” for every photo that uses it`}>Update template</button>
       <span class="grow"></span>
       <button class="btn sm ghost" disabled={noOverrides} data-tip-side="top" data-tip={noOverrides ? 'Nothing to reset: this photo uses the template as it is.' : "Undo all of this photo's style and layout changes"} onclick={() => { s.draft.overrides = {}; app.commit(s) }}>Reset all</button>
     </div>

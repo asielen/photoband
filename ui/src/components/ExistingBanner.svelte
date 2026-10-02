@@ -50,7 +50,7 @@
     <Icon name="warn" />
     <div class="grow"><b>The old caption wasn’t found.</b> This photo’s unsaved edits replace an old caption, but it couldn’t be found in this version of the file, so saving is blocked.</div>
     <button class="btn sm" data-tip="Look for the old caption in this file again" onclick={() => app.recheckExisting(s)}>Check again</button>
-    <button class="btn sm ghost" onclick={() => { tool = 'pan'; app.leaveExisting(s) }}>Add a new band instead</button>
+    <button class="btn sm ghost" data-tip="Drop the edits to the old caption and add a new band below the photo instead" onclick={() => { tool = 'pan'; app.leaveExisting(s) }}>Add a new band instead</button>
   </div>
 {:else if ex && ex.case && !dismissed}
   {#if ex.case === 'A'}
@@ -60,7 +60,7 @@
         <b>Captioned by Photoband.</b>
         {#if active}Editing the saved caption: saving replaces the band instead of adding a second one.{:else}This photo already has a Photoband band.{/if}
         {#if ex.source === 'marker+payload'}<span class="faint" data-tip="The file's metadata had been removed, so the caption was read back from data hidden in the band."> Restored from the band itself.</span>{/if}
-        {#if ex.lossyRecaption && active}<span class="faint" data-tip="JPEG files lose a little quality every time they are saved. TIFF and PNG don't."> JPEG: the photo is re-encoded on save.</span>{/if}
+        <!-- JPEG quality is explained above the photo (JpegNotice: it knows whether the original backup is used) -->
       </div>
       {#if active}
         <button class="btn sm" data-tip="Replace the saved caption text with the template's text" onclick={() => app.resetAllBlocks(s)}>Start from template</button>
@@ -95,7 +95,7 @@
           <button class="btn sm" class:on={tool === 'brush-add'} aria-pressed={tool === 'brush-add'} data-tip="Paint over marks that should be erased too" onclick={() => (tool = tool === 'brush-add' ? 'pan' : 'brush-add')}><Icon name="brush" size={14} /> Erase more</button>
           <button class="btn sm" class:on={tool === 'brush-remove'} aria-pressed={tool === 'brush-remove'} data-tip="Paint over areas that must not be erased" onclick={() => (tool = tool === 'brush-remove' ? 'pan' : 'brush-remove')}><Icon name="eraser" size={14} /> Keep</button>
         {/if}
-        <button class="btn sm ghost" data-tip="Leave the old caption as it is and add a new band instead" onclick={() => { tool = 'pan'; app.leaveExisting(s) }}>Cancel</button>
+        <button class="btn sm ghost" data-tip="Undo this choice and pick again. The old caption is left as it is." onclick={() => { tool = 'pan'; app.leaveExisting(s) }}>Cancel</button>
       {/if}
       </div>
     </div>
@@ -105,7 +105,7 @@
   {:else if ex.case === 'D'}
     <div class="banner warn row">
       <Icon name="warn" />
-      <div class="grow"><b>Text printed over the photo</b> <span class="faint">(outlined in orange in Before). It is flagged only and is never erased.</span></div>
+      <div class="grow"><b>Text printed over the photo?</b> <span class="faint">(outlined in orange in Before). A best-effort check: it can miss some text. It is flagged only and is never erased.</span></div>
       <button class="btn sm ghost" data-tip="Hide this note. The outline stays only in Before and is never saved." onclick={() => (s.existingIgnored = true)}>Dismiss</button>
     </div>
   {/if}
