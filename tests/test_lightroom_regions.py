@@ -178,7 +178,8 @@ def test_real_lightroom_numbers_land_on_the_faces():
                              for n, x, y, w, h in REAL_156]}}
     info = ImageInfo(path="x.tif", format="TIFF", width=REAL_STORED[0], height=REAL_STORED[1], channels=3,
                      dtype="uint8", mode="RGB", orientation=6)
-    assert region_frame_orientation(md, info) == 6
+    assert all(region_frame_orientation(md, info, r) == 6
+               for r in md["XMP-mwg-rs:RegionInfo"]["RegionList"])
     r = parse_regions(md, info)
     assert r["warnings"] == []
     Wu, Hu = info.upright_size
@@ -206,14 +207,35 @@ def test_upright_atd_from_other_tools_still_means_upright_boxes():
                      mode="RGB", orientation=6)
     assert region_frame_orientation(md, info) == 1
     assert parse_regions(md, info)["named"][0]["box"] == pytest.approx([0.475, 0.265, 0.05, 0.07])
+    region = md["XMP-mwg-rs:RegionInfo"]["RegionList"][0]
     # Lightroom's per-region Rotation marks its stored-frame boxes
-    md["XMP-mwg-rs:RegionInfo"]["RegionList"][0]["Rotation"] = 0
-    assert region_frame_orientation(md, info) == 6
-    del md["XMP-mwg-rs:RegionInfo"]["RegionList"][0]["Rotation"]
+    region["Rotation"] = 0
+    assert region_frame_orientation(md, info, region) == 6
+    del region["Rotation"]
     # a Lightroom CreatorTool alone is no evidence about the regions: another editor may have
     # rewritten them (upright, as AppliedToDimensions says) and kept the file-level tag
     md["XMP-xmp:CreatorTool"] = "Adobe Photoshop Lightroom Classic 14.5.1 (Windows)"
-    assert region_frame_orientation(md, info) == 1
+    assert region_frame_orientation(md, info, region) == 1
+
+
+def test_frame_is_decided_per_region_in_a_mixed_list():
+    # an older Lightroom face (stored frame, Rotation) next to faces another editor added later
+    # in the upright frame (no Rotation): each keeps its own frame
+    lr = {"Area": {"X": .5, "Y": .3, "W": .05, "H": .07}, "Name": "Old", "Type": "Face", "Rotation": 3.14159}
+    new = {"Area": {"X": .5, "Y": .3, "W": .05, "H": .07}, "Name": "New", "Type": "Face"}
+    md = {"XMP-mwg-rs:RegionInfo": {"AppliedToDimensions": {"W": 4226, "H": 2898, "Unit": "pixel"},
+                                    "RegionList": [lr, new]}}
+    info = ImageInfo(path="x.tif", format="TIFF", width=2898, height=4226, channels=3, dtype="uint8",
+                     mode="RGB", orientation=6)
+    assert region_frame_orientation(md, info, lr) == 6
+    assert region_frame_orientation(md, info, new) == 1
+    boxes = {f["name"]: f["box"] for f in parse_regions(md, info)["named"]}
+    assert boxes["New"] == pytest.approx([0.475, 0.265, 0.05, 0.07])      # upright, untouched
+    assert boxes["Old"] != pytest.approx(boxes["New"])                     # rotated from the stored frame
+    # a non-face region with Rotation changes nothing for the faces
+    other = {"Area": {"X": .2, "Y": .2, "W": .1, "H": .1}, "Name": "Pet", "Type": "Pet", "Rotation": 0}
+    md["XMP-mwg-rs:RegionInfo"]["RegionList"] = [other, new]
+    assert [f["box"] for f in parse_regions(md, info)["named"]] == [pytest.approx([0.475, 0.265, 0.05, 0.07])]
 
 
 # --------------------------------------------------------------------------

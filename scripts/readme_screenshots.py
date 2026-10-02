@@ -106,9 +106,23 @@ def main() -> int:
                 pg.close()
             browser.close()
     finally:
+        # the server must be gone before its folders are removed (it may hold the photo open);
+        # a folder that still can't be removed is reported, never left behind silently
         proc.terminate()
-        shutil.rmtree(home, ignore_errors=True)
-        shutil.rmtree(os.path.dirname(work), ignore_errors=True)
+        try:
+            proc.wait(15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(15)
+        for d in (home, os.path.dirname(work)):
+            for _ in range(10):
+                shutil.rmtree(d, ignore_errors=True)
+                if not os.path.exists(d):
+                    break
+                time.sleep(0.5)
+            else:
+                print(f"WARNING: could not remove {d} (it holds a copy of the photo); delete it by hand",
+                      file=sys.stderr)
     return 0
 
 
