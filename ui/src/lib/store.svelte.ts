@@ -1329,8 +1329,12 @@ class AppStore {
       }
     }
     if (s.cleanSnap) return strip(this.snap(s)) === strip(s.cleanSnap)
+    // no clean state to compare with (opened from a draft): only a caption no one has touched in
+    // any way counts as unedited (the default template, no text, style, rows or photo-edge choices)
     const d = s.draft
-    return !Object.values(d.blocks || {}).some((b) => b.custom) && !this.hasOverrides(s) && !d.faceRows
+    return d.templateId === this.defaultTemplateId() && !Object.values(d.blocks || {}).some((b) => b.custom) &&
+      !this.hasOverrides(s) && !d.faceRows && (d.mode ?? 'band') === 'band' && !d.sourceRect && !d.photoRect &&
+      !d.existingChoice && !d.keepBand && !d.brushAdd && !d.brushRemove
   }
 
   /** A detail as `meta` (a version of the file) has it, in the shape an edit of it takes. */
@@ -1340,7 +1344,9 @@ class AppStore {
     if (k === 'keywords') return ((f.keywords as string[]) || []).filter((x) => !isDateMarker(x))
     if (k === 'date') {
       const d = dateState(f)
-      return d.kind === 'date' ? { iso: d.iso, level: d.level } : null
+      // a date in words ("Summer 1952") is no edit the date editor can make: undefined, not
+      // "no date" (the caller says it could not be put back)
+      return d.kind === 'date' ? { iso: d.iso, level: d.level } : d.kind === 'none' ? null : undefined
     }
     return String(f[k] ?? '')
   }
@@ -1382,8 +1388,14 @@ class AppStore {
       s.meta = { ...res.meta, draft: null } as PhotoMeta
       // details changed while the file was written stay edits (face edits can't: the file's faces
       // were just renumbered)
-      const since = editsSince(s.draft.meta, JSON.parse(sent), (k) => this.detailOf(beforeMeta, k))
+      const lost: string[] = []
+      const since = editsSince(s.draft.meta, JSON.parse(sent), (k) => {
+        const v = this.detailOf(beforeMeta, k)
+        if (v === undefined && k !== 'faces') lost.push(k === 'date' ? `the date “${beforeMeta?.fields?.date}”` : k)
+        return v
+      })
       s.draft = { ...s.draft, meta: this.withoutNoOps(s, since.meta) }
+      if (lost.length) this.toast('warn', `Reset while saving, but ${lost.join(', ')} can’t be written back by Photoband; the photo keeps what was saved.`, undefined, 10000, s.meta.name)
       if (since.droppedFaces) this.toast('warn', 'Face changes made while saving were not kept. Check the faces again.', undefined, 8000, s.meta.name)
       const strip = (snap: string) => {
         try {
@@ -1545,7 +1557,13 @@ class AppStore {
             // only the text and style carry over; the photo edge comes from the new file's analysis
             const nd = JSON.parse(newer) as PhotoDraft
             // (details edited during the save are not in the file: they carry over too)
-            const since = editsSince(nd.meta, (JSON.parse(snap) as PhotoDraft).meta, (k) => this.detailOf(s.meta, k))
+            const lostDate = { v: false }
+            const since = editsSince(nd.meta, (JSON.parse(snap) as PhotoDraft).meta, (k) => {
+              const v = this.detailOf(s.meta, k)
+              if (v === undefined && k === 'date') lostDate.v = true
+              return v
+            })
+            if (lostDate.v) this.toast('warn', `The date was reset while saving, but “${s.meta?.fields?.date}” can’t be written back by Photoband; the photo keeps the date that was saved.`, undefined, 10000)
             if (since.droppedFaces) this.toast('warn', 'Face changes made while saving were not kept. Check the faces again.', undefined, 8000)
             fresh.draft = { ...fresh.draft, templateId: this.template(nd.templateId) ? nd.templateId : fresh.draft.templateId, overrides: nd.overrides, blocks: nd.blocks, faceRows: nd.faceRows ?? null, meta: this.withoutNoOps(fresh, since.meta) }
             await this.resolveAll(fresh)

@@ -653,3 +653,35 @@ def test_only_a_backup_of_this_photo_counts_as_kept(tmp_path):
     assert os.path.exists(other)
     r2 = _details(p, {"title": "Two"}, backupOriginals=True)          # now a real backup exists
     assert not r2.backup_path
+
+
+# -- Codex review, round 3 ---------------------------------------------------------------
+
+def test_a_semicolon_inside_a_creators_name_is_kept(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-XMP-dc:Creator=ACME; Inc.", "-XMP-dc:Creator=Jane")
+    f = _fields(p)
+    assert f["creator"] == "ACME; Inc., Jane"
+    _details(p, {"creator": "ACME; Inc., Jane, Bo"})
+    assert _md(p)["XMP-dc:Creator"] == ["ACME; Inc.", "Jane", "Bo"]
+
+
+def test_a_capitalisation_only_rename_reaches_person_in_image_and_the_hierarchy(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _regions(p, [{"Type": "Face", "Name": "ann", "Area": _area(0.2, 0.3, 0.1, 0.1)}], 300, 200,
+             {"XMP-iptcExt:PersonInImage": ["ann"], "XMP-dc:Subject": ["ann"], "XMP-lr:HierarchicalSubject": ["People|ann"]})
+    key = _fields(p)["faces"][0]["key"]
+    _details(p, {"faces": {key: {"name": "Ann"}}, "keywords": ["Ann"]})
+    md = _md(p)
+    assert L(md["XMP-iptcExt:PersonInImage"]) == ["Ann"]
+    assert L(md["XMP-lr:HierarchicalSubject"]) == ["People|Ann"]
+
+
+def test_a_placeholder_date_does_not_hide_the_cameras_time(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-n", "-ExifIFD:DateTimeOriginal=0000:00:00 00:00:00", "-XMP-exif:DateTimeOriginal=2017:04:05 17:01:07")
+    assert _md(p)["ExifIFD:DateTimeOriginal"].startswith("0000")
+    _details(p, {"date": {"iso": "2017-04-05", "level": "day"}})
+    md = _md(p)
+    assert str(md["XMP-exif:DateTimeOriginal"]).startswith("2017:04:05 17:01:07")
+    assert md["ExifIFD:DateTimeOriginal"].startswith("2017:04:05 17:01:07")

@@ -25,6 +25,7 @@ function resetServer() {
     fields: {} as any,
     saveOut: null as string | null,
     details: [] as any[],
+    detailsDelay: 0,
     realLayout: false,
     posts: [] as { path: string; body: any }[],
   })
@@ -56,6 +57,7 @@ vi.mock('../lib/api', () => {
       if (p === '/api/settings') return settings()
       if (p === '/api/photo/details') {
         server.details.push(b)
+        if (server.detailsDelay) await new Promise((r) => setTimeout(r, server.detailsDelay))
         server.fields = { ...server.fields, ...b.edits }
         server.stat = [2, '9', 'h2']
         return { ok: true, path: b.path, out_path: b.path, backup_path: '', meta: meta(b.path), notes: [] }
@@ -570,5 +572,32 @@ describe('edited photo details', () => {
     expect(r.stale).toBe(false)
     expect(r.draft.mode).toBe('band')
     expect(r.draft.meta).toEqual({ title: 'T' })
+  })
+
+  it('opened from a draft: a caption change made since is kept when the details are saved', async () => {
+    server.drafts['/p/a.tif'] = { templateId: 'tpl', overrides: {}, blocks: {}, mode: 'band', sourceRect: null, photoRect: null,
+      meta: { title: 'Kept' }, _stat: [1, '1', 'h'] }
+    const { app, s } = await open()
+    await app.setTemplate(s, 'tpl2')
+    expect(await app.saveDetails(s)).toBe(true)
+    expect(s.dirty).toBe(true)
+    const d = server.drafts['/p/a.tif']
+    expect(d.templateId).toBe('tpl2')
+    expect(d.meta).toBeUndefined()
+  })
+
+  it('a date in words reset while saving is not turned into "no date"', async () => {
+    server.fields = { date: 'Summer 1952' }
+    const { app, s } = await open()
+    app.setDate(s, { iso: '1952-07-04', level: 'day' })
+    const { post } = await import('../lib/api')
+    server.detailsDelay = 50
+    const p = app.saveDetails(s)
+    await sleep(20)
+    app.setDate(s, undefined)                       // reset while the save runs
+    expect(await p).toBe(true)
+    expect(s.draft.meta?.date).toBeUndefined()      // never { date: null }
+    expect(app.toasts.some((t: any) => /can’t be written back/.test(t.text))).toBe(true)
+    void post
   })
 })

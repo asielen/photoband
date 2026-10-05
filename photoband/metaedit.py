@@ -385,15 +385,19 @@ class _Writer:
             self.notes.append(f"{key.split(':')[1]} removed from IPTC (it can't hold this text); XMP keeps it")
 
 
+def creator_separator(entries: List[Any]) -> str:
+    """How the reader joins a list of photographers: ", ", or "; " when a name holds a comma
+    ("Smith, John"). The writer splits an edited value on the very same separator."""
+    return "; " if any("," in str(x) for x in entries) else ", "
+
+
 def _creators(t: Dict[str, Any], value: str) -> List[str]:
-    """Several photographers: a file that lists them separately keeps them separate. The reader
-    shows them joined with ", ", or with "; " when a name holds a comma ("Smith, John"), and the
-    value is split the same way."""
-    if "; " in value:
-        return [x.strip() for x in value.split("; ") if x.strip()]
+    """Several photographers: a file that lists them separately keeps them separate, split on the
+    separator the reader put between them (never another one: "ACME; Inc." is one name in a list
+    joined with ", "). A single photographer stays one value, whatever it holds."""
     cur = t.get("XMP-dc:Creator", t.get("IPTC:By-line"))
     if isinstance(cur, list) and len(cur) > 1:
-        return [x.strip() for x in value.split(", ") if x.strip()]
+        return [x.strip() for x in value.split(creator_separator(cur)) if x.strip()]
     return [value]
 
 
@@ -442,7 +446,7 @@ def face_renames(fields: Dict[str, Any], faces_edit: Dict[str, Dict[str, Any]]) 
     for k, e in faces_edit.items():
         f = base.get(k)
         old = ((f or {}).get("name") or "").strip()
-        if f and "name" in e and not e.get("deleted") and old and e["name"] and e["name"].lower() != old.lower():
+        if f and "name" in e and not e.get("deleted") and old and e["name"] and e["name"] != old:
             out[old.lower()] = e["name"]
     return out
 
@@ -472,8 +476,8 @@ def _keyword_updates(w: _Writer, kws: List[str], fields: Dict[str, Any], renames
         for h in items:
             path = str(h).split("|")
             leaf = path[-1].strip().lower()
-            if leaf in gone and renames and leaf in renames and renames[leaf].lower() in keep:
-                # a renamed person: same place in the hierarchy, new name
+            if renames and leaf in renames and renames[leaf].lower() in keep and (leaf in gone or leaf == renames[leaf].lower()):
+                # a renamed person (or the same name, newly capitalised): same place, new name
                 new.append("|".join(path[:-1] + [renames[leaf]]))
             elif leaf not in gone:
                 new.append(h)
@@ -499,15 +503,15 @@ def _date_updates(w: _Writer, d: Optional[Dict[str, str]]) -> None:
     cur = None
     if level == "day":
         # the same day as the file says (a camera's own date): its time of day stays
-        cur = next((t[k] for k in DATE_TAGS_ORIGINAL if t.get(k) not in (None, "")), None)
-        pd = parse_date(str(cur)) if cur is not None else None
-        keep_time = pd is not None and (pd.year, pd.month, pd.day) == (y, m, dd)
+        cur = next((t[k] for k in DATE_TAGS_ORIGINAL if _same_day(t.get(k), (y, m, dd))), None)
+        keep_time = cur is not None
     if keep_time:
         # the camera's own date and time stay; the copies of the date in other standards that
-        # disagree are brought to that same moment
+        # disagree (or hold a placeholder) are brought to that same moment
         same = str(cur)
-        if "XMP-exif:DateTimeOriginal" in t and not _same_day(t["XMP-exif:DateTimeOriginal"], (y, m, dd)):
-            w.set("XMP-exif:DateTimeOriginal", same)
+        for k in DATE_TAGS_ORIGINAL:
+            if k in t and not _same_day(t[k], (y, m, dd)) and (k != "ExifIFD:DateTimeOriginal" or w.has_exif):
+                w.set(k, same)
         if "IPTC:DateCreated" in t and not _same_day(t["IPTC:DateCreated"], (y, m, dd)):
             w.set("IPTC:DateCreated", f"{y:04d}:{m:02d}:{dd:02d}")
     else:
@@ -689,7 +693,11 @@ def region_updates(md: Dict[str, Any], info: ImageInfo, fields: Dict[str, Any],
         names = [n for i, n in enumerate(pii) if i not in drop_pii]
         final = {(x or "").lower() for x in _final_names(base, faces_edit)}
         for old, new in pii_renames:
-            if old and old.lower() not in final:
+            hit = [i for i, n in enumerate(names) if old and n.lower() == old.lower()]
+            if hit and new and new.lower() == old.lower():
+                names[hit[0]] = new                 # only the capitalisation changes
+                continue
+            if hit and old.lower() not in final:
                 names = [n for n in names if n.lower() != old.lower()]
             if new and new.lower() not in {n.lower() for n in names}:
                 names.append(new)

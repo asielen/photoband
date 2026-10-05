@@ -74,9 +74,10 @@
     const [bx, by, bw, bh] = drag.start
     let b: Box
     if (drag.kind === 'new') {
-      b = [Math.min(drag.px, x), Math.min(drag.py, y), Math.abs(dx), Math.abs(dy)]
-      b = [Math.max(0, b[0]), Math.max(0, b[1]), Math.min(b[2], 1 - Math.max(0, b[0])), Math.min(b[3], 1 - Math.max(0, b[1]))]
-      live = { key: '__new', box: b }
+      // both corners on the photo: a drag that leaves it ends the box at the edge it crossed
+      const ex = Math.min(1, Math.max(0, x))
+      const ey = Math.min(1, Math.max(0, y))
+      live = { key: '__new', box: [Math.min(drag.px, ex), Math.min(drag.py, ey), Math.abs(ex - drag.px), Math.abs(ey - drag.py)] }
       return
     }
     if (drag.kind === 'move') b = [bx + dx, by + dy, bw, bh]

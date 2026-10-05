@@ -12,7 +12,8 @@
 
   const MAX = 500
   function add(raw: string) {
-    const parts = splitKeywords(cleanText(raw, true)).map((k) => k.slice(0, 200))
+    // 200 characters, counted as the backend counts them (an emoji is one, never cut in half)
+    const parts = splitKeywords(cleanText(raw, true)).map((k) => Array.from(k).slice(0, 200).join(''))
     if (parts.length) {
       const next = addKeywords(list, parts)
       if (next.length > MAX) app.toast('warn', `A photo can have at most ${MAX} keywords.`)
