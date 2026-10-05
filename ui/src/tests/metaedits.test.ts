@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { addKeywords, dateState, editCount, effectiveFaces, isMarkerKeyword, isoFor, peopleKeywords, splitKeywords, suggestNames } from '../lib/metaedits'
+import { addKeywords, cleanText, dateState, detailProblem, editCount, editsSince, effectiveFaces, isDateMarker, isMarkerKeyword, isoFor, peopleKeywords, rematchFaces, splitKeywords, suggestNames } from '../lib/metaedits'
 
 describe('date editor state', () => {
   it('takes the level from photokin’s certainty keyword, else from how much is written', () => {
@@ -40,10 +40,12 @@ describe('keywords', () => {
     for (const k of ['Backyard', 'family']) expect(isMarkerKeyword(k)).toBe(false)
   })
   it('people keywords follow renames only in files that list people as keywords', () => {
-    expect(peopleKeywords(['Ann', 'picnic'], ['Ann'], ['Anne'], 'Ann', 'Anne')).toEqual(['picnic', 'Anne'])
-    expect(peopleKeywords(['picnic'], ['Ann'], ['Anne'], 'Ann', 'Anne')).toBeNull()
+    expect(peopleKeywords(['Ann', 'picnic'], true, ['Anne'], 'Ann', 'Anne', true)).toEqual(['picnic', 'Anne'])
+    expect(peopleKeywords(['picnic'], false, ['Anne'], 'Ann', 'Anne', true)).toBeNull()
     // another face is still Ann: her keyword stays
-    expect(peopleKeywords(['Ann', 'Bob'], ['Ann', 'Ann', 'Bob'], ['Ann', 'Anne', 'Bob'], 'Ann', 'Anne')).toEqual(['Ann', 'Bob', 'Anne'])
+    expect(peopleKeywords(['Ann', 'Bob'], true, ['Ann', 'Anne', 'Bob'], 'Ann', 'Anne', true)).toEqual(['Ann', 'Bob', 'Anne'])
+    // a keyword the file had on its own is never taken away
+    expect(peopleKeywords(['Ann', 'Bob'], true, ['Bob'], 'Ann', '', false)).toBeNull()
   })
 })
 
@@ -69,5 +71,40 @@ describe('name suggestions', () => {
     expect(suggestNames('an', pools)).toEqual(['Ann Smith', 'Annabel Lee', 'Dan Annis'])
     expect(suggestNames('jon', pools)).toEqual(['Bob Jones'])
     expect(suggestNames('Ann Smith', pools)).toEqual([])
+  })
+})
+
+describe('review regressions', () => {
+  it('only whole numbers make a date', () => {
+    expect(isoFor('year', 1952.5, null, null)).toBeNull()
+    expect(isoFor('day', 1952, 6, 1.5)).toBeNull()
+  })
+  it('only well-formed markers are photokin’s', () => {
+    expect(isDateMarker('DATE: Y!M~')).toBe(true)
+    expect(isDateMarker('Date: ask Ann')).toBe(false)
+    expect(isMarkerKeyword('Date: ask Ann')).toBe(false)
+  })
+  it('text is cleaned as the backend stores it', () => {
+    expect(cleanText('a\u000bb\u2028c\u0000', true)).toBe('a\nb\nc')
+    expect(cleanText('a\nb\r\nc', false)).toBe('a b c')
+    expect(cleanText('x\ud800y', false)).toBe('xy')
+    expect(detailProblem('base64:abc')).not.toBe('')
+  })
+  it('edits made while saving are kept per detail; face edits are not', () => {
+    const sent = { title: 'A', faces: { 'mwg:0': { name: 'Ann' } } }
+    expect(editsSince({ title: 'A', city: 'Paris', faces: { 'mwg:0': { name: 'Ann' } } }, sent)).toEqual({ meta: { city: 'Paris' }, droppedFaces: false })
+    expect(editsSince({ title: 'B', faces: { 'mwg:0': { name: 'Anne' } } }, sent)).toEqual({ meta: { title: 'B' }, droppedFaces: true })
+    expect(editsSince(sent, sent)).toEqual({ meta: undefined, droppedFaces: false })
+  })
+  it('a stale face edit goes to the same face, not just the same key; a written new face is not added again', () => {
+    const meta: any = { faces: { named: [{ name: 'Ann', box: [0.5, 0.5, 0.1, 0.1], source: 'MWG', key: 'mwg:0' }],
+      unnamed: [{ name: '', box: [0.8, 0.1, 0.1, 0.1], source: 'MWG', key: 'mwg:1' }] } }
+    const r = rematchFaces({
+      'mwg:1': { name: 'Bob', was: { name: '', box: [0.1, 0.1, 0.1, 0.1] } },        // that face moved elsewhere: gone
+      'new:a': { name: 'Ann', box: [0.5, 0.5, 0.1, 0.1] },                            // already in the file
+      'new:b': { name: 'Cy', box: [0.2, 0.7, 0.1, 0.1] },
+    }, meta)
+    expect(Object.keys(r.faces)).toEqual(['new:b'])
+    expect(r.dropped).toBe(2)
   })
 })

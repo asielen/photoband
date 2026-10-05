@@ -8,8 +8,8 @@ import { ensureFonts, loadRegistry, resolveFont } from './fonts'
 import { clearMeasureCache, computeLayout, deepAssign, effectiveTemplate } from './layout'
 import { plainText } from './markup'
 import {
-  addKeywords, effectiveFaces, hasEdits, isDateMarker, newFaceKey, peopleKeywords, rematchFaces, rememberName,
-  type Box, type DateEdit, type FaceEdit, type MetaEdits, type TextField,
+  addKeywords, cleanText, editsSince, effectiveFaces, hasEdits, isDateMarker, newFaceKey, peopleKeywords, rematchFaces,
+  rememberName, type Box, type DateEdit, type FaceEdit, type MetaEdits, type TextField,
 } from './metaedits'
 import { loadFlag, saveFlag } from './prefs'
 import { renderTextTiles } from './render'
@@ -114,7 +114,11 @@ type Geometry = Pick<PhotoDraft, 'mode' | 'sourceRect' | 'photoRect' | 'existing
 
 /** Same version of the file? (size and modification time, as the backend's stat) */
 export function sameFile(a: PhotoMeta['stat'] | null | undefined, b: PhotoMeta['stat'] | null | undefined): boolean {
-  return !!a && !!b && String(a[0]) === String(b[0]) && String(a[1]) === String(b[1])
+  if (!a || !b || String(a[0]) !== String(b[0]) || String(a[1]) !== String(b[1])) return false
+  // a same-size replacement whose modified time was kept is another file id (when both know it)
+  const ia = a[3]
+  const ib = b[3]
+  return !ia || !ib || String(ia) === String(ib)
 }
 
 /** A stored draft as the editor (and a batch using drafts) may use it for this version of the file.
@@ -459,6 +463,22 @@ class AppStore {
       else delete m.faces
       s.draft = { ...s.draft, meta: m }
       if (r.dropped) this.toast('warn', `${r.dropped} face edit${r.dropped > 1 ? 's were' : ' was'} dropped: the faces changed in the file.`, undefined, 8000, s.meta.name)
+      // undo and redo steps name faces by the same keys: move them onto this version's faces too
+      const meta = s.meta
+      const fix = (snap: string) => {
+        try {
+          const d = JSON.parse(snap) as PhotoDraft
+          if (!d.meta?.faces) return snap
+          const f = rematchFaces(d.meta.faces, meta).faces
+          d.meta = { ...d.meta, faces: f }
+          if (!Object.keys(f).length) delete d.meta.faces
+          return JSON.stringify(d)
+        } catch {
+          return snap
+        }
+      }
+      s.undoStack = s.undoStack.map(fix)
+      s.redoStack = s.redoStack.map(fix)
     }
     this.rebaseHistory(s, BAND_GEOMETRY)
     s.lastSnap = this.snap(s)
@@ -625,7 +645,8 @@ class AppStore {
     }
     const tplChanged = tid !== s.draft.templateId
     // edited details stay; the row count is the one saved with the caption unless one was chosen here
-    const faceRows = s.draft.faceRows ?? st?.faceRows ?? null
+    const faceRows = 'faceRows' in s.draft ? s.draft.faceRows ?? null : st?.faceRows ?? null
+    const rowsChanged = (faceRows ?? null) !== (s.draft.faceRows ?? null)
     s.draft = { templateId: tid!, overrides, blocks, ...geom, ...keepDetails(s.draft), faceRows }
     if (auto) {
       // the base state: earlier history steps get this geometry too, so undo never goes back
@@ -639,11 +660,11 @@ class AppStore {
       s.snapTimer = null
       s.lastSnap = this.snap(s)
       if (!s.dirty) s.cleanSnap = s.lastSnap
-      if (tplChanged) await this.resolveAll(s)
+      if (tplChanged || rowsChanged) await this.resolveAll(s)
       this.relayout(s)
       if (s.dirty) this.scheduleDraft(s)
     } else {
-      if (tplChanged) await this.resolveAll(s)
+      if (tplChanged || rowsChanged) await this.resolveAll(s)
       this.commit(s)
     }
   }
@@ -770,8 +791,20 @@ class AppStore {
   private scheduleResolve(s: PhotoSession) {
     clearTimeout(s.resolveTimer)
     s.resolveTimer = setTimeout(async () => {
-      if (await this.resolveAll(s)) this.relayout(s)
+      try {
+        if (await this.resolveAll(s)) this.relayout(s)
+      } catch (e: any) {
+        this.resolveFailed(e)
+      }
     }, 120)
+  }
+
+  private resolveFailedMsg = ''
+  private resolveFailed(e: any) {
+    const msg = `The caption couldn’t be updated: ${e instanceof ApiError ? e.message : e?.message || e}`
+    if (msg !== this.resolveFailedMsg) this.toast('error', msg)
+    this.resolveFailedMsg = msg
+    setTimeout(() => { if (this.resolveFailedMsg === msg) this.resolveFailedMsg = '' }, 5000)
   }
 
   /** Waits until `resolved` belongs to the current template (saving needs the right text). */
@@ -780,6 +813,9 @@ class AppStore {
       if (!this.template(s.draft.templateId) || !s.meta) return
       await this.resolveAll(s)
     }
+    // never save caption text made from older details than the ones being saved
+    if (this.template(s.draft.templateId) && s.meta && s.resolvedFor !== this.resolveKey(s))
+      throw new Error('The caption is still being updated. Try again in a moment.')
   }
 
   blockText(s: PhotoSession, id: string): string {
@@ -984,7 +1020,11 @@ class AppStore {
     s.dirty = true
     this.setStatus(s.path, 'draft')
     this.scheduleDraft(s)
-    await this.resolveAll(s)
+    try {
+      await this.resolveAll(s)
+    } catch (e: any) {
+      this.resolveFailed(e)
+    }
     this.relayout(s)
   }
 
@@ -1129,6 +1169,7 @@ class AppStore {
   /** Edit a text detail; typing the file's own value back is no edit. (Compared exactly, not trimmed:
    *  a space typed between two words must not be taken back while typing.) */
   setDetail(s: PhotoSession, key: TextField, value: string) {
+    value = cleanText(value, key === 'caption' || key === 'notes')
     if (value === this.fileDetail(s, key)) this.setMeta(s, {}, [key])
     else this.setMeta(s, { [key]: value })
   }
@@ -1207,9 +1248,23 @@ class AppStore {
     if (patch.name !== undefined && patch.name.trim() !== cur.name) {
       if (patch.name.trim()) rememberName(patch.name)
       const after = [...before.named.filter((f) => f.key !== key).map((f) => f.name), patch.name.trim()].filter(Boolean)
-      kws = peopleKeywords(this.keywords(s), before.named.map((f) => f.name), after, cur.name, patch.name.trim())
+      kws = peopleKeywords(this.keywords(s), this.peopleAsKeywords(s), after, cur.name, patch.name.trim(), this.removableName(s, cur.name, base))
     }
     this.putFaces(s, faces, boundary, kws)
+  }
+
+  /** Does the file list its tagged people as keywords too (as Lightroom does)? Decided from the
+   *  file's own faces and keywords, never from edits. */
+  private peopleAsKeywords(s: PhotoSession): boolean {
+    const kws = new Set(this.fileKeywords(s).map((k) => k.toLowerCase()))
+    return (s.meta?.faces?.named || []).some((f) => f.name && kws.has(f.name.toLowerCase()))
+  }
+
+  /** May a name's keyword go when the name leaves the faces? Only when it was there because of
+   *  this face (the file's name for it) or was added by these edits, never a keyword of its own. */
+  private removableName(s: PhotoSession, name: string, base: Face | undefined): boolean {
+    const own = this.fileKeywords(s).some((k) => k.toLowerCase() === name.toLowerCase())
+    return !own || (!!base && base.name.toLowerCase() === name.toLowerCase())
   }
 
   deleteFace(s: PhotoSession, key: string) {
@@ -1223,7 +1278,8 @@ class AppStore {
       faces[key] = { was: { name: base?.name ?? cur.name, box: (base?.box ?? cur.box) as Box | null }, deleted: true }
     }
     const after = before.named.filter((f) => f.key !== key).map((f) => f.name)
-    const kws = cur.name ? peopleKeywords(this.keywords(s), before.named.map((f) => f.name), after, cur.name, '') : null
+    const fileFace = [...(s.meta?.faces.named || []), ...(s.meta?.faces.unnamed || [])].find((f) => f.key === key)
+    const kws = cur.name ? peopleKeywords(this.keywords(s), this.peopleAsKeywords(s), after, cur.name, '', this.removableName(s, cur.name, fileFace)) : null
     if (this.selectedFace === key) this.selectedFace = null
     this.putFaces(s, faces, true, kws)
   }
@@ -1238,14 +1294,42 @@ class AppStore {
       rememberName(name)
       const before = this.faces(s)
       const names = before.named.map((f) => f.name)
-      kws = peopleKeywords(this.keywords(s), names, [...names, name.trim()], '', name.trim())
+      kws = peopleKeywords(this.keywords(s), this.peopleAsKeywords(s), [...names, name.trim()], '', name.trim(), false)
     }
     this.putFaces(s, faces, true, kws)
     return key
   }
 
+  /** A detail or face name still being typed is committed (its field loses focus) before a save
+   *  takes its snapshot. */
+  async commitTyping() {
+    if (typeof document === 'undefined') return
+    const el = document.activeElement as HTMLElement | null
+    if (el && el !== document.body && el.closest?.('.details, .faces-layer') && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) {
+      el.blur()
+      await sleep(0)
+    }
+  }
+
+  /** Is the caption part of the draft untouched (only details were edited)? */
+  private captionUnedited(s: PhotoSession): boolean {
+    const strip = (snap: string) => {
+      try {
+        const d = JSON.parse(snap)
+        delete d.meta
+        return JSON.stringify(d)
+      } catch {
+        return snap
+      }
+    }
+    if (s.cleanSnap) return strip(this.snap(s)) === strip(s.cleanSnap)
+    const d = s.draft
+    return !Object.values(d.blocks || {}).some((b) => b.custom) && !this.hasOverrides(s) && !d.faceRows
+  }
+
   /** Write the edited details into the photo itself (nothing else changes). */
   async saveDetails(s: PhotoSession): Promise<boolean> {
+    await this.commitTyping()
     const edits = s.draft.meta
     if (!s.meta || !hasEdits(edits)) return false
     if (this.batchReview) {
@@ -1267,8 +1351,11 @@ class AppStore {
       }
       // the file has them now: the same pixels, so the caption geometry and analysis stay
       s.meta = { ...res.meta, draft: null } as PhotoMeta
-      const typed = JSON.stringify(s.draft.meta) !== sent ? s.draft.meta : undefined
-      s.draft = { ...s.draft, meta: typed && !typed.faces ? typed : undefined }
+      // details changed while the file was written stay edits (face edits can't: the file's faces
+      // were just renumbered)
+      const since = editsSince(s.draft.meta, JSON.parse(sent))
+      s.draft = { ...s.draft, meta: since.meta }
+      if (since.droppedFaces) this.toast('warn', 'Face changes made while saving were not kept. Check the faces again.', undefined, 8000, s.meta.name)
       const strip = (snap: string) => {
         try {
           const d = JSON.parse(snap)
@@ -1285,12 +1372,16 @@ class AppStore {
       this.selectedFace = null
       await this.resolveAll(s)
       this.relayout(s)
-      if (s.cleanSnap && this.snap(s) === s.cleanSnap) {
-        // the details were all there was: nothing is left unsaved
+      if (!hasEdits(s.draft.meta) && this.captionUnedited(s)) {
+        // the details were all there was: nothing is left unsaved, and no draft either (one may
+        // remain from a saved copy, made for the file as it was)
         s.dirty = false
         this.setStatus(s.path, 'saved')
         post('/api/drafts', { path: s.path, state: null }).catch(() => {})
-      } else if (s.dirty) this.flushDraft(s)
+      } else {
+        s.dirty = true
+        this.flushDraft(s)
+      }
       const extra = res.backup_path ? ' (original backed up first)' : ''
       this.toast('success', `Saved the details into the photo${extra}.`, undefined, 4000, s.meta.name)
       return true
@@ -1362,6 +1453,7 @@ class AppStore {
   }
 
   async save(s: PhotoSession, mode: 'copy' | 'overwrite' | 'copyAs', opts: { destPath?: string; onExists?: string; embedMarker?: boolean } = {}): Promise<SaveResult | null> {
+    await this.commitTyping()
     // the existing-caption check decides where the photo is: never save before it has finished
     if (s.existingLoading) await this.existingReady(s)
     const why = this.canSave(s)
@@ -1424,8 +1516,9 @@ class AppStore {
             // only the text and style carry over; the photo edge comes from the new file's analysis
             const nd = JSON.parse(newer) as PhotoDraft
             // (details edited during the save are not in the file: they carry over too)
-            const typedMeta = JSON.stringify(nd.meta ?? null) !== JSON.stringify(JSON.parse(snap).meta ?? null) ? nd.meta : undefined
-            fresh.draft = { ...fresh.draft, templateId: this.template(nd.templateId) ? nd.templateId : fresh.draft.templateId, overrides: nd.overrides, blocks: nd.blocks, faceRows: nd.faceRows ?? null, meta: typedMeta && !typedMeta.faces ? typedMeta : undefined }
+            const since = editsSince(nd.meta, (JSON.parse(snap) as PhotoDraft).meta)
+            if (since.droppedFaces) this.toast('warn', 'Face changes made while saving were not kept. Check the faces again.', undefined, 8000)
+            fresh.draft = { ...fresh.draft, templateId: this.template(nd.templateId) ? nd.templateId : fresh.draft.templateId, overrides: nd.overrides, blocks: nd.blocks, faceRows: nd.faceRows ?? null, meta: since.meta }
             await this.resolveAll(fresh)
             this.commit(fresh)
           } else {

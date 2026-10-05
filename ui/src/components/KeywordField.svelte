@@ -2,7 +2,7 @@
   // Keywords as chips: type and press Enter or a comma to add, Backspace on an empty field removes
   // the last one, pasting a list splits it. photokin's markers show apart (they are kept, not printed).
   import { app, type PhotoSession } from '../lib/store.svelte'
-  import { addKeywords, isMarkerKeyword, splitKeywords } from '../lib/metaedits'
+  import { addKeywords, cleanText, isMarkerKeyword, splitKeywords } from '../lib/metaedits'
 
   let { s }: { s: PhotoSession } = $props()
 
@@ -10,9 +10,14 @@
   let text = $state('')
   let input: HTMLInputElement
 
+  const MAX = 500
   function add(raw: string) {
-    const parts = splitKeywords(raw)
-    if (parts.length) app.setKeywords(s, addKeywords(list, parts))
+    const parts = splitKeywords(cleanText(raw, true)).map((k) => k.slice(0, 200))
+    if (parts.length) {
+      const next = addKeywords(list, parts)
+      if (next.length > MAX) app.toast('warn', `A photo can have at most ${MAX} keywords.`)
+      app.setKeywords(s, next.slice(0, MAX))
+    }
     text = ''
   }
   function remove(k: string) {
@@ -20,6 +25,7 @@
     input?.focus()
   }
   function key(e: KeyboardEvent) {
+    if (e.isComposing) return   // an input method is still composing
     if (e.key === 'Enter' || e.key === ',' || e.key === ';') {
       e.preventDefault()
       add(text)
@@ -27,8 +33,6 @@
       e.preventDefault()
       remove(list[list.length - 1])
     }
-    // arrows and the like stay in the field (not photo navigation)
-    e.stopPropagation()
   }
   function paste(e: ClipboardEvent) {
     const t = e.clipboardData?.getData('text') ?? ''
@@ -47,7 +51,7 @@
       {k}<button type="button" class="x" aria-label={`Remove keyword ${k}`} onclick={(e) => { e.stopPropagation(); remove(k) }}>×</button>
     </span>
   {/each}
-  <input bind:this={input} class="in" bind:value={text} onkeydown={key} onpaste={paste} onblur={() => add(text)}
+  <input bind:this={input} class="in" maxlength="2000" bind:value={text} onkeydown={key} onpaste={paste} onblur={() => add(text)}
     placeholder={list.length ? 'Add…' : 'Add keywords, separated by commas'} aria-label="Add keywords" />
 </div>
 

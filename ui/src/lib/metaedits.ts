@@ -129,11 +129,11 @@ export function dateState(fields: Record<string, any> | null | undefined): DateS
 
 /** An ISO date for a level from year / month / day inputs, or null when they don't make one. */
 export function isoFor(level: DateLevel, y: number | null, mo: number | null, d: number | null): string | null {
-  if (!y || y < 1000 || y > new Date().getFullYear() + 1) return null
+  if (!y || !Number.isInteger(y) || y < 1000 || y > new Date().getFullYear() + 1) return null
   if (level === 'year' || level === 'circa') return String(y)
-  if (!mo || mo < 1 || mo > 12) return null
+  if (!mo || !Number.isInteger(mo) || mo < 1 || mo > 12) return null
   if (level === 'month') return `${y}-${pad(mo)}`
-  if (!d || d < 1) return null
+  if (!d || !Number.isInteger(d) || d < 1) return null
   const last = new Date(y, mo, 0).getDate()
   if (d > last) return null
   return `${y}-${pad(mo)}-${pad(d)}`
@@ -144,11 +144,12 @@ export function isoFor(level: DateLevel, y: number | null, mo: number | null, d:
 /** photokin's processing markers: shown apart from the photo's own keywords. */
 export function isMarkerKeyword(kw: string): boolean {
   const k = kw.trim().toLowerCase()
-  return k.startsWith('date:') || k.endsWith(' analyzed') || k === 'back' || k === 'negative'
+  return isDateMarker(kw) || k.endsWith(' analyzed') || k === 'back' || k === 'negative'
 }
 
+/** photokin's date-certainty keyword ("DATE: Y!M~"), and only that: "Date: ask Ann" is a keyword. */
 export function isDateMarker(kw: string): boolean {
-  return /^\s*date:/i.test(kw)
+  return /^\s*DATE:\s*Y[!?~@](M[!?~@])?(D[!?~@])?\s*$/i.test(kw)
 }
 
 /** Keywords typed or pasted: split on commas, semicolons and line breaks; trimmed; no repeats. */
@@ -167,15 +168,15 @@ export function addKeywords(list: string[], add: string[]): string[] {
   return out
 }
 
-/** Lightroom-style files list each tagged person as a keyword too. When this file does (a face name
- *  from before the change is a keyword), a rename or removal is reflected in the keywords; otherwise
- *  null. `before` / `after`: the face names before and after the change. */
-export function peopleKeywords(keywords: string[], before: string[], after: string[], oldName: string, newName: string): string[] | null {
-  const lower = new Set(keywords.map((k) => k.toLowerCase()))
-  if (!before.some((n) => n && lower.has(n.toLowerCase()))) return null
+/** Lightroom-style files list each tagged person as a keyword too. In such a file (`asKeywords`,
+ *  decided from the file itself), a renamed, added or removed name is reflected in the keywords;
+ *  otherwise null (no change). `after`: the face names after the change; `removable`: the old name's
+ *  keyword may go (it is there for this face, or was added by these edits, not a keyword of its own). */
+export function peopleKeywords(keywords: string[], asKeywords: boolean, after: string[], oldName: string, newName: string, removable: boolean): string[] | null {
+  if (!asKeywords) return null
   let out = keywords
   const stillUsed = after.some((n) => n.toLowerCase() === oldName.toLowerCase())
-  if (oldName && !stillUsed) out = out.filter((k) => k.toLowerCase() !== oldName.toLowerCase())
+  if (oldName && !stillUsed && removable) out = out.filter((k) => k.toLowerCase() !== oldName.toLowerCase())
   if (newName && !out.some((k) => k.toLowerCase() === newName.toLowerCase())) out = [...out, newName]
   return out.length === keywords.length && out.every((k, i) => k === keywords[i]) ? null : out
 }
@@ -201,10 +202,14 @@ export function rematchFaces(edits: Record<string, FaceEdit> | undefined, meta: 
   const used = new Set<string>()
   for (const [k, e] of Object.entries(edits || {})) {
     if (k.startsWith('new:')) {
-      out[k] = e
+      // a face added here that the file has meanwhile (this edit, already written): not again
+      const written = !!e.box && base.some((f) => f.name === (e.name ?? '') && iou(f.box, e.box!) > 0.8)
+      if (written) dropped++
+      else out[k] = e
       continue
     }
-    const same = base.find((f) => f.key === k && f.name === (e.was?.name ?? f.name))
+    const same = base.find((f) => f.key === k && f.name === (e.was?.name ?? f.name) &&
+      (!e.was || (e.was.box === null ? f.box === null : iou(f.box, e.was.box) > 0.8)))
     const hit = same ?? (e.was ? base.find((f) => f.key && !used.has(f.key) && f.name === e.was!.name && (e.was!.box === null ? f.box === null : iou(f.box, e.was!.box) > 0.8)) : undefined)
     if (hit?.key && !used.has(hit.key)) {
       used.add(hit.key)
@@ -253,4 +258,38 @@ export function suggestNames(typed: string, pools: string[][], limit = 6): strin
     }
   }
   return out
+}
+
+// ---------------------------------------------------------------------------- text and saving
+
+// as the backend's metaedit.validate: no control characters (a pasted vertical tab, a NUL), line
+// breaks only where a field can hold them, and line endings as they are stored
+const CTRL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g
+
+export function cleanText(v: string, multiline: boolean): string {
+  let t = v.replace(/\r\n?/g, '\n').replace(/[\u000b\u000c\u0085\u2028\u2029]/g, multiline ? '\n' : ' ').replace(CTRL, '')
+  // a lone half of a surrogate pair can't be stored
+  t = t.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, '')
+  if (!multiline) t = t.replace(/\n/g, ' ')
+  return t
+}
+
+/** A problem with a text detail the backend would refuse, or ''. */
+export function detailProblem(v: string): string {
+  if (/^\s*base64:/i.test(v)) return 'Can’t start with “base64:” (it would be read as binary data).'
+  return ''
+}
+
+/** The edits made after `sent` was taken (while a save wrote `sent`): every detail that differs
+ *  from what was sent. Face edits made meanwhile are not kept (the file's faces were just
+ *  renumbered by the write): `droppedFaces` says so. */
+export function editsSince(cur: MetaEdits | undefined, sent: MetaEdits | undefined): { meta: MetaEdits | undefined; droppedFaces: boolean } {
+  const out: MetaEdits = {}
+  let droppedFaces = false
+  for (const k of Object.keys(cur || {}) as (keyof MetaEdits)[]) {
+    if (JSON.stringify(cur![k]) === JSON.stringify(sent?.[k])) continue
+    if (k === 'faces') droppedFaces = true
+    else (out as any)[k] = cur![k]
+  }
+  return { meta: Object.keys(out).length ? out : undefined, droppedFaces }
 }

@@ -4,7 +4,7 @@
   import { app, type PhotoSession } from '../lib/store.svelte'
   import { post } from '../lib/api'
   import { dateRowText } from '../lib/datetext'
-  import { editCount, type TextField } from '../lib/metaedits'
+  import { detailProblem, editCount, type TextField } from '../lib/metaedits'
   import DateField from './DateField.svelte'
   import KeywordField from './KeywordField.svelte'
   import PeopleList from './PeopleList.svelte'
@@ -94,11 +94,12 @@
         <div class="lab row"><label for="d-{f.key}" data-tip={tip(f.key, f.label)} data-tip-side="left">{f.label}</label>
           {#if edited(f.key)}<button class="dot" aria-label={`Undo the edit to ${f.label}`} data-tip="Edited. Click to go back to the file’s value." onclick={() => app.resetDetail(s, f.key)}></button>{/if}</div>
         {#if f.multi}
-          <textarea id="d-{f.key}" class="field" rows="2" use:autosize={value(f.key)} value={value(f.key)} placeholder={f.placeholder ?? ''}
-            oninput={(e) => app.setDetail(s, f.key, (e.target as HTMLTextAreaElement).value)} onkeydown={(e) => e.stopPropagation()}></textarea>
+          <textarea id="d-{f.key}" class="field" rows="2" maxlength="65536" use:autosize={value(f.key)} value={value(f.key)} placeholder={f.placeholder ?? ''}
+            oninput={(e) => app.setDetail(s, f.key, (e.target as HTMLTextAreaElement).value)}></textarea>
         {:else}
-          <input id="d-{f.key}" class="field" value={value(f.key)} oninput={(e) => app.setDetail(s, f.key, (e.target as HTMLInputElement).value)} onkeydown={(e) => e.stopPropagation()} />
+          <input id="d-{f.key}" class="field" maxlength="2000" value={value(f.key)} oninput={(e) => app.setDetail(s, f.key, (e.target as HTMLInputElement).value)} />
         {/if}
+        {#if edited(f.key) && detailProblem(value(f.key))}<p class="small err">{detailProblem(value(f.key))}</p>{/if}
         {#if clearNote(f.key)}<p class="small faint">{clearNote(f.key)}</p>{/if}
       </div>
     {/each}
@@ -114,8 +115,8 @@
         {#if PLACE.some((p) => edited(p.key))}<button class="dot" aria-label="Undo the place edits" data-tip="Edited. Click to go back to the file’s place." onclick={() => PLACE.forEach((p) => edited(p.key) && app.resetDetail(s, p.key))}></button>{/if}</div>
       <div class="place">
         {#each PLACE as p (p.key)}
-          <input class="field" class:ed={edited(p.key)} placeholder={p.label} aria-label={p.label} data-tip={tip(p.key, p.label)} value={value(p.key)}
-            oninput={(e) => app.setDetail(s, p.key, (e.target as HTMLInputElement).value)} onkeydown={(e) => e.stopPropagation()} />
+          <input class="field" class:ed={edited(p.key)} maxlength="2000" placeholder={p.label} aria-label={p.label} data-tip={tip(p.key, p.label)} value={value(p.key)}
+            oninput={(e) => app.setDetail(s, p.key, (e.target as HTMLInputElement).value)} />
         {/each}
       </div>
     </div>
@@ -150,6 +151,7 @@
   .place .ed { border-color: color-mix(in srgb, var(--accent-link) 55%, var(--line-2)); }
   .small { font-size: 12px; margin: 0; }
   .ro p { color: var(--fg); }
+  .err { color: var(--err-fg); }
   .dot { width: 16px; height: 16px; border-radius: 50%; background: transparent; border: 0; padding: 0; cursor: pointer; flex: none; display: inline-grid; place-items: center; }
   .dot::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-link); transition: transform var(--t-fast) ease; }
   .dot:hover::before { transform: scale(1.3); }

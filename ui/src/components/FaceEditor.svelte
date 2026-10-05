@@ -59,7 +59,9 @@
     e.preventDefault()
     commitName()
     host.setPointerCapture(e.pointerId)
-    const [px, py] = toNorm(e)
+    const [rx, ry] = toNorm(e)
+    const px = Math.min(1, Math.max(0, rx))
+    const py = Math.min(1, Math.max(0, ry))
     drag = { key: '__new', kind: 'new', start: [px, py, 0, 0], px, py, moved: false }
     live = { key: '__new', box: [px, py, 0, 0] }
   }
@@ -80,10 +82,10 @@
     if (drag.kind === 'move') b = [bx + dx, by + dy, bw, bh]
     else {
       let [x0, y0, x1, y1] = [bx, by, bx + bw, by + bh]
-      if (drag.kind.includes('w')) x0 = Math.min(x1 - MIN_PX / W, x0 + dx)
-      if (drag.kind.includes('e')) x1 = Math.max(x0 + MIN_PX / W, x1 + dx)
-      if (drag.kind.includes('n')) y0 = Math.min(y1 - MIN_PX / H, y0 + dy)
-      if (drag.kind.includes('s')) y1 = Math.max(y0 + MIN_PX / H, y1 + dy)
+      if (drag.kind.includes('w')) x0 = Math.max(0, Math.min(x1 - MIN_PX / W, x0 + dx))
+      if (drag.kind.includes('e')) x1 = Math.min(1, Math.max(x0 + MIN_PX / W, x1 + dx))
+      if (drag.kind.includes('n')) y0 = Math.max(0, Math.min(y1 - MIN_PX / H, y0 + dy))
+      if (drag.kind.includes('s')) y1 = Math.min(1, Math.max(y0 + MIN_PX / H, y1 + dy))
       b = [x0, y0, x1 - x0, y1 - y0]
     }
     live = { key: drag.key, box: clamp(b) }
@@ -132,6 +134,7 @@
     tick().then(() => host?.querySelector<HTMLElement>(`[data-face="${CSS.escape(key)}"]`)?.focus({ preventScroll: true }))
   }
   function keyBox(e: KeyboardEvent, f: Face) {
+    if (inert) return
     const key = f.key!
     const arrows: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }
     if (e.key in arrows) {
@@ -171,6 +174,7 @@
   const suggestions = $derived(naming ? suggestNames(naming.text, pools, 6) : [])
 
   async function openName(key: string) {
+    if (naming && naming.key !== key) commitName()
     app.selectedFace = key
     naming = { key, text: nameOf(key) }
     pick = -1
@@ -179,11 +183,13 @@
     el?.focus()
     el?.select()
   }
-  function commitName(next = false) {
+  function commitName(next = false, session: PhotoSession = s) {
     const n = naming
     if (!n) return
     naming = null
-    if (n.text.trim() !== nameOf(n.key)) app.updateFace(s, n.key, { name: n.text })
+    // (the name is for the photo it was typed on: after a photo change `s` is already the next one)
+    const cur = [...app.faces(session).named, ...app.faces(session).unnamed].find((f) => f.key === n.key)
+    if (cur && n.text.trim() !== cur.name) app.updateFace(session, n.key, { name: n.text })
     if (next) {
       // on to the next face without a name, if any
       const k = faces.unnamed.find((f) => f.key !== n.key && f.box)?.key
@@ -192,13 +198,13 @@
     }
   }
   function keyName(e: KeyboardEvent) {
-    e.stopPropagation()
+    if (e.isComposing) return   // an input method is still composing the name
     if (e.key === 'ArrowDown' && suggestions.length) {
       e.preventDefault()
       pick = (pick + 1) % suggestions.length
     } else if (e.key === 'ArrowUp' && suggestions.length) {
       e.preventDefault()
-      pick = (pick - 1 + suggestions.length) % suggestions.length
+      pick = pick <= 0 ? suggestions.length - 1 : pick - 1
     } else if (e.key === 'Enter') {
       e.preventDefault()
       if (naming && pick >= 0 && suggestions[pick]) naming.text = suggestions[pick]
@@ -212,8 +218,8 @@
   }
   // a name being typed is kept when the photo changes or the faces are hidden
   $effect(() => {
-    void s.path
-    return () => commitName()
+    const session = s
+    return () => commitName(false, session)
   })
 
   const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const
@@ -264,7 +270,7 @@
     {@const n = order.indexOf(f) + 1}
     {@const sel = app.selectedFace === f.key}
     <div class="face" class:named={!!f.name} class:sel class:hover={app.hoverFace === f.key} data-face={f.key}
-      role="button" tabindex={sel || (!app.selectedFace && f === all[0]) ? 0 : -1}
+      role="button" tabindex={!inert && (sel || (!app.selectedFace && f === all[0])) ? 0 : -1}
       aria-label={f.name ? `Face ${n}: ${f.name}. Arrow keys move it, Alt+arrows resize, Enter renames, Delete removes.` : 'Face without a name. Enter to name it, Delete to remove it.'}
       style="left:{sx(b[0])}px;top:{sy(b[1])}px;width:{b[2] * W * zoom}px;height:{b[3] * H * zoom}px"
       onpointerdown={(e) => startBox(e, f, 'move')} onkeydown={(e) => keyBox(e, f)}
@@ -279,7 +285,7 @@
     {@const lab = labels.get(f.key!)}
     {#if naming?.key !== f.key && lab}
       <button class="tag" class:unnamed={!f.name} class:sel class:num={!lab.full} tabindex="-1" style="left:{lab.x}px;top:{lab.y}px"
-        onpointerdown={(e) => e.stopPropagation()} onclick={() => !inert && openName(f.key!)}
+        onpointerdown={(e) => { e.stopPropagation(); if (naming && naming.key !== f.key) commitName() }} onclick={() => !inert && openName(f.key!)}
         onpointerenter={() => (app.hoverFace = f.key!)} onpointerleave={() => (app.hoverFace = null)}
         data-tip={inert ? undefined : f.name ? `${f.name}: click to rename` : 'Click to name this face'}>
         {#if !lab.full}<b>{n}</b>{:else if f.name}<b>{n}</b> {f.name}{:else}Who is this?{/if}
@@ -294,7 +300,8 @@
     {#if f}
       {@const b = boxOf(f)}
       <div class="namer" style="left:{sx(b[0])}px;top:{sy(b[1] + b[3]) + 3}px" onpointerdown={(e) => e.stopPropagation()}>
-        <input class="namein" bind:value={naming.text} placeholder="Name" aria-label="Name of this person" onkeydown={keyName} onblur={() => setTimeout(() => commitName(), 120)}
+        <input class="namein" bind:value={naming.text} placeholder="Name" aria-label="Name of this person" data-key={naming.key} onkeydown={keyName} oninput={() => (pick = -1)}
+          onblur={(e) => { if (naming && naming.key === (e.currentTarget as HTMLInputElement).dataset.key) commitName() }}
           role="combobox" aria-expanded={suggestions.length > 0} aria-controls="face-sugg" aria-autocomplete="list" />
         {#if suggestions.length}
           <ul class="sugg" id="face-sugg" role="listbox">

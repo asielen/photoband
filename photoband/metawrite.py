@@ -756,7 +756,7 @@ def write_metadata(tmp: str, src: str, md: Dict, info: ImageInfo, out_fmt: str, 
     reg: Dict[str, Any] = {}
     if edits:
         from . import metaedit
-        e_upd, e_del, e_notes = metaedit.tag_updates(md, info, fields or {}, edits)
+        e_upd, e_del, e_notes = metaedit.tag_updates(md, info, fields or {}, edits, out_fmt)
         notes += e_notes
         reg = metaedit.region_updates(md, info, fields or {}, edits.get("faces") or {})
         if reg:
@@ -829,6 +829,9 @@ def write_metadata(tmp: str, src: str, md: Dict, info: ImageInfo, out_fmt: str, 
         except OSError:
             log.debug("copying PNG text chunks failed", exc_info=True)
     exempt = set(e_upd) | gone
+    if edits:
+        from .metaedit import previous_values
+        notes.append("Previous values of the edited details: " + previous_values(md, exempt | set(reg)))
     md2 = _verify(et, tmp, out_fmt, (Wc, Hc), rec, t, exempt)
     if edits:
         _verify_edits(md2, tmp, fields or {}, edits, notes, boxes=False)

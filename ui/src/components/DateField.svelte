@@ -93,7 +93,7 @@
   </div>
   <div class="row gap parts">
     <input class="field yr" type="number" min="1000" max={new Date().getFullYear() + 1} placeholder="Year" aria-label="Year" value={year ?? ''}
-      oninput={(e) => { const v = (e.target as HTMLInputElement).value; year = v ? +v : null; if (year && year >= 1000) apply() }} />
+      step="1" oninput={(e) => { const v = (e.target as HTMLInputElement).value; year = v ? +v : null; if (year && year >= 1000) apply() }} />
     {#if level === 'day' || level === 'month'}
       <select class="field mo" aria-label="Month" value={month ?? ''} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; month = v ? +v : null; if (day && day > daysIn) day = daysIn; apply() }}>
         <option value="">Month</option>
@@ -101,12 +101,13 @@
       </select>
     {/if}
     {#if level === 'day'}
-      <input class="field dy" type="number" min="1" max={daysIn} placeholder="Day" aria-label="Day" value={day ?? ''}
+      <input class="field dy" type="number" min="1" max={daysIn} step="1" placeholder="Day" aria-label="Day" value={day ?? ''}
         oninput={(e) => { const v = (e.target as HTMLInputElement).value; day = v ? +v : null; apply() }} />
     {/if}
   </div>
   {#if incomplete}
-    <p class="small warnline">{level === 'day' ? 'Enter the year, month and day.' : level === 'month' ? 'Enter the year and month.' : 'Enter a year between 1000 and next year.'}</p>
+    <p class="small warnline">{level === 'day' ? 'Enter the year, month and day.' : level === 'month' ? 'Enter the year and month.' : 'Enter a year between 1000 and next year.'}
+      {prints ? ` Until then the date stays ${prints}.` : ''}</p>
   {:else if prints}
     <p class="small faint">Prints as <span class="pv">{prints}</span></p>
   {/if}

@@ -66,7 +66,7 @@
     }
     out.push(
       { id: 'faces', group: 'View', label: app.showFaces ? 'Hide faces' : 'Show faces', key: 'F', disabled: noPhoto, keywords: 'people names', run: () => (app.showFaces = !app.showFaces) },
-      { id: 'add-face', group: 'Details', label: 'Add a face tag', key: 'N', disabled: noPhoto, keywords: 'people name tag region box', run: () => preview?.addFace(false) },
+      { id: 'add-face', group: 'Details', label: 'Add a face tag', key: 'N', disabled: noPhoto || (tool !== 'pan' ? 'Finish with the photo edge or brush first.' : null), keywords: 'people name tag region box', run: () => preview?.addFace(false) },
       { id: 'save-details', group: 'Details', label: 'Save edited details to the original', disabled: noPhoto || (!s || !hasEdits(s.draft.meta) ? 'No details are edited for this photo.' : null), keywords: 'metadata title date keywords faces write', run: () => s && app.saveDetails(s) },
       { id: 'discard-details', group: 'Details', label: 'Discard edited details', disabled: noPhoto || (!s || !hasEdits(s.draft.meta) ? 'No details are edited for this photo.' : null), keywords: 'metadata revert', run: () => s && app.discardDetails(s) },
       { id: 'zoom-fit', group: 'View', label: 'Zoom to fit', key: 'Mod+0', disabled: noPhoto, run: () => preview?.zoomFit() },

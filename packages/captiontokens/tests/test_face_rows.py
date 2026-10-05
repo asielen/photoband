@@ -54,8 +54,9 @@ def test_a_photos_own_row_count():
 
 
 def test_groups_for_the_people_list():
-    faces = STANDING_BY_A_CAR + [{"name": "Somebody", "box": None}]
-    assert face_row_groups({"faces": faces}) == [[6], [1, 2, 0, 5, 4, 3]]
-    assert face_row_groups({"faces": faces, "face_rows": 1}) == [[1, 2, 6, 0, 5, 4, 3]]
+    assert face_row_groups({"faces": STANDING_BY_A_CAR}) == [[6], [1, 2, 0, 5, 4, 3]]
+    assert face_row_groups({"faces": STANDING_BY_A_CAR, "face_rows": 1}) == [[1, 2, 6, 0, 5, 4, 3]]
+    # someone without a place on the photo: {names:rows} prints plain names, so no rows either
+    assert face_row_groups({"faces": STANDING_BY_A_CAR + [{"name": "Somebody", "box": None}]}) == []
     assert face_row_groups({"faces": [{"name": "X", "box": None}]}) == []
     assert face_row_groups({}) == []

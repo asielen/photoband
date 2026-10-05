@@ -1688,6 +1688,16 @@ def save_details(path: str, meta_edits: Dict[str, Any], settings: Dict[str, Any]
                 dels.append(f"-{key}=")
             else:
                 upd[key] = v
+        if not upd and not dels:
+            # nothing in the file needs to change (it already reads as edited)
+            if metaedit.check_written(metaedit.apply_to_fields(fields, edits), fields, edits, boxes=True):
+                raise SaveError("These details can't be written to this file.", code="details")
+            res.ok = True
+            res.out_path = src
+            res.format = info.format
+            res.notes = ["Nothing needed changing: the file already has these details"]
+            return res
+        notes.append("Previous values: " + metaedit.previous_values(md, metaedit.touched_tags(upd, dels)))
         before = image_data_hash(real)
 
         d = os.path.dirname(real)
@@ -1753,7 +1763,8 @@ def save_details(path: str, meta_edits: Dict[str, Any], settings: Dict[str, Any]
         res.format = info.format
         res.notes = ["Details changed: " + "; ".join(metaedit.describe(fields, edits))] + notes
         try:
-            from .photos import carry_caches
+            from .photos import carry_caches, forget
+            forget(real)   # (a same-size file with its dates kept may look like the old version)
             carry_caches(real, info, probe(real))
         except Exception:   # a cache only: the photo is analysed again if this fails
             log.debug("could not carry caches over", exc_info=True)

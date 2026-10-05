@@ -29,7 +29,7 @@ import re
 import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
-from .dates import PartialDate, check_format, format_date, render_date
+from .dates import PartialDate, certainty_from_keywords, check_format, format_date, render_date
 from .faces import Face, cluster_rows, order_names
 from .parser import (Group, Issue, Literal, Style, Token, escape_value, markup_to_plain,
                      parse, split_list, unescape_value)
@@ -237,6 +237,8 @@ def face_row_groups(fields: Dict[str, Any]) -> List[List[int]]:
         if one and one[0].box is not None:
             index[id(one[0])] = i
             pos.append(one[0])
+        elif one:
+            return []   # {names:rows} prints plain names when anyone has no place on the photo
     if not pos:
         return []
     return [[index[id(f)] for f in row] for row in cluster_rows(pos, rows=_face_rows(fields.get("face_rows")))]
@@ -275,7 +277,7 @@ def is_marker_keyword(kw: str) -> bool:
     date-certainty "DATE: Y!M~", its provenance "<Provider> <Model> Analyzed", and the part
     markers "back" and "negative" (which side or form of the object a scan shows)."""
     k = kw.strip().lower()
-    return k.startswith("date:") or k.endswith(" analyzed") or k in ("back", "negative")
+    return certainty_from_keywords([kw]) is not None or k.endswith(" analyzed") or k in ("back", "negative")
 
 
 def _keyword_excluded(kw: str, paths: List[str], prefixes: List[str]) -> bool:

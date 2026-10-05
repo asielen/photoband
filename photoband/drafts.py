@@ -221,3 +221,21 @@ def delete_draft_if(path: str, state_hash: str, unhashed: bool = False) -> bool:
             return False
         delete_draft(path)
         return True
+
+
+DETAIL_KEYS = ("templateId", "meta", "faceRows", "_stat", "_size")
+
+
+def keep_details_if(path: str, state_hash: str) -> bool:
+    """After a captioned COPY was saved from the draft identified by ``state_hash``: keep only its
+    edited photo details (``meta``, the row count) as the draft, since the original does not have
+    them yet; the caption part is done. A draft edited since is kept whole. True if replaced."""
+    with _locked(path):
+        st = load_draft_any(path)
+        if not isinstance(st, dict) or not state_hash or st.get("_hash") != state_hash:
+            return False
+        if not st.get("meta"):
+            delete_draft(path)
+            return True
+        _save_draft(path, {k: st[k] for k in DETAIL_KEYS if k in st} | {"overrides": {}, "blocks": {}})
+        return True

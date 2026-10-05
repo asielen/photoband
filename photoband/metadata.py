@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from captiontokens.dates import certainty_from_keywords, parse_date
 
-from .imageio import ImageInfo, orient_box
+from .imageio import ImageInfo, is_tifffile_shape_description, orient_box
 
 EXIF_GROUPS = ("IFD0", "ExifIFD", "IFD1", "EXIF")
 
@@ -307,7 +307,9 @@ def parse_regions(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
             else:
                 dup["ids"].append(f"mp:{i}")
         else:
-            same = next((e for e in mwg_unnamed if _iou(e["box"], entry["box"]) > 0.5), None)                 if entry["box"] is not None else None
+            same = None
+            if entry["box"] is not None:
+                same = next((e for e in mwg_unnamed if _iou(e["box"], entry["box"]) > 0.5), None)
             if same is None:
                 unnamed.append(entry)
             else:
@@ -321,13 +323,15 @@ def parse_regions(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
         else:
             on["ids"].extend(u["ids"])
     unnamed = kept
-    if not named:
-        pii = _list(_get(md, "XMP-iptcExt:PersonInImage")[0])
-        if pii:
-            named = [{"name": n, "box": None, "source": "PersonInImage", "ids": [f"pii:{i}"]}
-                     for i, n in enumerate(pii)]
-            warnings.append("names without positions")
-    elif any(n["box"] is None for n in named):
+    # people named in the photo without a face region (IPTC PersonInImage): named faces without a
+    # position, unless a region already names them (tools that write both list everyone there)
+    pii = _list(_get(md, "XMP-iptcExt:PersonInImage")[0])
+    have = {n["name"].lower() for n in named}
+    for i, n in enumerate(pii):
+        if n.lower() not in have:
+            have.add(n.lower())
+            named.append({"name": n, "box": None, "source": "PersonInImage", "ids": [f"pii:{i}"]})
+    if any(n["box"] is None for n in named):
         warnings.append("names without positions")
     if not named and not unnamed:
         warnings.append("no face regions")
@@ -358,7 +362,12 @@ def normalize(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
                 v, src = first
             fields[key] = _text(v)
         else:
-            v, src = _get(md, *srcs)
+            v, src = None, None
+            for cand, c in _iter_sources(md, srcs):
+                if key == "caption" and c.endswith(":ImageDescription") and is_tifffile_shape_description(cand):
+                    continue   # tifffile's note of the array shape, not a description
+                v, src = cand, c
+                break
             fields[key] = _text(v)
         if src:
             sources[key] = src

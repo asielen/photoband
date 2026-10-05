@@ -134,7 +134,8 @@ export interface PhotoMeta {
   warnings: string[]
   raw: [string, string][]
   hasRecord: boolean
-  stat: [number, string, string?]
+  /** size, modified time (ns, as text), quick content hash, file id (as text) */
+  stat: [number, string, string?, string?]
   draft: PhotoDraft | null
 }
 

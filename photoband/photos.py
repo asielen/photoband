@@ -89,6 +89,14 @@ def meta(path: str) -> Dict[str, Any]:
     return res
 
 
+def forget(path: str) -> None:
+    """Drop the in-memory metadata of every version of ``path`` (after Photoband rewrote it)."""
+    pre = os.path.abspath(path) + "|"
+    with _lock:
+        for k in [k for k in _cache if k.startswith(pre)]:
+            del _cache[k]
+
+
 def carry_caches(path: str, old: ImageInfo, new: ImageInfo) -> None:
     """After a details-only save (metadata edited; pixels, orientation, ICC profile and Photoband
     record untouched, image data verified identical): the new file version's proxy, thumbnail and

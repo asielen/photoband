@@ -133,15 +133,20 @@ def test_edit_details_and_faces_then_save_to_original(page, server):
     pw.expect(pg.locator(".faces-layer .face")).to_have_count(1)
     pg.screenshot(path=os.path.join(SHOTS, "details-edited.png"))
 
+    # a name still being typed (no Enter) is part of what the save writes
+    pg.locator(".faces-layer .face").first.click()
+    pg.keyboard.press("Enter")
+    pg.keyboard.press("Control+a")
+    pg.keyboard.type("Annie")
     pg.click('button:has-text("Save to original")')
     pw.expect(pg.locator(".details .bar")).to_have_count(0, timeout=20000)
     md = _md(os.path.join(server["work"], "picnic.jpg"))
     assert md["XMP-dc:Title"] == "Picnic at the lake"
     assert md["XMP-photoshop:DateCreated"] == "1952:06"
     subj = md["XMP-dc:Subject"] if isinstance(md["XMP-dc:Subject"], list) else [md["XMP-dc:Subject"]]
-    assert "DATE: Y!M!" in subj and "Anne" in subj and "Ann" not in subj   # people keywords follow the rename
+    assert "DATE: Y!M!" in subj and "Annie" in subj and "Ann" not in subj   # people keywords follow the rename
     names = [r.get("Name") for r in md["XMP-mwg-rs:RegionInfo"]["RegionList"]]
-    assert names == ["Anne"]
+    assert names == ["Annie"]
     # the editor now shows the file's values, unedited
     pw.expect(pg.locator("#d-title")).to_have_value("Picnic at the lake")
     assert not pg.errors, pg.errors

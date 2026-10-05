@@ -314,6 +314,7 @@
       const d = draftForFile(draft, meta.stat, s.draft, (id) => !!app.template(id), meta)
       s.draft = d.draft
       p.usesDraft = true
+      if (d.droppedFaces) reasons.push(`${d.droppedFaces} face edit${d.droppedFaces > 1 ? 's' : ''} left out: the faces changed in the file`)
       p.draftHash = d.hash
       if (ex?.case === 'C') {
         p.onCopy = bs.saveMode === 'overwrite' && s.draft.mode === 'erase'

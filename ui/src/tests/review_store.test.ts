@@ -535,5 +535,31 @@ describe('edited photo details', () => {
     expect(other.draft.meta!.faces).toBeUndefined()
     expect(other.draft.meta!.title).toBe('T')
   })
-})
 
+  it('save to original after a saved copy leaves no draft behind', async () => {
+    server.saveOut = '/p/captioned/a.tif'
+    const { app, s } = await open()
+    app.setDetail(s, 'title', 'Picnic')
+    const p = app.save(s, 'copy')
+    while (!server.saveGate) await sleep(10)
+    server.saveGate()
+    await p
+    await flush()
+    expect(server.drafts['/p/a.tif'].meta).toEqual({ title: 'Picnic' })
+    server.posts = []
+    expect(await app.saveDetails(s)).toBe(true)
+    expect(server.posts.some((x: any) => x.path === '/api/drafts' && x.body.state === null)).toBe(true)
+    expect(s.dirty).toBe(false)
+  })
+
+  it('a keyword the file has on its own is never removed with a face', async () => {
+    server.faces = { named: [{ name: 'Bob', box: [0.1, 0.1, 0.1, 0.1], source: 'MWG', ids: ['mwg:0'], key: 'mwg:0' }], unnamed: [], unnamed_count: 0, has_positions: true, warnings: [] }
+    server.fields = { keywords: ['Bob', 'Ann'] }        // people as keywords; Ann has no face
+    const { app, s } = await open()
+    const k = app.addFace(s, [0.5, 0.5, 0.1, 0.1], 'Ann')
+    app.deleteFace(s, k)
+    expect(app.keywords(s)).toEqual(['Bob', 'Ann'])
+    app.updateFace(s, 'mwg:0', { name: 'Robert' })      // Bob is there for this face: it follows
+    expect(app.keywords(s)).toEqual(['Ann', 'Robert'])
+  })
+})

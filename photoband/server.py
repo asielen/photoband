@@ -857,8 +857,8 @@ def create_app() -> FastAPI:
         src = security.check(body["path"])
         edits = _edits(body.get("edits"))
         exp = body.get("expected_stat")
-        if exp is not None and not isinstance(exp, list):
-            raise UserError("expected_stat must be a list")
+        if not isinstance(exp, list) or len(exp) < 2:
+            raise UserError("expected_stat (the version of the file that was edited) is required")
         import anyio
         from .save import save_details
         res = await anyio.to_thread.run_sync(lambda: save_details(src, edits, load_settings(), exp))

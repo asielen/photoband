@@ -15,23 +15,30 @@
   const rowsUsed = $derived(!!app.effective(s)?.blocks.some((b) => b.format.includes('{names:rows')))
 
   // the row grouping comes from the server (the same code as the caption), as indexes into fields.faces
-  let groups = $state<number[][]>([])
+  // (each answer is kept with the faces it was asked for: a reply for the faces before a change is not
+  // mapped onto the faces after it)
+  const facesKey = $derived(JSON.stringify([faces.named.map((f) => [f.key, f.box]), s.draft.faceRows ?? null]))
+  let groups = $state<{ key: string; rows: number[][] }>({ key: '', rows: [] })
   $effect(() => {
+    const key = facesKey
     const body = { ...app.fieldsBody(s), formats: {}, rows: true }
-    void s.draft.meta
-    void s.draft.faceRows
     let live = true
     const t = setTimeout(() => {
-      post<{ _rows?: number[][] }>('/api/resolve', body).then((r) => { if (live) groups = r._rows ?? [] }).catch(() => {})
+      post<{ _rows?: number[][] }>('/api/resolve', body).then((r) => { if (live) groups = { key, rows: r._rows ?? [] } }).catch(() => {})
     }, 80)
     return () => { live = false; clearTimeout(t) }
   })
   // the server answers with indexes into the effective named faces (as it applies the edits)
   const rows = $derived.by((): Face[][] => {
     const named = faces.named
-    const out = groups.map((g) => g.map((i) => named[i]).filter(Boolean))
+    const out = groups.key === facesKey ? groups.rows.map((g) => g.map((i) => named[i]).filter(Boolean)) : []
     return out.length && out.flat().length === positioned.length ? out : [positioned]
   })
+  // one flat list with row headings between, so a name field keeps its element when its row changes
+  const items = $derived(rows.flatMap((row, ri) => [
+    ...(rows.length > 1 ? [{ id: `row-${ri}`, head: rowLabel(ri, rows.length) as string, f: null as Face | null }] : []),
+    ...row.map((f) => ({ id: f.key!, head: '', f })),
+  ]))
   const rowLabel = (i: number, n: number) => (n < 2 ? '' : i === 0 ? 'Front row' : i === n - 1 ? 'Back row' : `Row ${i + 1}`)
   const ROWS = [{ value: 'auto', label: 'Auto', tip: 'Group people into rows by how high their faces are' }, ...[1, 2, 3, 4].map((n) => ({ value: String(n), label: String(n), tip: `Always ${n} row${n > 1 ? 's' : ''} for this photo` }))]
 
@@ -50,7 +57,7 @@
     app.faceTool = 'add'
   }
   function nameKey(e: KeyboardEvent, f: Face) {
-    e.stopPropagation()
+    if (e.isComposing) return
     if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
     else if (e.key === 'Escape') {
       ;(e.target as HTMLInputElement).value = f.name
@@ -75,27 +82,29 @@
   {#if !faces.named.length && !faces.unnamed.length}
     <p class="faint small">No faces are tagged. Turn on <b>Faces</b> below the photo and use <b>Add face</b> to mark one.</p>
   {/if}
-  {#each rows as row, ri}
-    {#if rows.length > 1}<div class="rowname">{rowLabel(ri, rows.length)}</div>{/if}
-    <ol class="list">
-      {#each row as f (f.key)}
+  <ol class="list">
+    {#each items as it (it.id)}
+      {#if !it.f}
+        <li class="rowname" aria-hidden="true">{it.head}</li>
+      {:else}
+        {@const f = it.f}
         <li class="person" class:hover={app.hoverFace === f.key} class:sel={app.selectedFace === f.key}
           onpointerenter={() => (app.hoverFace = f.key ?? null)} onpointerleave={() => (app.hoverFace = null)}>
           <button class="num" aria-label={`Show ${f.name} on the photo`} data-tip="Show on the photo" onclick={() => select(f)}>{number(f)}</button>
-          <input class="nm" value={f.name} aria-label={`Name of person ${number(f)}`} onkeydown={(e) => nameKey(e, f)}
+          <input class="nm" maxlength="200" value={f.name} aria-label={`Name of person ${number(f)}`} onkeydown={(e) => nameKey(e, f)}
             onchange={(e) => rename(f, (e.target as HTMLInputElement).value)} onfocus={() => (app.hoverFace = f.key ?? null)} />
           <button class="btn sm ghost icon del" aria-label={`Remove ${f.name}`} data-tip="Remove this face tag" onclick={() => f.key && app.deleteFace(s, f.key)}>×</button>
         </li>
-      {/each}
-    </ol>
-  {/each}
+      {/if}
+    {/each}
+  </ol>
   {#if unplaced.length}
     <div class="rowname">Not marked on the photo</div>
     <ul class="list">
       {#each unplaced as f (f.key)}
         <li class="person">
           <span class="num off" aria-hidden="true">?</span>
-          <input class="nm" value={f.name} aria-label="Name" onkeydown={(e) => nameKey(e, f)} onchange={(e) => rename(f, (e.target as HTMLInputElement).value)} />
+          <input class="nm" maxlength="200" value={f.name} aria-label="Name" onkeydown={(e) => nameKey(e, f)} onchange={(e) => rename(f, (e.target as HTMLInputElement).value)} />
           <button class="btn sm ghost mark" data-tip="Draw a box around this person’s face, so the name has its place in the left-to-right order" onclick={() => place(f)}>Mark</button>
           <button class="btn sm ghost icon del" aria-label={`Remove ${f.name}`} data-tip="Remove this name" onclick={() => f.key && app.deleteFace(s, f.key)}>×</button>
         </li>
@@ -109,7 +118,7 @@
         <li class="person" class:hover={app.hoverFace === f.key} class:sel={app.selectedFace === f.key}
           onpointerenter={() => (app.hoverFace = f.key ?? null)} onpointerleave={() => (app.hoverFace = null)}>
           <button class="num off" aria-label="Show this face on the photo" data-tip="Show on the photo" onclick={() => select(f)}>·</button>
-          <input class="nm" value="" placeholder="Who is this?" aria-label="Name this face" onkeydown={(e) => nameKey(e, f)}
+          <input class="nm" maxlength="200" value="" placeholder="Who is this?" aria-label="Name this face" onkeydown={(e) => nameKey(e, f)}
             onchange={(e) => rename(f, (e.target as HTMLInputElement).value)} onfocus={() => (app.hoverFace = f.key ?? null)} />
           <button class="btn sm ghost icon del" aria-label="Remove this face" data-tip="Remove this face box" onclick={() => f.key && app.deleteFace(s, f.key)}>×</button>
         </li>

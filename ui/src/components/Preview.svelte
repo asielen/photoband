@@ -6,7 +6,7 @@
   import type { Rect } from '../lib/types'
   import FaceEditor from './FaceEditor.svelte'
   import Icon from './Icon.svelte'
-  import { untrack } from 'svelte'
+  import { tick, untrack } from 'svelte'
   import { LOUPE_SRC, loupeWindow } from '../lib/loupe'
 
   let { tool = $bindable('pan') }: { tool?: 'pan' | 'edge' | 'brush-add' | 'brush-remove' } = $props()
@@ -898,8 +898,12 @@
     if (app.faceTool === 'select') app.faceToolTarget = null
   }
   /** N: start drawing a face (with the mouse), or, from the keyboard, put one in the middle. */
-  export function addFace(fromKeyboard: boolean) {
-    if (!app.showFaces) app.showFaces = true
+  export async function addFace(fromKeyboard: boolean) {
+    if (tool !== 'pan' || !s?.meta) return   // the edge and brush tools own the photo
+    if (!app.showFaces) {
+      app.showFaces = true
+      await tick()   // the face layer mounts
+    }
     if (fromKeyboard && faceEd) faceEd.addAtCenter()
     else app.faceTool = 'add'
   }

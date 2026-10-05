@@ -40,7 +40,8 @@ class EditError(ValueError):
 TEXT_FIELDS = ("title", "caption", "notes", "creator", "sublocation", "city", "state", "country")
 MULTILINE = ("caption", "notes")
 LEVELS = {"day": "Y!M!D!", "month": "Y!M!", "year": "Y!", "circa": "Y~"}
-DATE_MARKER = re.compile(r"\s*date:", re.IGNORECASE)
+# photokin's date-certainty keyword, and only that: a keyword like "Date: ask Ann" is the user's own
+DATE_MARKER = re.compile(r"\s*DATE:\s*Y[!?~@](?:M[!?~@])?(?:D[!?~@])?\s*$", re.IGNORECASE)
 
 MAX_TEXT = 64 * 1024
 MAX_LINE = 2000
@@ -66,6 +67,8 @@ SPEC: Dict[str, Tuple[str, Tuple[str, ...], Tuple[str, ...]]] = {
     "country": ("XMP-photoshop:Country", ("IPTC:Country-PrimaryLocationName",), ()),
 }
 LIST_TAGS = {"XMP-dc:Creator", "IPTC:By-line"}
+# EXIF text in a JPEG (one 64 KB APP1 segment for everything): longer values stay in XMP only
+EXIF_JPEG_MAX = 16000
 DATE_TAGS_ORIGINAL = ("ExifIFD:DateTimeOriginal", "XMP-exif:DateTimeOriginal")
 DATE_CLEAR = ("ExifIFD:DateTimeOriginal", "XMP-exif:DateTimeOriginal", "XMP-photoshop:DateCreated",
               "IPTC:DateCreated", "IPTC:TimeCreated", "ExifIFD:OffsetTimeOriginal", "ExifIFD:SubSecTimeOriginal")
@@ -76,6 +79,7 @@ DATE_CLEAR = ("ExifIFD:DateTimeOriginal", "XMP-exif:DateTimeOriginal", "XMP-phot
 # --------------------------------------------------------------------------
 
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_BREAKS = re.compile("[\n\u0085\u2028\u2029]")
 
 
 def _check_text(field: str, v: Any, multiline: bool, limit: int) -> str:
@@ -84,7 +88,11 @@ def _check_text(field: str, v: Any, multiline: bool, limit: int) -> str:
     v = v.replace("\r\n", "\n").replace("\r", "\n")
     if _CTRL.search(v):
         raise EditError(f"{field} contains control characters")
-    if not multiline and "\n" in v:
+    try:
+        v.encode("utf-8")
+    except UnicodeEncodeError:
+        raise EditError(f"{field} contains characters that can't be stored")
+    if not multiline and _BREAKS.search(v):
         raise EditError(f"{field} can't contain line breaks")
     if len(v) > limit:
         raise EditError(f"{field} is longer than {limit} characters")
@@ -107,6 +115,20 @@ def _check_box(b: Any, where: str) -> Optional[List[float]]:
             or x + w > 1 + 1e-6 or y + h > 1 + 1e-6:
         raise EditError(f"{where}: the face box is outside the photo")
     return [min(max(x, 0.0), 1.0), min(max(y, 0.0), 1.0), min(w, 1.0), min(h, 1.0)]
+
+
+def _check_was_box(b: Any) -> Optional[List[float]]:
+    """The box a face had in the file (only to recognise the face): four numbers, as the file has
+    them (a box a little outside the photo, as some tools write, is fine here)."""
+    if b is None:
+        return None
+    try:
+        vals = [float(v) for v in b] if isinstance(b, (list, tuple)) and len(b) == 4 else None
+    except (TypeError, ValueError):
+        vals = None
+    if vals is None or any(v != v or v in (float("inf"), float("-inf")) for v in vals):
+        raise EditError("A face: a face box is four numbers")
+    return vals
 
 
 def validate(edits: Any) -> Dict[str, Any]:
@@ -176,7 +198,7 @@ def _check_faces(v: Any) -> Dict[str, Dict[str, Any]]:
             f["deleted"] = True
         was = e.get("was")
         if isinstance(was, dict):
-            f["was"] = {"name": str(was.get("name") or ""), "box": _check_box(was.get("box"), "A face")}
+            f["was"] = {"name": str(was.get("name") or ""), "box": _check_was_box(was.get("box"))}
         if key.startswith("new:"):
             if f.get("deleted"):
                 continue
@@ -293,18 +315,33 @@ def _has_group(t: Dict[str, Any], *prefixes: str) -> bool:
 class _Writer:
     """Collects JSON-import updates and ExifTool delete arguments."""
 
-    def __init__(self, t: Dict[str, Any], info: ImageInfo):
+    def __init__(self, t: Dict[str, Any], info: ImageInfo, out_fmt: Optional[str] = None):
         self.t = t
         self.info = info
+        self.fmt = out_fmt or info.format
         self.upd: Dict[str, Any] = {}
         self.dels: List[str] = []
         self.notes: List[str] = []
         self.iptc_utf8 = _iptc_is_utf8(t)
-        self.has_exif = _has_group(t, "ExifIFD:", "IFD0:") or info.format != "PNG"
+        # a PNG gets no EXIF block it doesn't have (a JPEG or TIFF always may)
+        self.has_exif = self.fmt != "PNG" or _has_group(t, "ExifIFD:", "IFD0:")
+
+    def exif_fits(self, key: str, value: str) -> bool:
+        """A JPEG keeps its EXIF in one 64 KB segment: a long value in EXIF would split it (other
+        apps then can't read it). Windows XP tags and a non-ASCII UserComment are stored as UTF-16."""
+        if self.fmt != "JPEG":
+            return True
+        wide = key.split(":", 1)[1].startswith("XP") or (key.endswith("UserComment") and not value.isascii())
+        return len(value.encode("utf-16-le" if wide else "utf-8")) <= EXIF_JPEG_MAX
 
     def set(self, key: str, value: Any) -> None:
         if key.startswith("IPTC:"):
             self._set_iptc(key, value)
+            return
+        if key.split(":", 1)[0] in EXIF_GROUPS and isinstance(value, str) and not self.exif_fits(key, value):
+            if key in self.t:
+                self.delete(key)
+            self.notes.append(f"{key.split(':')[1]} is too long for the JPEG's EXIF; XMP keeps it")
             return
         self.upd[key] = value
 
@@ -345,22 +382,50 @@ class _Writer:
             self.notes.append(f"{key.split(':')[1]} removed from IPTC (it can't hold this text); XMP keeps it")
 
 
-def _text_updates(w: _Writer, field: str, value: str) -> None:
+def _creators(t: Dict[str, Any], value: str) -> List[str]:
+    """Several photographers: a file that lists them separately keeps them separate (the reader
+    shows them joined with ", ")."""
+    cur = t.get("XMP-dc:Creator", t.get("IPTC:By-line"))
+    if isinstance(cur, list) and len(cur) > 1:
+        return [x.strip() for x in value.split(", ") if x.strip()]
+    return [value]
+
+
+def _text_updates(w: _Writer, field: str, value: str, old: Optional[str]) -> None:
     primary, mirrors, fallbacks = SPEC[field]
     t = w.t
-    if field == "notes" and not w.has_exif:
+    if field == "notes" and (not w.has_exif or not w.exif_fits(primary, value or "")):
+        if "ExifIFD:UserComment" in t and value:
+            w.delete("ExifIFD:UserComment")   # too long for the JPEG's EXIF: XMP holds the notes
         primary, mirrors = "XMP-exif:UserComment", ()
     if value:
-        w.set(primary, [value] if primary in LIST_TAGS else value)
+        many = _creators(t, value) if field == "creator" else [value]
+        one = "; ".join(many)
+        w.set(primary, many if primary in LIST_TAGS else value)
         for m in mirrors:
             for key in _present_keys(t, m):
                 if key.startswith("XMP") and key != m:
                     continue   # other languages of a lang-alt mirror stay as they are
-                w.set(key, [value] if m in LIST_TAGS else value)
+                w.set(key, many if m in LIST_TAGS else one if field == "creator" else value)
+        # a fallback that held the very same text (Windows' copy of the caption) follows it
+        for fb in fallbacks:
+            for key in _present_keys(t, fb):
+                if old and _same_text(t.get(key), old):
+                    w.set(key, value)
         return
     for tag in (primary,) + mirrors + fallbacks:
         for key in _present_keys(t, tag):
             w.delete(key)
+
+
+def _same_text(a: Any, b: Any) -> bool:
+    def norm(v):
+        if isinstance(v, dict):
+            v = v.get("x-default") or next(iter(v.values()), "")
+        if isinstance(v, list):
+            v = ", ".join(str(x) for x in v)
+        return " ".join(str(v or "").split())
+    return norm(a) == norm(b)
 
 
 def _keyword_updates(w: _Writer, kws: List[str], fields: Dict[str, Any]) -> None:
@@ -370,7 +435,12 @@ def _keyword_updates(w: _Writer, kws: List[str], fields: Dict[str, Any]) -> None
         w.set("IPTC:Keywords", kws)
     xp = _exif_key(t, "EXIF:XPKeywords")
     if xp:
-        w.set(xp, ";".join(kws))
+        # Windows splits its keyword list on ";": a keyword holding one would come apart there
+        xs = [k for k in kws if ";" not in k]
+        if xs:
+            w.set(xp, ";".join(xs))
+        else:
+            w.delete(xp)
     # Lightroom's keyword hierarchy: a keyword removed here goes from its hierarchy too, or
     # Lightroom would put it back when it reads the file
     hs = t.get("XMP-lr:HierarchicalSubject")
@@ -419,15 +489,16 @@ def _date_updates(w: _Writer, d: Optional[Dict[str, str]]) -> None:
     w.set("XMP-photoshop:DateCreated", partial)
 
 
-def tag_updates(md: Dict[str, Any], info: ImageInfo, fields: Dict[str, Any], edits: Dict[str, Any]
-                ) -> Tuple[Dict[str, Any], List[str], List[str]]:
+def tag_updates(md: Dict[str, Any], info: ImageInfo, fields: Dict[str, Any], edits: Dict[str, Any],
+                out_fmt: Optional[str] = None) -> Tuple[Dict[str, Any], List[str], List[str]]:
     """(JSON-import updates, ExifTool delete arguments, notes) that write ``edits`` into a file
-    whose metadata is ``md`` and whose caption fields (as read) are ``fields``."""
+    whose metadata is ``md`` and whose caption fields (as read) are ``fields``. ``out_fmt``: the
+    format of the file written (a copy may be another format than the source)."""
     t = _text_view(md)
-    w = _Writer(t, info)
+    w = _Writer(t, info, out_fmt)
     for k in TEXT_FIELDS:
         if k in edits:
-            _text_updates(w, k, edits[k])
+            _text_updates(w, k, edits[k], fields.get(k))
     if "keywords" in edits or "date" in edits:
         _keyword_updates(w, keywords_after(fields, edits), fields)
     if "date" in edits:
@@ -484,6 +555,15 @@ def region_updates(md: Dict[str, Any], info: ImageInfo, fields: Dict[str, Any],
     changed = {"mwg": False, "mp": False, "pii": False}
     o = int(info.orientation or 1)
     pii_renames: List[Tuple[str, Optional[str]]] = []
+    def own_name(rid: str) -> str:
+        kind, _, idx = rid.partition(":")
+        i = int(idx) if idx.isdigit() else -1
+        if kind == "mwg" and 0 <= i < len(mwg_list) and isinstance(mwg_list[i], dict):
+            return str(mwg_list[i].get("Name") or "").strip()
+        if kind == "mp" and 0 <= i < len(mp_list) and isinstance(mp_list[i], dict):
+            return str(mp_list[i].get("PersonDisplayName") or "").strip()
+        return ""
+
     for key, e in faces_edit.items():
         if key.startswith("new:"):
             continue
@@ -493,14 +573,19 @@ def region_updates(md: Dict[str, Any], info: ImageInfo, fields: Dict[str, Any],
         was_name = (f.get("name") or "").strip()
         name = e["name"] if "name" in e else was_name
         box = e["box"] if "box" in e else f.get("box")
-        for rid in f.get("ids") or []:
+        ids = list(f.get("ids") or [])
+        # standards that name this face in a region of their own: an unnamed region of the same
+        # standard on the face is a duplicate (dropped once the face is edited); in another
+        # standard it is that standard's only region for the face, and follows the edit
+        named_in = {rid.partition(":")[0] for rid in ids if own_name(rid)}
+        for rid in ids:
             kind, _, idx = rid.partition(":")
             i = int(idx) if idx.isdigit() else -1
             if kind == "mwg" and 0 <= i < len(mwg_list) and isinstance(mwg_list[i], dict):
                 r = mwg_list[i] = dict(mwg_list[i])
                 changed["mwg"] = True
                 own = str(r.get("Name") or "").strip()
-                if e.get("deleted") or (was_name and not own):
+                if e.get("deleted") or (was_name and not own and "mwg" in named_in):
                     drop_mwg.add(i)   # removed, or an unnamed duplicate of this named face
                     continue
                 if "name" in e:
@@ -515,7 +600,7 @@ def region_updates(md: Dict[str, Any], info: ImageInfo, fields: Dict[str, Any],
                 r = mp_list[i] = dict(mp_list[i])
                 changed["mp"] = True
                 own = str(r.get("PersonDisplayName") or "").strip()
-                if e.get("deleted") or (was_name and not own):
+                if e.get("deleted") or (was_name and not own and "mp" in named_in):
                     drop_mp.add(i)
                     continue
                 if "name" in e:
@@ -603,10 +688,23 @@ def _new_region(t: Dict[str, Any], info: ImageInfo, mwg_list: List, mp_list: Opt
 
 
 def missing_faces(fields: Dict[str, Any], faces_edit: Dict[str, Dict[str, Any]]) -> List[str]:
-    """Edited faces this version of the file no longer has (their keys)."""
-    keys = {f.get("key") for f in list(fields.get("faces") or []) + list(fields.get("faces_unnamed") or [])
-            if isinstance(f, dict)}
-    return [k for k in faces_edit if not k.startswith("new:") and k not in keys]
+    """Edited faces this version of the file no longer has (their keys): the key is gone, or (keys
+    are region positions) it now names another face than the one the edit was made on."""
+    from .metadata import _iou
+    faces = {f.get("key"): f for f in list(fields.get("faces") or []) + list(fields.get("faces_unnamed") or [])
+             if isinstance(f, dict)}
+    out = []
+    for k, e in faces_edit.items():
+        if k.startswith("new:"):
+            continue
+        f = faces.get(k)
+        was = e.get("was")
+        if f is None:
+            out.append(k)
+        elif was and ((f.get("name") or "") != was.get("name", "") or
+                      (f.get("box") is not None and was.get("box") is not None and _iou(f["box"], was["box"]) < 0.5)):
+            out.append(k)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -641,11 +739,16 @@ def check_written(expected: Dict[str, Any], got: Dict[str, Any], edits: Dict[str
     if "date" in edits and _rendered_date(expected) != _rendered_date(got):
         bad.append("date")
     if edits.get("faces"):
-        drop = {n.lower() for n in dropped}
-        want = sorted(f["name"].lower() for f in expected.get("faces") or [] if f["name"].lower() not in drop)
-        have = sorted((f.get("name") or "").lower() for f in got.get("faces") or [])
-        if want != have or (len(expected.get("faces_unnamed") or []) != int(got.get("faces_unnamed_count") or 0)
-                            and not dropped):
+        from collections import Counter
+        want = Counter(f["name"].lower() for f in expected.get("faces") or [])
+        have = Counter((f.get("name") or "").lower() for f in got.get("faces") or [])
+        if boxes:
+            ok = want == have and len(expected.get("faces_unnamed") or []) == int(got.get("faces_unnamed_count") or 0)
+        else:
+            # a captioned copy: faces cropped away are left out (and say so); nothing else may be
+            drop = {n.lower() for n in dropped}
+            ok = not (have - want) and all(n in drop for n in want - have)
+        if not ok:
             bad.append("faces")
         elif boxes:
             from .metadata import _iou
@@ -657,6 +760,15 @@ def check_written(expected: Dict[str, Any], got: Dict[str, Any], edits: Dict[str
                     bad.append("faces")
                     break
     return bad
+
+
+def previous_values(md: Dict[str, Any], tags) -> str:
+    """The file's values of ``tags`` before an edit, as JSON (for the save log: every value an edit
+    replaced or removed, region structures included, can be put back from it)."""
+    import json
+    t = _text_view(md)
+    old = {k: t[k] for k in sorted(set(tags)) if k in t}
+    return json.dumps(old, ensure_ascii=False, default=str)
 
 
 def describe(fields: Dict[str, Any], edits: Dict[str, Any]) -> List[str]:

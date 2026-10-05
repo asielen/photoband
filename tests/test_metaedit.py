@@ -282,6 +282,18 @@ def test_mp_and_person_in_image_follow(tmp_path):
     assert _named(p) == {"Anne": [0.5, 0.5, 0.1, 0.1]}       # one face, not two
 
 
+def test_people_named_without_a_region_stay_and_can_be_marked(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _regions(p, [{"Type": "Face", "Name": "Ann", "Area": _area(0.2, 0.3, 0.1, 0.1)}], 300, 200,
+             {"XMP-iptcExt:PersonInImage": ["Ann", "Bob"]})
+    f = _fields(p)
+    assert [(x["name"], x["box"] is None) for x in f["faces"]] == [("Ann", False), ("Bob", True)]
+    bob = next(x for x in f["faces"] if x["name"] == "Bob")
+    _details(p, {"faces": {bob["key"]: {"box": [0.6, 0.2, 0.1, 0.1]}}})
+    assert _named(p) == {"Ann": [0.15, 0.25, 0.1, 0.1], "Bob": [0.6, 0.2, 0.1, 0.1]}
+    assert L(_md(p)["XMP-iptcExt:PersonInImage"]) == ["Ann", "Bob"]
+
+
 def test_faces_on_a_rotated_lightroom_photo(tmp_path):
     # stored 300x200, shown upright 200x300 (orientation 6); Lightroom: boxes in the stored frame,
     # AppliedToDimensions upright, a Rotation on each region
@@ -433,3 +445,132 @@ def test_edited_faces_gone_from_the_file_stop_the_save(tmp_path):
 
 def test_save_module_exposes_details():
     assert callable(savemod.save_details)
+
+
+def test_a_batch_copy_keeps_the_details_draft_for_the_original(tmp_path):
+    from photoband import drafts
+    p = _img(str(tmp_path / "a.jpg"))
+    st = {"templateId": "t", "blocks": {"b": {"id": "b", "custom": True, "text": "x"}}, "overrides": {"o": 1},
+          "meta": {"title": "Kept"}, "faceRows": 2, "_hash": "h1"}
+    drafts.save_draft(p, st)
+    assert not drafts.keep_details_if(p, "other")          # edited since staging: kept whole
+    assert drafts.load_draft(p)["blocks"]
+    assert drafts.keep_details_if(p, "h1")
+    d = drafts.load_draft(p)
+    assert d["meta"] == {"title": "Kept"} and d["faceRows"] == 2 and d["blocks"] == {} and d["overrides"] == {}
+    drafts.save_draft(p, {"templateId": "t", "blocks": {}, "_hash": "h2"})
+    assert drafts.keep_details_if(p, "h2") and drafts.load_draft(p) is None   # nothing to keep
+
+
+# -- adversarial review regressions ---------------------------------------------------------
+
+def test_a_face_named_only_in_mp_keeps_its_lightroom_region(tmp_path):
+    # the reader folds an unnamed MWG region onto the MP-named face: editing the face renames both
+    p = _img(str(tmp_path / "a.jpg"))
+    _regions(p, [{"Type": "Face", "Area": _area(0.2, 0.3, 0.1, 0.1)}], 300, 200,
+             {"XMP-MP:RegionInfoMP": {"Regions": [{"PersonDisplayName": "Ann", "Rectangle": "0.15, 0.25, 0.1, 0.1"}]}})
+    key = _fields(p)["faces"][0]["key"]
+    _details(p, {"faces": {key: {"name": "Anne"}}})
+    md = _md(p)
+    assert [r.get("Name") for r in md["XMP-mwg-rs:RegionInfo"]["RegionList"]] == ["Anne"]
+    assert md["XMP-MP:RegionInfoMP"]["Regions"][0]["PersonDisplayName"] == "Anne"
+
+
+def test_a_users_own_date_keyword_is_kept(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-XMP-dc:Subject=family", "-XMP-dc:Subject=Date: probably 1950s, ask Ann",
+        "-XMP-lr:HierarchicalSubject=Notes|Date: probably 1950s, ask Ann")
+    _details(p, {"date": {"iso": "1952", "level": "year"}})
+    md = _md(p)
+    assert L(md["XMP-dc:Subject"]) == ["family", "Date: probably 1950s, ask Ann", "DATE: Y!"]
+    assert L(md["XMP-lr:HierarchicalSubject"]) == ["Notes|Date: probably 1950s, ask Ann"]
+
+
+def test_several_photographers_stay_separate(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-XMP-dc:Creator=Ann Smith", "-XMP-dc:Creator=Bob Jones", "-EXIF:Artist=Ann Smith; Bob Jones")
+    _details(p, {"creator": "Ann Smith, Bob Jones, Cy"})
+    md = _md(p)
+    assert md["XMP-dc:Creator"] == ["Ann Smith", "Bob Jones", "Cy"]
+    assert md["IFD0:Artist"] == "Ann Smith; Bob Jones; Cy"
+    assert _fields(p)["creator"] == "Ann Smith, Bob Jones, Cy"
+
+
+def test_a_face_a_little_outside_the_frame_can_be_renamed(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _regions(p, [{"Type": "Face", "Name": "Ann", "Area": _area(0.98, 0.3, 0.1, 0.1)}], 300, 200)
+    f = _fields(p)["faces"][0]
+    _details(p, {"faces": {f["key"]: {"name": "Anne", "was": {"name": "Ann", "box": f["box"]}}}})
+    assert [x["name"] for x in _fields(p)["faces"]] == ["Anne"]
+
+
+def test_a_copy_may_crop_away_an_unnamed_face(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _regions(p, [{"Type": "Face", "Name": "Ann", "Area": _area(0.2, 0.3, 0.1, 0.1)},
+                 {"Type": "Face", "Area": _area(0.8, 0.3, 0.1, 0.1)}], 300, 200)
+    key = _fields(p)["faces"][0]["key"]
+    with Image.open(p) as im:
+        w, h = im.size
+    lay, tiles = make_band_layout(w // 2, h, text="x", source_rect=[0, 0, w // 2, h])
+    state = {"templateId": "classic-polaroid", "template": {"id": "classic-polaroid"}, "blocks": [], "overrides": {}}
+    r = save(SaveRequest(path=p, mode="copy", layout=lay, tiles=tiles, state=state, settings=_settings(),
+                         meta_edits={"faces": {key: {"name": "Anne"}}}, fields=_fields(p)))
+    assert r.ok, r.error
+    assert [x["name"] for x in _fields(r.out_path)["faces"]] == ["Anne"]
+
+
+def test_long_text_stays_out_of_a_jpegs_exif(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-EXIF:ImageDescription=short")
+    _details(p, {"caption": "word " * 8000, "notes": "ü" * 9000})
+    md = _md(p)
+    assert "IFD0:ImageDescription" not in md and "ExifIFD:UserComment" not in md
+    f = _fields(p)
+    assert f["caption"] == ("word " * 8000).strip() and f["notes"] == "ü" * 9000
+    out = subprocess.run(["exiftool", "-validate", "-warning", "-a", p], capture_output=True, text=True).stdout
+    assert "multi-segment" not in out
+
+
+def test_an_edit_the_file_already_has_changes_nothing(tmp_path):
+    p = _img(str(tmp_path / "a.tif"))
+    orig = open(p, "rb").read()
+    r = _details(p, {"caption": ""})        # the file has no caption to clear
+    assert open(p, "rb").read() == orig and "Nothing needed changing" in r.notes[0]
+
+
+def test_tifffile_shape_notes_are_not_a_caption():
+    from photoband.imageio import ImageInfo
+    md = {"IFD0:ImageDescription": '{"shape": [10, 10, 3]}'}
+    f = normalize(md, ImageInfo("x.tif", "TIFF", 10, 10, 3, "uint8", "RGB", orientation=1))["fields"]
+    assert f["caption"] is None
+
+
+def test_windows_keywords_never_split_a_keyword(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-EXIF:XPKeywords=old")
+    _details(p, {"keywords": ["Smith; John", "picnic"]})
+    assert _md(p)["IFD0:XPKeywords"] == "picnic"
+    _details(p, {"keywords": []})
+    assert "IFD0:XPKeywords" not in _md(p)
+
+
+def test_a_png_copy_of_a_jpeg_gets_no_exif_block(tmp_path):
+    from photoband.imageio import probe as _probe
+    p = _img(str(tmp_path / "a.png"))
+    upd, dels, _ = metaedit.tag_updates({}, _probe(p), {}, {"notes": "n", "date": {"iso": "1952", "level": "year"}}, "PNG")
+    assert not any(k.startswith(("ExifIFD:", "IFD0:")) for k in upd)
+
+
+def test_the_log_keeps_every_replaced_value(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-XMP-dc:Title=Old", "-XMP-photoshop:Headline=Head")
+    r = _details(p, {"title": ""})
+    prev = next(n for n in r.notes if n.startswith("Previous values: "))
+    assert json.loads(prev[len("Previous values: "):]) == {"XMP-dc:Title": "Old", "XMP-photoshop:Headline": "Head"}
+
+
+def test_an_edit_made_on_another_face_is_refused(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _regions(p, [{"Type": "Face", "Name": "Bob", "Area": _area(0.5, 0.5, 0.1, 0.1)}], 300, 200)
+    r = save_details(p, {"faces": {"mwg:0": {"name": "Anne", "was": {"name": "Ann", "box": [0.1, 0.1, 0.1, 0.1]}}}}, _settings())
+    assert not r.ok and r.code == "changed"
