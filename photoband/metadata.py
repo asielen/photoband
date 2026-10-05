@@ -6,7 +6,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from captiontokens.dates import parse_date
+from captiontokens.dates import certainty_from_keywords, parse_date
 
 from .imageio import ImageInfo, orient_box
 
@@ -132,6 +132,8 @@ def _list(v) -> List[str]:
 FIELD_SOURCES = {
     "title": ["XMP-dc:Title", "IPTC:ObjectName", "XMP-photoshop:Headline", "EXIF:XPTitle"],
     "caption": ["XMP-dc:Description", "IPTC:Caption-Abstract", "EXIF:ImageDescription", "EXIF:XPComment"],
+    # free-text notes: photokin writes its analysis to UserComment; Instructions is IPTC's notes field
+    "notes": ["EXIF:UserComment", "XMP-exif:UserComment", "XMP-photoshop:Instructions", "IPTC:SpecialInstructions"],
     # when the photo was taken; never the scan / file date, which has its own field below
     "date": ["XMP-photoshop:DateCreated", "EXIF:DateTimeOriginal", "IPTC:DateCreated", "XMP-exif:DateTimeOriginal"],
     # when it was scanned or the file was made: on a scan this is the scan date
@@ -347,6 +349,7 @@ def normalize(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
                 seen.add(k.lower())
                 kws.append(k)
     fields["keywords"] = kws
+    fields["date_certainty"] = _date_certainty(md, fields, kws)
     fields["keyword_paths"] = _list(md.get("XMP-lr:HierarchicalSubject"))
     base = os.path.basename(info.path)
     fields["filename"] = base
@@ -356,6 +359,29 @@ def normalize(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
     fields["faces"] = faces["named"]
     fields["faces_unnamed_count"] = faces["unnamed_count"]
     return {"fields": fields, "sources": sources, "faces": faces, "warnings": list(faces["warnings"])}
+
+
+def _date_certainty(md: Dict[str, Any], fields: Dict[str, Any], kws: List[str]) -> Optional[str]:
+    """photokin's "DATE: Y!M~" keyword rates the DateTimeOriginal it wrote. It describes the
+    caption date only when that date is DateTimeOriginal, or another tag holding the same
+    date (Lightroom keeps XMP DateCreated in step with it); a different date in a tag that
+    wins over it (a person's own XMP DateCreated) is not what the keyword rates.
+
+    photokin's model adds the keyword to every photo it analyzes, rating its own guess, but
+    photokin writes that guess into DateTimeOriginal only when it replaces the date, and then
+    at midnight. A date with a time of day ("2017:04:05 17:01:07") came from a camera or
+    scanner clock and is not the guess the keyword rates, so it is never cut down."""
+    pattern = certainty_from_keywords(kws)
+    d = parse_date(fields.get("date"))
+    if pattern is None or d is None:
+        return None
+    dto = _text(_get(md, "EXIF:DateTimeOriginal", "XMP-exif:DateTimeOriginal")[0])
+    if parse_date(dto) != d:
+        return None
+    m = re.match(r"\s*\d{4}[-:]\d{1,2}[-:]\d{1,2}[ T](\d{1,2}):(\d{2})(?::(\d{2}))?", dto or "")
+    if m and any(int(x or 0) for x in m.groups()):
+        return None
+    return pattern
 
 
 def raw_listing(md: Dict[str, Any], limit: int = 400) -> List[Tuple[str, str]]:

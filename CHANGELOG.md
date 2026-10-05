@@ -2,6 +2,18 @@
 
 All notable changes to Photoband. The version lives in one place: `photoband/__init__.py`.
 
+## Unreleased
+
+### Captions from photokin
+- New `{notes}` field: the photo's notes from EXIF UserComment (where photokin writes its
+  analysis) or the IPTC/XMP Instructions field. Shown in the Details panel and the Insert menu.
+- `{keywords}` leaves out photokin's marker keywords ("DATE: Y!M~", "<model> Analyzed", "back",
+  "negative"); `{keywords|markers=show}` keeps them.
+- `{date}` follows photokin's "DATE: Y!M~" certainty keyword: guessed parts of the date are left
+  out ("Y!M~" prints only the year) and a guessed year prints as "c. 1925" (`circa=` changes the
+  prefix, `certainty=ignore` prints the stored date). It applies only to the DateTimeOriginal
+  photokin wrote: a date with a clock time (a camera's own) is never cut down.
+
 ## 1.0.1 - 2026-10-03
 
 ### Fixes

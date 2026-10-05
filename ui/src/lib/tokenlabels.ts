@@ -16,7 +16,8 @@ export interface FieldChoice {
 export const FIELD_CHOICES: FieldChoice[] = [
   { insert: 'title', label: 'Title', example: 'Picnic at Lake Merced', hint: 'The photo’s title from its photo information.' },
   { insert: 'caption', label: 'Description', example: 'Sunday picnic after church', hint: 'The photo’s description or caption from its photo information.' },
-  { insert: 'date:mmmm d, yyyy', label: 'Date', example: 'June 14, 1952', hint: 'When the photo was taken (never the date it was scanned). Missing parts (like an unknown day) are left out; an approximate date such as “circa 1950” is written as it is.' },
+  { insert: 'notes', label: 'Notes', example: 'Taken at Grandma’s 80th birthday', hint: 'Free-text notes stored with the photo (its User Comment or Instructions), such as photokin’s analysis.' },
+  { insert: 'date:mmmm d, yyyy', label: 'Date', example: 'June 14, 1952', hint: 'When the photo was taken (never the date it was scanned). Missing parts (like an unknown day) are left out; an approximate date such as “circa 1950” is written as it is. When photokin marked parts of the date as guesses, those parts are left out, and a guessed year gets “c.”.' },
   { insert: 'date:mmmm yyyy', label: 'Month and year', example: 'June 1952' },
   { insert: 'date:yyyy', label: 'Year', example: '1952' },
   { insert: 'date:yyyy-mm-dd', label: 'Date as numbers', example: '1952-06-14' },

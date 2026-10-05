@@ -4,7 +4,9 @@
 
     {
       "title": str | None, "caption": str | None, "creator": str | None,
+      "notes": str | None,                         # UserComment / Instructions
       "date": "1952-06" | PartialDate | None,      # when the photo was taken, never the scan date
+      "date_certainty": "Y!M~" | None,             # what of "date" is known (dates.apply_certainty)
       "digitized": "2023:05:01 12:00:00" | None,   # when it was scanned / the file was made
       "sublocation": str, "city": str, "state": str, "country": str,
       "keywords": [str, ...],
@@ -47,10 +49,14 @@ class TokenInfo:
 TOKENS: List[TokenInfo] = [
     TokenInfo("title", "Photo title (XMP dc:Title, IPTC ObjectName, Headline, XPTitle)", "{title}", ["case", "max"]),
     TokenInfo("caption", "Photo description (XMP dc:Description, IPTC Caption, ImageDescription)", "{caption}", ["case", "max"]),
+    TokenInfo("notes", "Notes about the photo (EXIF UserComment, IPTC/XMP Instructions)", "{notes}", ["case", "max"]),
     TokenInfo("creator", "Photographer or creator", "{creator}", ["case", "max"]),
     TokenInfo("date", "When the photo was taken (XMP DateCreated, EXIF DateTimeOriginal, IPTC DateCreated; never "
-              "the scan date); partial dates drop missing parts, approximate ones (\"circa 1950\") print as written",
-              "{date:mmmm d, yyyy}", ["case"], ["auto", "yyyy", "yy", "mmmm", "mmm", "mm", "m", "dd", "d", "iso"]),
+              "the scan date); partial dates drop missing parts, approximate ones (\"circa 1950\") print as written. "
+              "A \"DATE: Y!M~\" keyword (photokin) leaves out guessed parts and puts circa= (\"c. \") before a "
+              "guessed year; certainty=ignore prints the date as stored",
+              "{date:mmmm d, yyyy}", ["case", "circa", "certainty"],
+              ["auto", "yyyy", "yy", "mmmm", "mmm", "mm", "m", "dd", "d", "iso"]),
     TokenInfo("digitized", "When the photo was scanned or the file was made (EXIF/XMP CreateDate, DateTimeDigitized)",
               "{digitized:yyyy-mm-dd}", ["case"], ["auto", "yyyy", "yy", "mmmm", "mmm", "mm", "m", "dd", "d", "iso"]),
     TokenInfo("today", "Today's date", "{today:yyyy-mm-dd}", ["case"],
@@ -63,8 +69,9 @@ TOKENS: List[TokenInfo] = [
     TokenInfo("city", "City", "{city}", ["case", "max"]),
     TokenInfo("state", "State or province", "{state}", ["case", "max"]),
     TokenInfo("country", "Country", "{country}", ["case", "max"]),
-    TokenInfo("keywords", "Keywords, merged and deduplicated", "{keywords|sep=, |exclude=\"People,Scan\"}",
-              ["sep", "exclude", "case", "max"]),
+    TokenInfo("keywords", "Keywords, merged and deduplicated; photokin's markers (\"DATE: Y~\", \"... Analyzed\", "
+              "back, negative) are left out unless markers=show", "{keywords|sep=, |exclude=\"People,Scan\"}",
+              ["sep", "exclude", "markers", "case", "max"]),
     TokenInfo("filename", "File name with extension", "{filename}"),
     TokenInfo("stem", "File name without extension", "{stem}"),
     TokenInfo("folder", "Name of the containing folder", "{folder}"),
@@ -74,7 +81,8 @@ TOKEN_NAMES = {t.name for t in TOKENS}
 _TOKEN_INFO = {t.name: t for t in TOKENS}
 # Options accepted beyond those listed for the autocomplete.
 _EXTRA_OPTIONS = {"names": ["row_labels", "row_sep"]}
-_OPTION_VALUES = {"case": ("upper", "lower", "title"), "order": ("lr", "rl", "meta")}
+_OPTION_VALUES = {"case": ("upper", "lower", "title"), "order": ("lr", "rl", "meta"),
+                  "markers": ("hide", "show"), "certainty": ("keyword", "ignore")}
 DATE_TOKENS = ("date", "digitized", "today")
 
 
@@ -220,6 +228,14 @@ def _word_char(ch: str) -> bool:
     return unicodedata.category(ch)[0] in "LNM"
 
 
+def is_marker_keyword(kw: str) -> bool:
+    """A keyword photokin adds as a processing marker, not a description of the photo: its
+    date-certainty "DATE: Y!M~", its provenance "<Provider> <Model> Analyzed", and the part
+    markers "back" and "negative" (which side or form of the object a scan shows)."""
+    k = kw.strip().lower()
+    return k.startswith("date:") or k.endswith(" analyzed") or k in ("back", "negative")
+
+
 def _keyword_excluded(kw: str, paths: List[str], prefixes: List[str]) -> bool:
     cands = [kw] + [p for p in paths if p.split("|")[-1].strip().lower() == kw.lower()]
     return any(_prefix_match(c, e) for c in cands for e in prefixes)
@@ -281,9 +297,12 @@ class Resolver:
     def _value(self, tok: Token) -> Optional[str]:
         n, fmt, o = tok.name, tok.fmt, tok.options
         f = self.f
-        if n in ("title", "caption", "creator", "city", "state", "country"):
+        if n in ("title", "caption", "notes", "creator", "city", "state", "country"):
             return _apply_text_options(_s(f.get(n)).strip(), o)
-        if n in ("date", "digitized"):
+        if n == "date":
+            cert = None if o.get("certainty", "").lower() == "ignore" else _s(f.get("date_certainty")).strip()
+            return _apply_text_options(render_date(f.get(n), fmt, cert or None, unescape_value(o.get("circa", "c. "))), o)
+        if n == "digitized":
             return _apply_text_options(render_date(f.get(n), fmt), o)
         if n == "today":
             return _apply_text_options(format_date(PartialDate.from_date(self.today), fmt), o)
@@ -315,6 +334,8 @@ class Resolver:
             return _apply_text_options(", ".join(p for p in parts if p), o)
         if n == "keywords":
             kws = _str_list(f.get("keywords"))
+            if o.get("markers", "").lower() != "show":
+                kws = [k for k in kws if not is_marker_keyword(k)]
             excl = [e.strip().lower() for e in split_list(o.get("exclude", ""), ",") if e.strip()]
             if excl:
                 paths = _str_list(f.get("keyword_paths"))

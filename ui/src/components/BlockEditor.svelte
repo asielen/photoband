@@ -62,7 +62,7 @@
 
   // plain names for the photo information the Insert menu offers
   const LABELS: Record<string, string> = {
-    title: 'Title', caption: 'Description', creator: 'Photographer', date: 'Date', 'date:yyyy': 'Year', digitized: 'Scan date',
+    title: 'Title', caption: 'Description', notes: 'Notes', creator: 'Photographer', date: 'Date', 'date:yyyy': 'Year', digitized: 'Scan date',
     today: 'Today’s date', names: 'Names, left to right', 'names:rows': 'Names, row by row', 'names.count': 'Number of people',
     'faces.unnamed_count': 'Faces without a name', location: 'Place', city: 'City', state: 'State or province',
     country: 'Country', keywords: 'Keywords', filename: 'File name', stem: 'File name without extension', folder: 'Folder',

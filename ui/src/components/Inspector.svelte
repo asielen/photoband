@@ -163,6 +163,7 @@
     return [
       ['Title', f.title, src.title],
       ['Caption', f.caption, src.caption],
+      ['Notes', f.notes, src.notes],
       ['Date', dateRowText(dateText, f.date), src.date],
       ['Scan date', dateRowText(scanText, f.digitized), src.digitized],
       ['Creator', f.creator, src.creator],
