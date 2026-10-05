@@ -2,7 +2,7 @@
 
 All notable changes to Photoband. The version lives in one place: `photoband/__init__.py`.
 
-## Unreleased
+## 1.1.0 - 2026-10-05
 
 ### Edit the photo's details and faces
 - The Metadata tab is now a form: title, description, notes, date, photographer, place (location,
