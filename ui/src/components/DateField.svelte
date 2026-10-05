@@ -5,7 +5,7 @@
   // saying which parts are known and which are guesses), and read back the same way.
   import { app, type PhotoSession } from '../lib/store.svelte'
   import { post } from '../lib/api'
-  import { dateState, isoFor, normDate, type DateLevel } from '../lib/metaedits'
+  import { dateState, guessedPart, isoFor, normDate, type DateLevel } from '../lib/metaedits'
   import Segmented from './Segmented.svelte'
 
   let { s }: { s: PhotoSession } = $props()
@@ -28,6 +28,10 @@
   // the inputs: filled from the date shown, kept while a part is still being typed
   let level = $state<DateLevel>('day')
   let estimate = $state(false)
+  // the file's own pattern: kept while only the values change (see DateEdit.pattern)
+  let pattern = $state<string | undefined>(undefined)
+  // changed here since the date was shown (only then can the inputs be "incomplete")
+  let touched = $state(false)
   let year = $state<number | null>(null)
   let month = $state<number | null>(null)
   let day = $state<number | null>(null)
@@ -36,25 +40,32 @@
     const key = JSON.stringify([s.path, shown])
     if (key === lastKey) return
     lastKey = key
+    touched = false
     if (shown.kind === 'date') {
       const [y, m, d] = shown.iso.split('-').map(Number)
       level = shown.level
       estimate = shown.estimate
+      pattern = shown.pattern
       year = y
       month = m || (level === 'day' || level === 'month' ? month : null)
       day = d || (level === 'day' ? day : null)
     } else if (shown.kind === 'none') {
       year = month = day = null
       estimate = false
+      pattern = undefined
     } else {
+      // a date in words, or a month and day without a year: what is known is filled in
       year = shown.year
-      month = day = null
-      level = 'year'
+      month = shown.month ?? null
+      day = shown.day ?? null
+      level = shown.day ? 'day' : shown.month ? 'month' : 'year'
+      estimate = false
+      pattern = undefined
     }
   })
 
   const iso = $derived(isoFor(level, year, month, day))
-  const incomplete = $derived((year !== null || month !== null || day !== null) && !iso)
+  const incomplete = $derived(touched && (year !== null || month !== null || day !== null) && !iso)
   // a half-typed date is not what a save would write: saving waits until it is whole (or cleared)
   $effect(() => {
     const session = s
@@ -63,14 +74,21 @@
   })
 
   function apply() {
-    if (iso) app.setDate(s, { iso, level, estimate })
+    touched = true
+    if (iso) app.setDate(s, { iso, level, estimate, ...(pattern ? { pattern } : {}) })
   }
   function setEstimate(v: boolean) {
     estimate = v
+    pattern = undefined   // a new choice of what is a guess: the level's own pattern
     apply()
   }
+  // which part is the guess when it isn't the finest one shown (a known birthday, the year guessed)
+  const guessNote = $derived(estimate ? guessedPart(pattern, level) : '')
   function setLevel(v: string) {
     level = v as DateLevel
+    // another level is a new statement of what is known: not a guess unless ticked again
+    estimate = false
+    pattern = undefined
     if (level === 'day' && !day && month) day = 1
     if ((level === 'day' || level === 'month') && !month && year) month = 6
     apply()
@@ -96,12 +114,12 @@
 
 <div class="datef col">
   {#if shown.kind === 'text' && !edited}
-    <p class="small astext" data-tip="The file gives the date in words, so it is printed as written. Set a date to replace it.">“{shown.text}”</p>
+    <p class="small astext" data-tip={shown.year === null && shown.month ? 'The file knows the month and day but not the year, so captions print only those. Enter the year to replace it.' : 'The file gives the date in words, so it is printed as written. Set a date to replace it.'}>“{shown.text}”</p>
   {/if}
   <div class="row wrap gap">
     <Segmented small label="How much of the date is known" value={level} options={LEVELS.map((l) => ({ value: l.value, label: l.label, tip: l.tip }))} onchange={setLevel} />
     <label class="row est" data-tip={level === 'day' ? 'A best guess at the day (around Thanksgiving: pick the 23rd). Printed “c. November 23, 1944”.' : level === 'month' ? 'A best guess at the month (the summer of 1944: pick July). Printed “c. July 1944”.' : 'A best guess at the year (the 1920s: pick 1925). Printed “c. 1925”.'}>
-      <input type="checkbox" checked={estimate} onchange={(e) => setEstimate((e.target as HTMLInputElement).checked)} /> Estimated
+      <input type="checkbox" checked={estimate} onchange={(e) => setEstimate((e.target as HTMLInputElement).checked)} /> Estimated{guessNote ? ` (${guessNote})` : ''}
     </label>
     {#if shown.kind !== 'none' || edited}
       <button class="btn sm ghost icon" aria-label="No date" data-tip="Remove the date (and its date keyword)" onclick={clear}>×</button>

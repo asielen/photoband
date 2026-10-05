@@ -29,7 +29,7 @@ import re
 import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
-from .dates import PartialDate, certainty_from_keywords, check_format, format_date, render_date
+from .dates import PartialDate, check_format, format_date, render_date
 from .faces import Face, cluster_rows, order_names
 from .parser import (Group, Issue, Literal, Style, Token, escape_value, markup_to_plain,
                      parse, split_list, unescape_value)

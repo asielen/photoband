@@ -14,8 +14,11 @@ All notable changes to Photoband. The version lives in one place: `photoband/__i
   certain year without it); a guessed year keeps a known month and day ("c. June 14, 1944"); an
   unknown year with a known month and day prints "June 14" (a birthday). The date editor shows the
   dates it can't hold (an unknown year) as words.
-- `{keywords}` leaves out every keyword photokin takes for its date marker (any "DATE:" keyword);
-  editing the date still replaces only well-formed markers.
+- `{keywords}` leaves out every keyword photokin takes for its date marker: any keyword starting
+  "DATE:", in any case, including a note such as "Date: ask Ann" (kept in the file, shown as a
+  marker chip, `markers=show` prints it). Editing the date replaces only well-formed markers
+  ("DATE: Y!M~"), never such a note; a guessed year with a known month and day ("Y~M!D!") keeps
+  its pattern when only the values are edited.
 
 ## 1.1.0 - 2026-10-05
 

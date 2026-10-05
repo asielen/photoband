@@ -23,11 +23,36 @@ export interface DateEdit {
   level: DateLevel | 'circa'
   /** the finest part known is a best guess (summer 1944 -> July, around Thanksgiving -> the 23rd): printed "c." */
   estimate?: boolean
+  /** the file's own photokin pattern, kept while only the values are edited (a known birthday with a
+   *  guessed year stays "Y~M!D!"); none: the level's own (Y!M!D~, Y!M~, Y~ or the exact ones) */
+  pattern?: string
 }
 
-/** A date edit in today's shape (an older draft's 'circa' is an estimated year). */
-export function normDate(d: DateEdit): { iso: string; level: DateLevel; estimate: boolean } {
-  return d.level === 'circa' ? { iso: d.iso, level: 'year', estimate: true } : { iso: d.iso, level: d.level, estimate: !!d.estimate }
+export type NormDate = { iso: string; level: DateLevel; estimate: boolean; pattern?: string }
+
+/** A date edit in today's shape (an older draft's 'circa' is an estimated year; a pattern that is
+ *  just the level's own is left out, so equal dates compare equal). */
+export function normDate(d: DateEdit): NormDate {
+  const n: NormDate = d.level === 'circa' ? { iso: d.iso, level: 'year', estimate: true } : { iso: d.iso, level: d.level, estimate: !!d.estimate }
+  const p = d.pattern?.toUpperCase()
+  if (p && d.level !== 'circa' && p !== datePattern(n.level, n.estimate)) n.pattern = p
+  return n
+}
+
+/** Same date, level, guess and pattern? */
+export function sameDate(a: DateEdit | null | undefined, b: DateEdit | null | undefined): boolean {
+  if (!a || !b) return !a && !b
+  return JSON.stringify(normDate(a)) === JSON.stringify(normDate(b))
+}
+
+/** Which part of a pattern is the guess, in words, when it is not the finest one shown ("the
+ *  year" for a known birthday with a guessed year); '' otherwise. */
+export function guessedPart(pattern: string | undefined, level: DateLevel): string {
+  const m = /^Y([!?~@])(?:M([!?~@]))?(?:D([!?~@]))?$/.exec((pattern || '').toUpperCase())
+  if (!m) return ''
+  const g = (c?: string) => c === '~' || c === '@'
+  const parts = [g(m[1]) ? 'year' : '', g(m[2]) ? 'month' : '', g(m[3]) ? 'day' : ''].filter(Boolean)
+  return parts.length && !(parts.length === 1 && parts[0] === level) ? `the ${parts.join(' and ')}` : ''
 }
 
 export interface MetaEdits {
@@ -103,7 +128,10 @@ export function newFaceKey(): string {
 
 // ---------------------------------------------------------------------------- dates
 
-export type DateState = { kind: 'none' } | { kind: 'date'; iso: string; level: DateLevel; estimate: boolean } | { kind: 'text'; text: string; year: number | null }
+export type DateState =
+  | { kind: 'none' }
+  | { kind: 'date'; iso: string; level: DateLevel; estimate: boolean; pattern?: string }
+  | { kind: 'text'; text: string; year: number | null; month?: number; day?: number }
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
 const DATE_RE = /^\s*(\d{4})(?:[-:/.](\d{1,2})(?:[-:/.](\d{1,2}))?)?(?=$|[\sT])(.*)$/
@@ -143,10 +171,14 @@ export function dateState(fields: Record<string, any> | null | undefined): DateS
     if (py === '?') {
       // the year is unknown (a birthday): the editor can't hold that, so it is shown as words
       if (!monthKept) return { kind: 'none' }
-      return { kind: 'text', text: `${MONTH_NAMES[mo - 1]}${dayKept ? ` ${d}` : ''} (year unknown)`, year: null }
+      return { kind: 'text', text: `${MONTH_NAMES[mo - 1]}${dayKept ? ` ${d}` : ''} (year unknown)`, year: null,
+        month: mo, ...(dayKept ? { day: d } : {}) }
     }
     level = dayKept ? 'day' : monthKept ? 'month' : 'year'
     estimate = py !== '!' || (monthKept && pmo !== '!') || (dayKept && pd !== '!')
+    const iso0 = level === 'day' ? `${y}-${pad(mo)}-${pad(d)}` : level === 'month' ? `${y}-${pad(mo)}` : `${y}`
+    // the file's own pattern goes along (kept while only the values are edited)
+    return { kind: 'date', ...normDate({ iso: iso0, level, estimate, pattern }) }
   }
   const iso = level === 'day' ? `${y}-${pad(mo)}-${pad(d)}` : level === 'month' ? `${y}-${pad(mo || 6)}` : `${y}`
   return { kind: 'date', iso, level, estimate }

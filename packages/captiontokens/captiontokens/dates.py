@@ -466,7 +466,7 @@ def format_date(d: Optional[PartialDate], fmt: Optional[str] = None, no_year: bo
     if not fmt or fmt == "auto":
         fmt = auto_format(d) if not no_year else ("mmmm d" if d.day else "mmmm")
     if fmt == "iso":
-        return d.iso() if not no_year else d.iso()[5:]
+        return d.iso() if not no_year else "--" + d.iso()[5:]   # ISO 8601's form without a year
     items = _tokenize(fmt)
     # Resolve fields; mark missing ones.
     resolved = []
@@ -501,6 +501,8 @@ def format_date(d: Optional[PartialDate], fmt: Optional[str] = None, no_year: bo
                 a, b = resolved[idx - 1], resolved[idx + 1]
                 if a[0] == b[0] == "field" and {_FIELD_PART[a[1]], _FIELD_PART[b[1]]} == {"m", "y"}:
                     it[2] = it[2].replace(",", "") or " "
+    if not any(it[0] == "field" for it in resolved):
+        return ""   # none of the date's parts is printed: no label or separator alone either
     out = "".join(it[2] for it in resolved)
     if len(resolved) != len(items):
         out = _squeeze(_balance_brackets(out))
