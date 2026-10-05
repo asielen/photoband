@@ -2,6 +2,21 @@
 
 All notable changes to Photoband. The version lives in one place: `photoband/__init__.py`.
 
+## Unreleased
+
+### Estimated dates
+- The date editor has **Day · Month · Year** and an **Estimated** switch: a best-guess day (around
+  Thanksgiving: November 23 → "c. November 23, 1944"), month (the summer of 1944: July →
+  "c. July 1944") or year ("c. 1925"). Written with photokin's patterns (`Y!M!D~`, `Y!M~`, `Y~`).
+  An estimated day never keeps a camera's time of day.
+- Every date pattern in photokin's spec (`Y[!?~@](M[!?~@])?(D[!?~@])?`) is read: a guessed
+  month or day is printed with "c." instead of being dropped (a year-only format still prints the
+  certain year without it); a guessed year keeps a known month and day ("c. June 14, 1944"); an
+  unknown year with a known month and day prints "June 14" (a birthday). The date editor shows the
+  dates it can't hold (an unknown year) as words.
+- `{keywords}` leaves out every keyword photokin takes for its date marker (any "DATE:" keyword);
+  editing the date still replaces only well-formed markers.
+
 ## 1.1.0 - 2026-10-05
 
 ### Edit the photo's details and faces

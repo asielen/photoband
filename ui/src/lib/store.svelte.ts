@@ -1370,7 +1370,7 @@ class AppStore {
       const d = dateState(f)
       // a date in words ("Summer 1952") is no edit the date editor can make: undefined, not
       // "no date" (the caller says it could not be put back)
-      return d.kind === 'date' ? { iso: d.iso, level: d.level } : d.kind === 'none' ? null : undefined
+      return d.kind === 'date' ? { iso: d.iso, level: d.level, estimate: d.estimate } : d.kind === 'none' ? null : undefined
     }
     return String(f[k] ?? '')
   }

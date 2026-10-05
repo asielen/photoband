@@ -5,7 +5,7 @@ An edit set (``edits``) is the draft's ``meta``::
 
     {"title": "Picnic", "caption": "", ...}       a text field present = edited ("" = clear)
     {"keywords": ["family", "picnic"]}           the whole visible list (no "DATE:" markers)
-    {"date": {"iso": "1952-06", "level": "month"}}   or None to clear the date
+    {"date": {"iso": "1952-06", "level": "month", "estimate": False}}   or None to clear the date
     {"faces": {"<face key>": {"name": .., "box": [x, y, w, h] | None, "deleted": True,
                               "was": {"name": .., "box": ..}},
                "new:<id>": {"name": .., "box": [..]}}}
@@ -39,7 +39,15 @@ class EditError(ValueError):
 
 TEXT_FIELDS = ("title", "caption", "notes", "creator", "sublocation", "city", "state", "country")
 MULTILINE = ("caption", "notes")
+# how much of a date is known, and whether its finest part is a best guess (photokin's patterns):
+# a day (around Thanksgiving: Y!M!D~), a month (the summer: Y!M~) or a year (the 1920s: Y~)
 LEVELS = {"day": "Y!M!D!", "month": "Y!M!", "year": "Y!", "circa": "Y~"}
+ESTIMATED = {"day": "Y!M!D~", "month": "Y!M~", "year": "Y~"}
+
+
+def date_pattern(d: Dict[str, Any]) -> str:
+    """The "DATE:" keyword pattern for a date edit."""
+    return ESTIMATED[d["level"]] if d.get("estimate") else LEVELS[d["level"]]
 # photokin's date-certainty keyword, and only that: a keyword like "Date: ask Ann" is the user's own
 DATE_MARKER = re.compile(r"\s*DATE:\s*Y[!?~@](?:M[!?~@])?(?:D[!?~@])?\s*$", re.IGNORECASE)
 
@@ -172,10 +180,13 @@ def _check_date(v: Any) -> Optional[Dict[str, str]]:
     if not isinstance(v, dict) or v.get("level") not in LEVELS or not isinstance(v.get("iso"), str):
         raise EditError("date must be {iso, level}")
     iso, level = v["iso"].strip(), v["level"]
+    estimate = bool(v.get("estimate"))
+    if level == "circa":          # (an older edit: an estimated year)
+        level, estimate = "year", True
     m = re.fullmatch(r"(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?", iso)
     if not m:
         raise EditError("date must be written as YYYY, YYYY-MM or YYYY-MM-DD")
-    want = {"day": 3, "month": 2, "year": 1, "circa": 1}[level]
+    want = {"day": 3, "month": 2, "year": 1}[level]
     if sum(1 for g in m.groups() if g) != want:
         raise EditError(f"a {level} date is written as " + ("YYYY-MM-DD", "YYYY-MM", "YYYY")[3 - want])
     y = int(m.group(1))
@@ -185,7 +196,7 @@ def _check_date(v: Any) -> Optional[Dict[str, str]]:
         PartialDate(y, int(m.group(2) or 0), int(m.group(3) or 0))
     except ValueError:
         raise EditError(f"{iso} is not a date")
-    return {"iso": iso, "level": level}
+    return {"iso": iso, "level": level, "estimate": estimate}
 
 
 def _check_faces(v: Any) -> Dict[str, Dict[str, Any]]:
@@ -268,7 +279,7 @@ def keywords_after(fields: Dict[str, Any], edits: Dict[str, Any]) -> List[str]:
     kws = list(edits["keywords"]) if "keywords" in edits else [k for k in cur if not is_date_marker(k)]
     if "date" in edits:
         if edits["date"] is not None:
-            kws.append(f"DATE: {LEVELS[edits['date']['level']]}")
+            kws.append(f"DATE: {date_pattern(edits['date'])}")
     else:
         kws += [k for k in cur if is_date_marker(k)]
     return kws
@@ -292,7 +303,7 @@ def apply_to_fields(fields: Dict[str, Any], edits: Optional[Dict[str, Any]]) -> 
     if "date" in edits:
         d = edits["date"]
         f["date"] = d["iso"] if d else None
-        f["date_certainty"] = LEVELS[d["level"]] if d else None
+        f["date_certainty"] = date_pattern(d) if d else None
     if edits.get("faces"):
         named, unnamed = _faces_after(fields, edits["faces"])
         f["faces"], f["faces_unnamed"], f["faces_unnamed_count"] = named, unnamed, len(unnamed)
@@ -513,8 +524,9 @@ def _date_updates(w: _Writer, d: Optional[Dict[str, str]]) -> None:
     partial = iso.replace("-", ":")
     keep_time = False
     cur = None
-    if level == "day":
-        # the same day as the file says (a camera's own date): its time of day stays
+    if level == "day" and not d.get("estimate"):
+        # the same day as the file says (a camera's own date): its time of day stays (an estimated
+        # day has no time of day: it is written at midnight, as photokin writes its guesses)
         cur = next((t[k] for k in DATE_TAGS_ORIGINAL if _same_day(t.get(k), (y, m, dd))), None)
         keep_time = cur is not None
     if keep_time:

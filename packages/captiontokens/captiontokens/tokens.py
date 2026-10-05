@@ -277,7 +277,9 @@ def is_marker_keyword(kw: str) -> bool:
     date-certainty "DATE: Y!M~", its provenance "<Provider> <Model> Analyzed", and the part
     markers "back" and "negative" (which side or form of the object a scan shows)."""
     k = kw.strip().lower()
-    return certainty_from_keywords([kw]) is not None or k.endswith(" analyzed") or k in ("back", "negative")
+    # photokin takes any keyword starting "DATE:" for its date marker (a reviewed date), well-formed
+    # or not, so none of them is a description of the photo
+    return k.startswith("date:") or k.endswith(" analyzed") or k in ("back", "negative")
 
 
 def _keyword_excluded(kw: str, paths: List[str], prefixes: List[str]) -> bool:

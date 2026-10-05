@@ -708,3 +708,32 @@ def test_a_single_photographer_typed_with_a_comma_stays_one():
     assert metaedit.apply_to_fields({}, {"creator": ["Smith, Ann", "Bo"]})["creator"] == "Smith, Ann; Bo"
     with pytest.raises(metaedit.EditError):
         metaedit.validate({"creator": ["a\nb"]})
+
+
+# -- estimated months and days ------------------------------------------------------------
+
+@pytest.mark.parametrize("iso, level, shown, marker", [
+    ("1944-11-23", "day", "c. November 23, 1944", "Y!M!D~"),    # around Thanksgiving
+    ("1944-07", "month", "c. July 1944", "Y!M~"),               # the summer of 1944
+    ("1925", "year", "c. 1925", "Y~"),
+])
+def test_estimated_dates(tmp_path, iso, level, shown, marker):
+    p = _img(str(tmp_path / "a.jpg"))
+    _details(p, {"date": {"iso": iso, "level": level, "estimate": True}})
+    assert _caption(p) == shown
+    md = _md(p)
+    assert L(md["XMP-dc:Subject"]) == [f"DATE: {marker}"]
+    assert md["ExifIFD:DateTimeOriginal"].endswith("00:00:00")
+
+
+def test_an_estimated_day_never_keeps_a_cameras_time(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-ExifIFD:DateTimeOriginal=1944:11:23 17:01:07")
+    _details(p, {"date": {"iso": "1944-11-23", "level": "day", "estimate": True}})
+    assert _md(p)["ExifIFD:DateTimeOriginal"] == "1944:11:23 00:00:00"
+    assert _caption(p) == "c. November 23, 1944"
+
+
+def test_an_older_circa_edit_is_an_estimated_year():
+    assert metaedit.validate({"date": {"iso": "1925", "level": "circa"}})["date"] == \
+        {"iso": "1925", "level": "year", "estimate": True}
