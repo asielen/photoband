@@ -368,11 +368,14 @@ def normalize(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
                     continue   # tifffile's note of the array shape, not a description
                 v, src = cand, c
                 break
-            if key == "creator" and isinstance(v, list) and len(v) > 1:
-                # several photographers, joined so the writer can split them again exactly
-                # ("Smith, John; Jones, Mary" when a name holds a comma)
+            if key == "creator":
+                # the photographers one by one (edited as a list, so no name is ever split), and
+                # joined for captions ("Smith, John; Jones, Mary" when a name holds a comma)
                 from .metaedit import creator_separator
-                v = creator_separator(v).join(str(x).strip() for x in v if str(x).strip())
+                fields["creators"] = [str(x).strip() for x in (v if isinstance(v, list) else [v] if v else [])
+                                      if str(x).strip()]
+                if isinstance(v, list) and len(v) > 1:
+                    v = creator_separator(v).join(fields["creators"])
             fields[key] = _text(v)
         if src:
             sources[key] = src

@@ -52,6 +52,12 @@
 
   const iso = $derived(isoFor(level, year, month, day))
   const incomplete = $derived((year !== null || month !== null || day !== null) && !iso)
+  // a half-typed date is not what a save would write: saving waits until it is whole (or cleared)
+  $effect(() => {
+    const session = s
+    session.invalidDetail = incomplete ? 'Finish the date in the Metadata tab first (or clear it): the date shown is not complete.' : null
+    return () => { session.invalidDetail = null }
+  })
 
   function apply() {
     if (iso) app.setDate(s, { iso, level })

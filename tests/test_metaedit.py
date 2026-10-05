@@ -489,11 +489,15 @@ def test_a_users_own_date_keyword_is_kept(tmp_path):
 def test_several_photographers_stay_separate(tmp_path):
     p = _img(str(tmp_path / "a.jpg"))
     _et(p, "-XMP-dc:Creator=Ann Smith", "-XMP-dc:Creator=Bob Jones", "-EXIF:Artist=Ann Smith; Bob Jones")
-    _details(p, {"creator": "Ann Smith, Bob Jones, Cy"})
+    assert _fields(p)["creators"] == ["Ann Smith", "Bob Jones"]
+    _details(p, {"creator": ["Ann Smith", "Bob Jones", "Cy"]})
     md = _md(p)
     assert md["XMP-dc:Creator"] == ["Ann Smith", "Bob Jones", "Cy"]
     assert md["IFD0:Artist"] == "Ann Smith; Bob Jones; Cy"
     assert _fields(p)["creator"] == "Ann Smith, Bob Jones, Cy"
+    # a text is one name, never split (a comma in it is part of the name)
+    _details(p, {"creator": ["Smith, Ann", "Bob Jones"]})
+    assert _md(p)["XMP-dc:Creator"] == ["Smith, Ann", "Bob Jones"]
 
 
 def test_a_face_a_little_outside_the_frame_can_be_renamed(tmp_path):
@@ -591,7 +595,7 @@ def test_creators_with_commas_in_their_names_stay_two(tmp_path):
     _et(p, "-XMP-dc:Creator=Smith, John", "-XMP-dc:Creator=Jones, Mary")
     f = _fields(p)
     assert f["creator"] == "Smith, John; Jones, Mary"
-    _details(p, {"creator": "Smith, John; Jones, Mary; Lee, Ann"})
+    _details(p, {"creator": ["Smith, John", "Jones, Mary", "Lee, Ann"]})
     assert _md(p)["XMP-dc:Creator"] == ["Smith, John", "Jones, Mary", "Lee, Ann"]
 
 
@@ -662,7 +666,7 @@ def test_a_semicolon_inside_a_creators_name_is_kept(tmp_path):
     _et(p, "-XMP-dc:Creator=ACME; Inc.", "-XMP-dc:Creator=Jane")
     f = _fields(p)
     assert f["creator"] == "ACME; Inc., Jane"
-    _details(p, {"creator": "ACME; Inc., Jane, Bo"})
+    _details(p, {"creator": ["ACME; Inc.", "Jane", "Bo"]})
     assert _md(p)["XMP-dc:Creator"] == ["ACME; Inc.", "Jane", "Bo"]
 
 
@@ -685,3 +689,22 @@ def test_a_placeholder_date_does_not_hide_the_cameras_time(tmp_path):
     md = _md(p)
     assert str(md["XMP-exif:DateTimeOriginal"]).startswith("2017:04:05 17:01:07")
     assert md["ExifIFD:DateTimeOriginal"].startswith("2017:04:05 17:01:07")
+
+
+
+# -- Codex review, round 4 ---------------------------------------------------------------
+
+def test_date_copies_take_the_cameras_exact_time(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-ExifIFD:DateTimeOriginal=2017:04:05 17:01:07", "-XMP-exif:DateTimeOriginal=2017:04:05 09:00:00")
+    _details(p, {"date": {"iso": "2017-04-05", "level": "day"}})
+    md = _md(p)
+    assert md["ExifIFD:DateTimeOriginal"] == "2017:04:05 17:01:07"
+    assert str(md["XMP-exif:DateTimeOriginal"]).startswith("2017:04:05 17:01:07")
+
+
+def test_a_single_photographer_typed_with_a_comma_stays_one():
+    assert metaedit.validate({"creator": "Smith, Ann"}) == {"creator": "Smith, Ann"}
+    assert metaedit.apply_to_fields({}, {"creator": ["Smith, Ann", "Bo"]})["creator"] == "Smith, Ann; Bo"
+    with pytest.raises(metaedit.EditError):
+        metaedit.validate({"creator": ["a\nb"]})

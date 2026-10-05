@@ -63,6 +63,8 @@ export class PhotoSession {
   draftTimer: any = null
   draftPendingSince = 0
   resolveTimer: any = null
+  /** why a detail can't be saved as it is shown (a half-typed date): saving waits for it */
+  invalidDetail = $state<string | null>(null)
   proxyVersion = $state(0)
   erasePreview = $state<string | null>(null)
   /** bumped by every relayout, so a slower earlier layout never replaces a newer one */
@@ -1160,6 +1162,27 @@ class AppStore {
     return String(s.meta?.fields?.[key] ?? '')
   }
 
+  /** The photographers the file names, one by one. */
+  fileCreators(s: PhotoSession): string[] {
+    const f = s.meta?.fields || {}
+    if (Array.isArray(f.creators)) return f.creators as string[]
+    return f.creator ? [String(f.creator)] : []
+  }
+
+  /** The photographers as they will be saved. */
+  creators(s: PhotoSession): string[] {
+    const e = s.draft.meta?.creator
+    if (e === undefined) return this.fileCreators(s)
+    return Array.isArray(e) ? e : e.trim() ? [e.trim()] : []
+  }
+
+  setCreators(s: PhotoSession, list: string[]) {
+    const file = this.fileCreators(s)
+    const same = list.length === file.length && list.every((x, i) => x === file[i])
+    if (same) this.setMeta(s, {}, ['creator'], true)
+    else this.setMeta(s, { creator: list }, [], true)
+  }
+
   /** The keywords the file has, without photokin's date marker (the date editor owns that one). */
   fileKeywords(s: PhotoSession): string[] {
     return ((s.meta?.fields?.keywords as string[]) || []).filter((k) => !isDateMarker(k))
@@ -1342,6 +1365,7 @@ class AppStore {
     const f = meta?.fields || {}
     if (k === 'faces') return undefined
     if (k === 'keywords') return ((f.keywords as string[]) || []).filter((x) => !isDateMarker(x))
+    if (k === 'creator') return Array.isArray(f.creators) ? f.creators : f.creator ? [String(f.creator)] : []
     if (k === 'date') {
       const d = dateState(f)
       // a date in words ("Summer 1952") is no edit the date editor can make: undefined, not
@@ -1364,6 +1388,10 @@ class AppStore {
   /** Write the edited details into the photo itself (nothing else changes). */
   async saveDetails(s: PhotoSession): Promise<boolean> {
     await this.commitTyping()
+    if (s.invalidDetail) {
+      this.toast('warn', s.invalidDetail)
+      return false
+    }
     const edits = s.draft.meta
     if (!s.meta || !hasEdits(edits)) return false
     if (this.batchReview) {
@@ -1459,6 +1487,7 @@ class AppStore {
   canSave(s: PhotoSession | null): string | null {
     if (this.batchReview) return 'In batch review, edits are saved with Save all.'
     if (!s?.meta || !s.layout) return 'Nothing to save yet.'
+    if (s.invalidDetail) return s.invalidDetail
     const info = s.meta.info
     if (info.save_blocked) return info.save_blocked
     if (info.pages > 1 && !this.settings.saving.allowMultipageSave) return 'This is a multi-page TIFF, and saving keeps only the first page. Allow it in Settings › Saving › Advanced.'

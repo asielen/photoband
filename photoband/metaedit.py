@@ -48,6 +48,7 @@ MAX_LINE = 2000
 MAX_KEYWORDS = 500
 MAX_KEYWORD = 200
 MAX_FACES = 500
+MAX_CREATORS = 50
 
 # IPTC IIM 4.2 maximum lengths in bytes
 IPTC_MAX = {"IPTC:ObjectName": 64, "IPTC:Caption-Abstract": 2000, "IPTC:By-line": 32, "IPTC:Sub-location": 32,
@@ -139,7 +140,12 @@ def validate(edits: Any) -> Dict[str, Any]:
         raise EditError("details must be an object")
     out: Dict[str, Any] = {}
     for k, v in edits.items():
-        if k in TEXT_FIELDS:
+        if k == "creator" and isinstance(v, list):
+            if len(v) > MAX_CREATORS:
+                raise EditError(f"at most {MAX_CREATORS} photographers")
+            names = [_check_text("A photographer", x, False, MAX_LINE).strip() for x in v]
+            out[k] = [x for x in names if x]
+        elif k in TEXT_FIELDS:
             out[k] = _check_text(k, v, k in MULTILINE, MAX_TEXT if k in MULTILINE else MAX_LINE).strip()
         elif k == "keywords":
             if not isinstance(v, list) or len(v) > MAX_KEYWORDS:
@@ -277,6 +283,10 @@ def apply_to_fields(fields: Dict[str, Any], edits: Optional[Dict[str, Any]]) -> 
     for k in TEXT_FIELDS:
         if k in edits:
             f[k] = edits[k] or None
+    if "creator" in edits:
+        names = creator_list(edits["creator"])
+        f["creators"] = names
+        f["creator"] = creator_separator(names).join(names) if names else None
     if "keywords" in edits or "date" in edits:
         f["keywords"] = keywords_after(fields, edits)
     if "date" in edits:
@@ -385,20 +395,17 @@ class _Writer:
             self.notes.append(f"{key.split(':')[1]} removed from IPTC (it can't hold this text); XMP keeps it")
 
 
+def creator_list(v: Any) -> List[str]:
+    """The photographers an edit names: a list as given, a text as one name (never split)."""
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return [v.strip()] if isinstance(v, str) and v.strip() else []
+
+
 def creator_separator(entries: List[Any]) -> str:
     """How the reader joins a list of photographers: ", ", or "; " when a name holds a comma
     ("Smith, John"). The writer splits an edited value on the very same separator."""
     return "; " if any("," in str(x) for x in entries) else ", "
-
-
-def _creators(t: Dict[str, Any], value: str) -> List[str]:
-    """Several photographers: a file that lists them separately keeps them separate, split on the
-    separator the reader put between them (never another one: "ACME; Inc." is one name in a list
-    joined with ", "). A single photographer stays one value, whatever it holds."""
-    cur = t.get("XMP-dc:Creator", t.get("IPTC:By-line"))
-    if isinstance(cur, list) and len(cur) > 1:
-        return [x.strip() for x in value.split(creator_separator(cur)) if x.strip()]
-    return [value]
 
 
 def _text_updates(w: _Writer, field: str, value: str, old: Optional[str]) -> None:
@@ -408,8 +415,13 @@ def _text_updates(w: _Writer, field: str, value: str, old: Optional[str]) -> Non
         if "ExifIFD:UserComment" in t and value:
             w.delete("ExifIFD:UserComment")   # too long for the JPEG's EXIF: XMP holds the notes
         primary, mirrors = "XMP-exif:UserComment", ()
+    if field == "creator":
+        # photographers are edited as a list (one name per entry): never split from text
+        many = creator_list(value)
+        value = "; ".join(many)   # EXIF Artist / Windows: one text, "; " between names
+    else:
+        many = [value]
     if value:
-        many = _creators(t, value) if field == "creator" else [value]
         one = "; ".join(many)
         w.set(primary, many if primary in LIST_TAGS else value)
         for m in mirrors:
@@ -510,7 +522,7 @@ def _date_updates(w: _Writer, d: Optional[Dict[str, str]]) -> None:
         # disagree (or hold a placeholder) are brought to that same moment
         same = str(cur)
         for k in DATE_TAGS_ORIGINAL:
-            if k in t and not _same_day(t[k], (y, m, dd)) and (k != "ExifIFD:DateTimeOriginal" or w.has_exif):
+            if k in t and _moment(t[k]) != _moment(same) and (k != "ExifIFD:DateTimeOriginal" or w.has_exif):
                 w.set(k, same)
         if "IPTC:DateCreated" in t and not _same_day(t["IPTC:DateCreated"], (y, m, dd)):
             w.set("IPTC:DateCreated", f"{y:04d}:{m:02d}:{dd:02d}")
@@ -527,6 +539,13 @@ def _date_updates(w: _Writer, d: Optional[Dict[str, str]]) -> None:
         if "IPTC:TimeCreated" in t:
             w.delete("IPTC:TimeCreated")
     w.set("XMP-photoshop:DateCreated", partial)
+
+
+def _moment(v: Any) -> str:
+    """A date and time written either way ("2017:04:05 17:01:07", "2017-04-05T17:01:07+02:00"),
+    as one comparable text: the date and the time of day to the second."""
+    m = re.match(r"\s*(\d{4})[-:](\d{2})[-:](\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?", str(v or ""))
+    return "" if not m else "{}:{}:{} {}:{}:{}".format(*[g or "00" for g in m.groups()])
 
 
 def _same_day(v: Any, ymd: Tuple[int, int, int]) -> bool:
@@ -783,6 +802,9 @@ def check_written(expected: Dict[str, Any], got: Dict[str, Any], edits: Dict[str
     for k in TEXT_FIELDS:
         if k in edits and _norm_text(expected.get(k)) != _norm_text(got.get(k)):
             bad.append(k)
+    if "creator" in edits and "creator" not in bad and \
+            [x.strip() for x in expected.get("creators") or []] != [x.strip() for x in got.get("creators") or []]:
+        bad.append("creator")
     if "keywords" in edits or "date" in edits:
         if {x.lower() for x in expected.get("keywords") or []} != {x.lower() for x in got.get("keywords") or []}:
             bad.append("keywords")

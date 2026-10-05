@@ -600,4 +600,22 @@ describe('edited photo details', () => {
     expect(app.toasts.some((t: any) => /can’t be written back/.test(t.text))).toBe(true)
     void post
   })
+
+  it('photographers are edited as a list: a comma is part of a name', async () => {
+    server.fields = { creator: 'Ann Smith, Bob Jones', creators: ['Ann Smith', 'Bob Jones'] }
+    const { app, s } = await open()
+    app.setCreators(s, ['Smith, Ann', 'Bob Jones'])
+    expect(s.draft.meta!.creator).toEqual(['Smith, Ann', 'Bob Jones'])
+    app.setCreators(s, ['Ann Smith', 'Bob Jones'])
+    expect(s.draft.meta).toBeUndefined()
+  })
+
+  it('a half-typed date blocks saving until it is whole', async () => {
+    const { app, s } = await open()
+    s.invalidDetail = 'Finish the date first'
+    expect(app.canSave(s)).toBe('Finish the date first')
+    app.setDetail(s, 'title', 'x')
+    expect(await app.saveDetails(s)).toBe(false)
+    expect(server.details.length).toBe(0)
+  })
 })

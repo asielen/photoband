@@ -25,7 +25,8 @@ export interface MetaEdits {
   title?: string
   caption?: string
   notes?: string
-  creator?: string
+  /** the photographers, one name per entry (a text from an older draft is one name) */
+  creator?: string | string[]
   sublocation?: string
   city?: string
   state?: string

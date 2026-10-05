@@ -5,6 +5,7 @@
   import { post } from '../lib/api'
   import { dateRowText } from '../lib/datetext'
   import { detailProblem, editCount, type TextField } from '../lib/metaedits'
+  import CreatorField from './CreatorField.svelte'
   import DateField from './DateField.svelte'
   import KeywordField from './KeywordField.svelte'
   import PeopleList from './PeopleList.svelte'
@@ -33,7 +34,6 @@
     { key: 'title', label: 'Title' },
     { key: 'caption', label: 'Description', multi: true },
     { key: 'notes', label: 'Notes', multi: true, placeholder: 'Notes kept with the photo' },
-    { key: 'creator', label: 'Photographer' },
   ]
   const PLACE: { key: TextField; label: string }[] = [
     { key: 'sublocation', label: 'Location' },
@@ -103,6 +103,12 @@
         {#if clearNote(f.key)}<p class="small faint">{clearNote(f.key)}</p>{/if}
       </div>
     {/each}
+
+    <div class="fld">
+      <div class="lab row"><label for="d-creator" data-tip={tip('creator', 'Photographers')} data-tip-side="left">Photographers</label>
+        {#if edited('creator')}<button class="dot" aria-label="Undo the photographer edit" data-tip="Edited. Click to go back to the file’s photographers." onclick={() => app.resetDetail(s, 'creator')}></button>{/if}</div>
+      <CreatorField {s} id="d-creator" />
+    </div>
 
     <div class="fld">
       <div class="lab row"><span data-tip={tip('date', 'Date')} data-tip-side="left">Date</span>
