@@ -604,3 +604,52 @@ def test_date_copies_follow_the_day_when_the_cameras_time_is_kept(tmp_path):
     assert md["ExifIFD:DateTimeOriginal"] == "2017:04:05 17:01:07"
     assert str(md["XMP-exif:DateTimeOriginal"]).startswith("2017:04:05 17:01:07")
     assert md["IPTC:DateCreated"] == "2017:04:05"
+
+
+# -- Codex review, round 2 ---------------------------------------------------------------
+
+def test_a_batch_kept_details_draft_has_the_editors_whole_shape(tmp_path):
+    from photoband import drafts
+    p = _img(str(tmp_path / "a.jpg"))
+    drafts.save_draft(p, {"templateId": "t", "blocks": {}, "meta": {"title": "T"}, "_hash": "h"})
+    assert drafts.keep_details_if(p, "h")
+    d = drafts.load_draft(p)
+    assert d["mode"] == "band" and "sourceRect" in d and "photoRect" in d and d["keepBand"] is False
+
+
+def test_written_details_drafts_are_compared_as_saved(tmp_path):
+    from photoband import drafts
+    p = _img(str(tmp_path / "a.jpg"))
+    drafts.save_draft(p, {"templateId": "t", "blocks": {}, "meta": {"title": "Picnic "}})
+    assert drafts.delete_written_details(p, {"title": "Picnic"})
+    assert drafts.load_draft_any(p) is None
+
+
+def test_person_in_image_follows_a_rename_whatever_its_case(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _regions(p, [{"Type": "Face", "Name": "ann", "Area": _area(0.2, 0.3, 0.1, 0.1)}], 300, 200,
+             {"XMP-iptcExt:PersonInImage": ["Ann"]})
+    key = _fields(p)["faces"][0]["key"]
+    _details(p, {"faces": {key: {"name": "Anne"}}})
+    assert L(_md(p)["XMP-iptcExt:PersonInImage"]) == ["Anne"]
+    assert [f["name"] for f in _fields(p)["faces"]] == ["Anne"]
+
+
+def test_a_renamed_person_keeps_their_place_in_lightrooms_hierarchy(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _regions(p, [{"Type": "Face", "Name": "Ann", "Area": _area(0.2, 0.3, 0.1, 0.1)}], 300, 200,
+             {"XMP-dc:Subject": ["Ann", "picnic"], "XMP-lr:HierarchicalSubject": ["People|Ann", "Events|picnic"]})
+    key = _fields(p)["faces"][0]["key"]
+    _details(p, {"faces": {key: {"name": "Anne"}}, "keywords": ["picnic", "Anne"]})
+    assert L(_md(p)["XMP-lr:HierarchicalSubject"]) == ["People|Anne", "Events|picnic"]
+
+
+def test_only_a_backup_of_this_photo_counts_as_kept(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    os.makedirs(tmp_path / "_originals")
+    other = _img(str(tmp_path / "_originals" / "a-original.jpg"), size=(200, 300))   # not this photo
+    r = _details(p, {"title": "One"}, backupOriginals=True)
+    assert r.backup_path and os.path.basename(r.backup_path) == "a-original-2.jpg"
+    assert os.path.exists(other)
+    r2 = _details(p, {"title": "Two"}, backupOriginals=True)          # now a real backup exists
+    assert not r2.backup_path

@@ -138,7 +138,8 @@ export function draftForFile(
   const stale = !!_stat && !sameFile(_stat, stat)
   let droppedFaces = 0
   let draft: PhotoDraft
-  if (!stale) draft = { ...d, templateId }
+  // (a draft missing a field the editor checks, e.g. one written by the server, gets the base's)
+  if (!stale) draft = { ...base, ...d, templateId }
   else {
     // edited details are kept (they don't depend on the pixels); face edits only where their face
     // is found again in this version, and only when the photo still has the same shape

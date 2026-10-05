@@ -224,6 +224,10 @@ def delete_draft_if(path: str, state_hash: str, unhashed: bool = False) -> bool:
 
 
 DETAIL_KEYS = ("templateId", "meta", "faceRows", "_stat", "_size")
+# the editor's draft for a photo with nothing chosen about its geometry (store.svelte.ts BAND_GEOMETRY):
+# a draft written here has the editor's whole shape, so no field the editor checks is missing
+BAND_GEOMETRY = {"mode": "band", "sourceRect": None, "photoRect": None, "existingChoice": None,
+                 "brushAdd": None, "brushRemove": None, "keepBand": False}
 
 
 def keep_details_if(path: str, state_hash: str) -> bool:
@@ -237,7 +241,7 @@ def keep_details_if(path: str, state_hash: str) -> bool:
         if not st.get("meta"):
             delete_draft(path)
             return True
-        _save_draft(path, {k: st[k] for k in DETAIL_KEYS if k in st} | {"overrides": {}, "blocks": {}})
+        _save_draft(path, {k: st[k] for k in DETAIL_KEYS if k in st} | {"overrides": {}, "blocks": {}} | BAND_GEOMETRY)
         return True
 
 
@@ -249,9 +253,19 @@ def delete_written_details(path: str, meta: Any) -> bool:
         return False
     with _locked(path):
         st = load_draft_any(path)
-        if not isinstance(st, dict) or st.get("meta") != meta:
+        if not isinstance(st, dict) or not _same_edits(st.get("meta"), meta):
             return False
         if any(isinstance(b, dict) and b.get("custom") for b in (st.get("blocks") or {}).values()) or st.get("overrides"):
             return False
         delete_draft(path)
         return True
+
+
+def _same_edits(a: Any, b: Any) -> bool:
+    """The same details once both are as a save writes them (trimmed, line endings...): a draft
+    keeps what was typed, a save writes it validated."""
+    from .metaedit import EditError, validate
+    try:
+        return validate(a) == validate(b)
+    except EditError:
+        return False

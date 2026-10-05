@@ -562,4 +562,13 @@ describe('edited photo details', () => {
     app.updateFace(s, 'mwg:0', { name: 'Robert' })      // Bob is there for this face: it follows
     expect(app.keywords(s)).toEqual(['Ann', 'Robert'])
   })
+
+  it('a stored draft missing editor fields (written by the server) gets them from the base', async () => {
+    const { draftForFile } = await import('../lib/store.svelte')
+    const base: any = { templateId: 'tpl', overrides: {}, blocks: {}, mode: 'band', sourceRect: null, photoRect: null, keepBand: false }
+    const r = draftForFile({ templateId: 'tpl', blocks: {}, meta: { title: 'T' }, _stat: [1, '1'] }, [1, '1'], base, () => true, null)
+    expect(r.stale).toBe(false)
+    expect(r.draft.mode).toBe('band')
+    expect(r.draft.meta).toEqual({ title: 'T' })
+  })
 })

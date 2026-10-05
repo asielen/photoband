@@ -1627,6 +1627,13 @@ def image_data_hash(path: str) -> str:
     return "p:" + pixel_hash(arr)
 
 
+def _same_image_data(path: str, want: str) -> bool:
+    try:
+        return image_data_hash(path) == want
+    except Exception:   # unreadable, truncated: not a backup of this photo
+        return False
+
+
 def save_details(path: str, meta_edits: Dict[str, Any], settings: Dict[str, Any],
                  expected_stat: Optional[Sequence] = None) -> SaveResult:
     """Write edited details (metaedit) into the photo itself, changing nothing else.
@@ -1735,9 +1742,11 @@ def save_details(path: str, meta_edits: Dict[str, Any], settings: Dict[str, Any]
         _copy_mode(real, tmp)
 
         if saving.get("backupOriginals", True):
-            have = _backup_candidates(real, saving)
-            if have:
-                notes.append(f"Backup already kept ({_shown_path(have[-1], real)}); the old details are in this log")
+            # an existing backup suffices only when it really holds this photo (the same image data:
+            # a backup of it with older details); a different, replaced or damaged file does not
+            kept = next((b for b in reversed(_backup_candidates(real, saving)) if _same_image_data(b, before)), None)
+            if kept:
+                notes.append(f"Backup already kept ({_shown_path(kept, real)}); the old details are in this log")
             else:
                 res.backup_path = ensure_backup(real, saving)
         st = os.stat(real)

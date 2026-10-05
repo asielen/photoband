@@ -434,7 +434,20 @@ def _same_text(a: Any, b: Any) -> bool:
     return norm(a) == norm(b)
 
 
-def _keyword_updates(w: _Writer, kws: List[str], fields: Dict[str, Any]) -> None:
+def face_renames(fields: Dict[str, Any], faces_edit: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+    """Old name -> new name (lower-case keys) of the faces these edits rename."""
+    base = {f.get("key"): f for f in list(fields.get("faces") or []) + list(fields.get("faces_unnamed") or [])
+            if isinstance(f, dict)}
+    out = {}
+    for k, e in faces_edit.items():
+        f = base.get(k)
+        old = ((f or {}).get("name") or "").strip()
+        if f and "name" in e and not e.get("deleted") and old and e["name"] and e["name"].lower() != old.lower():
+            out[old.lower()] = e["name"]
+    return out
+
+
+def _keyword_updates(w: _Writer, kws: List[str], fields: Dict[str, Any], renames: Optional[Dict[str, str]] = None) -> None:
     t = w.t
     w.set("XMP-dc:Subject", kws)
     if "IPTC:Keywords" in t:
@@ -455,7 +468,15 @@ def _keyword_updates(w: _Writer, kws: List[str], fields: Dict[str, Any]) -> None
         old = {k.lower() for k in (fields.get("keywords") or []) if isinstance(k, str)}
         gone = old - keep
         items = hs if isinstance(hs, list) else [hs]
-        new = [h for h in items if str(h).split("|")[-1].strip().lower() not in gone]
+        new = []
+        for h in items:
+            path = str(h).split("|")
+            leaf = path[-1].strip().lower()
+            if leaf in gone and renames and leaf in renames and renames[leaf].lower() in keep:
+                # a renamed person: same place in the hierarchy, new name
+                new.append("|".join(path[:-1] + [renames[leaf]]))
+            elif leaf not in gone:
+                new.append(h)
         if new != items:
             if new:
                 w.set("XMP-lr:HierarchicalSubject", new)
@@ -520,7 +541,7 @@ def tag_updates(md: Dict[str, Any], info: ImageInfo, fields: Dict[str, Any], edi
         if k in edits:
             _text_updates(w, k, edits[k], fields.get(k))
     if "keywords" in edits or "date" in edits:
-        _keyword_updates(w, keywords_after(fields, edits), fields)
+        _keyword_updates(w, keywords_after(fields, edits), fields, face_renames(fields, edits.get("faces") or {}))
     if "date" in edits:
         _date_updates(w, edits["date"])
     if "Photoshop:IPTCDigest" in t and any(k.startswith("IPTC:") for k in touched_tags(w.upd, w.dels)):
@@ -666,9 +687,10 @@ def region_updates(md: Dict[str, Any], info: ImageInfo, fields: Dict[str, Any],
         out["XMP-MP:RegionInfoMP"] = mp
     if pii is not None and (changed["pii"] or pii_renames):
         names = [n for i, n in enumerate(pii) if i not in drop_pii]
+        final = {(x or "").lower() for x in _final_names(base, faces_edit)}
         for old, new in pii_renames:
-            if old and old in names and not any((x or "").lower() == old.lower() for x in _final_names(base, faces_edit)):
-                names.remove(old)
+            if old and old.lower() not in final:
+                names = [n for n in names if n.lower() != old.lower()]
             if new and new.lower() not in {n.lower() for n in names}:
                 names.append(new)
         if names != pii:
