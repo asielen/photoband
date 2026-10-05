@@ -246,6 +246,9 @@ def _faces_after(fields: Dict[str, Any], faces_edit: Dict[str, Dict[str, Any]]) 
     for k, e in faces_edit.items():
         if k.startswith("new:"):
             out.append({"name": e.get("name", ""), "box": e.get("box"), "source": "edit", "ids": [], "key": k})
+    # a face with neither a name nor a place on the photo (a PersonInImage name cleared) is nothing
+    # any standard can hold: it is gone
+    out = [f for f in out if (f.get("name") or "").strip() or f.get("box") is not None]
     named = [f for f in out if (f.get("name") or "").strip()]
     unnamed = [f for f in out if not (f.get("name") or "").strip()]
     return named, unnamed
@@ -383,8 +386,11 @@ class _Writer:
 
 
 def _creators(t: Dict[str, Any], value: str) -> List[str]:
-    """Several photographers: a file that lists them separately keeps them separate (the reader
-    shows them joined with ", ")."""
+    """Several photographers: a file that lists them separately keeps them separate. The reader
+    shows them joined with ", ", or with "; " when a name holds a comma ("Smith, John"), and the
+    value is split the same way."""
+    if "; " in value:
+        return [x.strip() for x in value.split("; ") if x.strip()]
     cur = t.get("XMP-dc:Creator", t.get("IPTC:By-line"))
     if isinstance(cur, list) and len(cur) > 1:
         return [x.strip() for x in value.split(", ") if x.strip()]
@@ -469,12 +475,21 @@ def _date_updates(w: _Writer, d: Optional[Dict[str, str]]) -> None:
     whole = f"{y:04d}:{m:02d}:{dd:02d} 00:00:00"
     partial = iso.replace("-", ":")
     keep_time = False
+    cur = None
     if level == "day":
         # the same day as the file says (a camera's own date): its time of day stays
         cur = next((t[k] for k in DATE_TAGS_ORIGINAL if t.get(k) not in (None, "")), None)
         pd = parse_date(str(cur)) if cur is not None else None
         keep_time = pd is not None and (pd.year, pd.month, pd.day) == (y, m, dd)
-    if not keep_time:
+    if keep_time:
+        # the camera's own date and time stay; the copies of the date in other standards that
+        # disagree are brought to that same moment
+        same = str(cur)
+        if "XMP-exif:DateTimeOriginal" in t and not _same_day(t["XMP-exif:DateTimeOriginal"], (y, m, dd)):
+            w.set("XMP-exif:DateTimeOriginal", same)
+        if "IPTC:DateCreated" in t and not _same_day(t["IPTC:DateCreated"], (y, m, dd)):
+            w.set("IPTC:DateCreated", f"{y:04d}:{m:02d}:{dd:02d}")
+    else:
         if w.has_exif:
             w.set("ExifIFD:DateTimeOriginal", whole)
             for k in ("ExifIFD:OffsetTimeOriginal", "ExifIFD:SubSecTimeOriginal"):
@@ -487,6 +502,11 @@ def _date_updates(w: _Writer, d: Optional[Dict[str, str]]) -> None:
         if "IPTC:TimeCreated" in t:
             w.delete("IPTC:TimeCreated")
     w.set("XMP-photoshop:DateCreated", partial)
+
+
+def _same_day(v: Any, ymd: Tuple[int, int, int]) -> bool:
+    d = parse_date(str(v)) if v not in (None, "") else None
+    return d is not None and (d.year, d.month, d.day) == ymd
 
 
 def tag_updates(md: Dict[str, Any], info: ImageInfo, fields: Dict[str, Any], edits: Dict[str, Any],

@@ -95,10 +95,16 @@ describe('review regressions', () => {
     expect(editsSince({ title: 'A', city: 'Paris', faces: { 'mwg:0': { name: 'Ann' } } }, sent)).toEqual({ meta: { city: 'Paris' }, droppedFaces: false })
     expect(editsSince({ title: 'B', faces: { 'mwg:0': { name: 'Anne' } } }, sent)).toEqual({ meta: { title: 'B' }, droppedFaces: true })
     expect(editsSince(sent, sent)).toEqual({ meta: undefined, droppedFaces: false })
+    // a field reset while the save ran: back to the value from before the save
+    expect(editsSince({ faces: { 'mwg:0': { name: 'Ann' } } }, sent, (k) => (k === 'title' ? 'Old' : undefined))).toEqual({ meta: { title: 'Old' }, droppedFaces: false })
+    // a face edit reset while the save ran is reported too
+    expect(editsSince({ title: 'A' }, sent).droppedFaces).toBe(true)
   })
   it('a stale face edit goes to the same face, not just the same key; a written new face is not added again', () => {
     const meta: any = { faces: { named: [{ name: 'Ann', box: [0.5, 0.5, 0.1, 0.1], source: 'MWG', key: 'mwg:0' }],
       unnamed: [{ name: '', box: [0.8, 0.1, 0.1, 0.1], source: 'MWG', key: 'mwg:1' }] } }
+    const none = effectiveFaces({ faces: { named: [{ name: 'Ann', box: null, source: 'PersonInImage', key: 'pii:0' }], unnamed: [] } } as any, { faces: { 'pii:0': { name: '' } } })
+    expect(none.named.length + none.unnamed.length).toBe(0)   // neither a name nor a place: gone
     const r = rematchFaces({
       'mwg:1': { name: 'Bob', was: { name: '', box: [0.1, 0.1, 0.1, 0.1] } },        // that face moved elsewhere: gone
       'new:a': { name: 'Ann', box: [0.5, 0.5, 0.1, 0.1] },                            // already in the file

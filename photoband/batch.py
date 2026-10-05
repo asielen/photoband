@@ -780,11 +780,16 @@ class Batch:
             job = read_json(os.path.join(self._jobdir(idx), "job.json")) or {}
             if job.get("draft_hash") and job.get("path"):
                 from .drafts import delete_draft_if, keep_details_if
-                if job.get("mode") == "copy" and job.get("meta_edits"):
-                    # the copy has the edited details, the original doesn't: they stay as its draft
+                if job.get("mode") in ("copy", "copyAs") and job.get("meta_edits"):
+                    # a copy was written (staging names it copyAs; a case C overwrite becomes a copy):
+                    # the copy has the edited details, the original doesn't, so they stay as its draft
                     keep_details_if(job["path"], str(job["draft_hash"]))
                 else:
                     delete_draft_if(job["path"], str(job["draft_hash"]))
+            if job.get("path") and job.get("mode") == "overwrite" and job.get("meta_edits"):
+                # the original has these details now: a details-only draft kept for it is done
+                from .drafts import delete_written_details
+                delete_written_details(job["path"], job["meta_edits"])
         except Exception:
             pass
 

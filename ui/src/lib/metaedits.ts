@@ -73,7 +73,10 @@ export function effectiveFaces(meta: PhotoMeta | null | undefined, m: MetaEdits 
   for (const [k, e] of Object.entries(edits)) {
     if (k.startsWith('new:') && !e.deleted) out.push({ name: e.name ?? '', box: e.box ?? null, source: 'edit', ids: [], key: k })
   }
-  return { named: out.filter((f) => f.name.trim()), unnamed: out.filter((f) => !f.name.trim()) }
+  // a face with neither a name nor a place on the photo (a cleared PersonInImage name) can't be
+  // stored anywhere: it is gone (as the backend sees it)
+  const kept = out.filter((f) => f.name.trim() || f.box)
+  return { named: kept.filter((f) => f.name.trim()), unnamed: kept.filter((f) => !f.name.trim()) }
 }
 
 /** Left-to-right order of positioned faces (the caption's order). */
@@ -281,15 +284,27 @@ export function detailProblem(v: string): string {
 }
 
 /** The edits made after `sent` was taken (while a save wrote `sent`): every detail that differs
- *  from what was sent. Face edits made meanwhile are not kept (the file's faces were just
- *  renumbered by the write): `droppedFaces` says so. */
-export function editsSince(cur: MetaEdits | undefined, sent: MetaEdits | undefined): { meta: MetaEdits | undefined; droppedFaces: boolean } {
+ *  from what was sent, including one reset meanwhile (absent now, sent then): the file now has the
+ *  sent value, so going back takes an edit to the value from before the save (`before(k)`). Face
+ *  edits made meanwhile are not kept (the file's faces were just renumbered by the write):
+ *  `droppedFaces` says so. */
+export function editsSince(cur: MetaEdits | undefined, sent: MetaEdits | undefined,
+  before: (k: keyof MetaEdits) => unknown = () => undefined): { meta: MetaEdits | undefined; droppedFaces: boolean } {
   const out: MetaEdits = {}
   let droppedFaces = false
-  for (const k of Object.keys(cur || {}) as (keyof MetaEdits)[]) {
-    if (JSON.stringify(cur![k]) === JSON.stringify(sent?.[k])) continue
-    if (k === 'faces') droppedFaces = true
-    else (out as any)[k] = cur![k]
+  const keys = new Set([...Object.keys(cur || {}), ...Object.keys(sent || {})]) as Set<keyof MetaEdits>
+  for (const k of keys) {
+    const has = !!cur && k in cur
+    if (has && JSON.stringify(cur![k]) === JSON.stringify(sent?.[k])) continue
+    if (k === 'faces') {
+      droppedFaces = true
+      continue
+    }
+    if (has) (out as any)[k] = cur![k]
+    else {
+      const v = before(k)
+      if (v !== undefined) (out as any)[k] = v
+    }
   }
   return { meta: Object.keys(out).length ? out : undefined, droppedFaces }
 }

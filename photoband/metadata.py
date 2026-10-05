@@ -368,6 +368,9 @@ def normalize(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
                     continue   # tifffile's note of the array shape, not a description
                 v, src = cand, c
                 break
+            if key == "creator" and isinstance(v, list) and any("," in str(x) for x in v):
+                # "Smith, John" and "Jones, Mary": keep where one name ends and the next begins
+                v = "; ".join(str(x).strip() for x in v if str(x).strip())
             fields[key] = _text(v)
         if src:
             sources[key] = src

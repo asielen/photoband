@@ -574,3 +574,33 @@ def test_an_edit_made_on_another_face_is_refused(tmp_path):
     _regions(p, [{"Type": "Face", "Name": "Bob", "Area": _area(0.5, 0.5, 0.1, 0.1)}], 300, 200)
     r = save_details(p, {"faces": {"mwg:0": {"name": "Anne", "was": {"name": "Ann", "box": [0.1, 0.1, 0.1, 0.1]}}}}, _settings())
     assert not r.ok and r.code == "changed"
+
+
+# -- Codex review regressions -------------------------------------------------------------
+
+def test_clearing_a_name_listed_only_in_person_in_image_removes_it(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-XMP-iptcExt:PersonInImage=Ann", "-XMP-iptcExt:PersonInImage=Bob")
+    ann = next(f for f in _fields(p)["faces"] if f["name"] == "Ann")
+    _details(p, {"faces": {ann["key"]: {"name": ""}}})
+    assert [f["name"] for f in _fields(p)["faces"]] == ["Bob"]
+
+
+def test_creators_with_commas_in_their_names_stay_two(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-XMP-dc:Creator=Smith, John", "-XMP-dc:Creator=Jones, Mary")
+    f = _fields(p)
+    assert f["creator"] == "Smith, John; Jones, Mary"
+    _details(p, {"creator": "Smith, John; Jones, Mary; Lee, Ann"})
+    assert _md(p)["XMP-dc:Creator"] == ["Smith, John", "Jones, Mary", "Lee, Ann"]
+
+
+def test_date_copies_follow_the_day_when_the_cameras_time_is_kept(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-ExifIFD:DateTimeOriginal=2017:04:05 17:01:07", "-XMP-exif:DateTimeOriginal=2016:01:01 10:00:00",
+        "-IPTC:DateCreated=2016:01:01")
+    _details(p, {"date": {"iso": "2017-04-05", "level": "day"}})
+    md = _md(p)
+    assert md["ExifIFD:DateTimeOriginal"] == "2017:04:05 17:01:07"
+    assert str(md["XMP-exif:DateTimeOriginal"]).startswith("2017:04:05 17:01:07")
+    assert md["IPTC:DateCreated"] == "2017:04:05"

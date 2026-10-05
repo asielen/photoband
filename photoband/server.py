@@ -845,6 +845,9 @@ def create_app() -> FastAPI:
                 drafts.delete_draft_if(src, str(want), unhashed=True)
             else:
                 drafts.delete_draft(src)
+            if res.out_path and os.path.realpath(res.out_path) == os.path.realpath(src):
+                # the original has these details now: a details-only draft kept for it is done
+                drafts.delete_written_details(src, job.get("meta_edits"))
             security.allow([res.out_path])
         return res.to_json()
 
@@ -864,6 +867,7 @@ def create_app() -> FastAPI:
         res = await anyio.to_thread.run_sync(lambda: save_details(src, edits, load_settings(), exp))
         out = res.to_json()
         if res.ok:
+            drafts.delete_written_details(src, edits)
             out["meta"] = await anyio.to_thread.run_sync(photos.meta, src)
         return out
 
@@ -1050,12 +1054,15 @@ def create_app() -> FastAPI:
             job["expected_hash"] = quick_hash(src)
         except OSError as e:
             raise HTTPException(404, f"Cannot read {src}: {e}")
-        # resolve the copy destination now so a resumed run writes the same file
+        # resolve the copy destination now so a resumed run writes the same file; the name comes from
+        # the fields as the copy will have them (edited details applied, as save() does)
         if job.get("mode") == "copy":
             from .imageio import probe
             from .save import destination_for, SaveError, source_ids_for_file
+            named = metaedit.apply_to_fields(job["fields"], job.get("meta_edits")) \
+                if isinstance(job.get("fields"), dict) else job.get("fields")
             try:
-                out, _fmt = destination_for(src, probe(src), settings["saving"], job.get("fields"),
+                out, _fmt = destination_for(src, probe(src), settings["saving"], named,
                                             job.get("template_name", ""), _batch_on_exists(settings["saving"]),
                                             notes=notes, src_ids=source_ids_for_file(src, job.get("layout")))
             except SaveError as e:
@@ -1066,7 +1073,7 @@ def create_app() -> FastAPI:
             if out.lower() in reserved:
                 # count up from the template's own name (never "name-2-2")
                 try:
-                    plain, _f = destination_for(src, probe(src), settings["saving"], job.get("fields"),
+                    plain, _f = destination_for(src, probe(src), settings["saving"], named,
                                                 job.get("template_name", ""), "overwrite")
                 except SaveError:
                     plain = out

@@ -8,7 +8,7 @@ import { ensureFonts, loadRegistry, resolveFont } from './fonts'
 import { clearMeasureCache, computeLayout, deepAssign, effectiveTemplate } from './layout'
 import { plainText } from './markup'
 import {
-  addKeywords, cleanText, editsSince, effectiveFaces, hasEdits, isDateMarker, newFaceKey, peopleKeywords, rematchFaces,
+  addKeywords, cleanText, dateState, editsSince, effectiveFaces, hasEdits, isDateMarker, newFaceKey, peopleKeywords, rematchFaces,
   rememberName, type Box, type DateEdit, type FaceEdit, type MetaEdits, type TextField,
 } from './metaedits'
 import { loadFlag, saveFlag } from './prefs'
@@ -1061,7 +1061,12 @@ class AppStore {
     const d = JSON.parse(this.snap(s)) as PhotoDraft
     const state = { templateId: d.templateId, overrides: {}, blocks: {}, ...BAND_GEOMETRY, meta: d.meta, faceRows: d.faceRows ?? null,
       _stat: s.meta.stat, _size: [s.meta.info.upright_width, s.meta.info.upright_height] }
-    post('/api/drafts', { path: s.path, state, hash: stateHash(JSON.stringify(state)) }, { keepalive: true }).catch(() => {})
+    // the hash a session that opens this draft computes for it (an overwrite of the original with
+    // these details removes it in any case: the server deletes a details-only draft it wrote)
+    const { _stat, _size, ...plain } = state
+    void _stat
+    void _size
+    post('/api/drafts', { path: s.path, state, hash: stateHash(JSON.stringify(plain)) }, { keepalive: true }).catch(() => {})
   }
 
   /** Write every pending draft (closing the window, Close all). */
@@ -1327,6 +1332,28 @@ class AppStore {
     return !Object.values(d.blocks || {}).some((b) => b.custom) && !this.hasOverrides(s) && !d.faceRows
   }
 
+  /** A detail as `meta` (a version of the file) has it, in the shape an edit of it takes. */
+  detailOf(meta: PhotoMeta | null | undefined, k: keyof MetaEdits): unknown {
+    const f = meta?.fields || {}
+    if (k === 'faces') return undefined
+    if (k === 'keywords') return ((f.keywords as string[]) || []).filter((x) => !isDateMarker(x))
+    if (k === 'date') {
+      const d = dateState(f)
+      return d.kind === 'date' ? { iso: d.iso, level: d.level } : null
+    }
+    return String(f[k] ?? '')
+  }
+
+  /** Edits that only say what the file already has are no edits. */
+  private withoutNoOps(s: PhotoSession, m: MetaEdits | undefined): MetaEdits | undefined {
+    if (!m) return undefined
+    const out: MetaEdits = { ...m }
+    for (const k of Object.keys(out) as (keyof MetaEdits)[]) {
+      if (k !== 'faces' && JSON.stringify(out[k]) === JSON.stringify(this.detailOf(s.meta, k))) delete out[k]
+    }
+    return Object.keys(out).length ? out : undefined
+  }
+
   /** Write the edited details into the photo itself (nothing else changes). */
   async saveDetails(s: PhotoSession): Promise<boolean> {
     await this.commitTyping()
@@ -1350,11 +1377,12 @@ class AppStore {
         return false
       }
       // the file has them now: the same pixels, so the caption geometry and analysis stay
+      const beforeMeta = s.meta
       s.meta = { ...res.meta, draft: null } as PhotoMeta
       // details changed while the file was written stay edits (face edits can't: the file's faces
       // were just renumbered)
-      const since = editsSince(s.draft.meta, JSON.parse(sent))
-      s.draft = { ...s.draft, meta: since.meta }
+      const since = editsSince(s.draft.meta, JSON.parse(sent), (k) => this.detailOf(beforeMeta, k))
+      s.draft = { ...s.draft, meta: this.withoutNoOps(s, since.meta) }
       if (since.droppedFaces) this.toast('warn', 'Face changes made while saving were not kept. Check the faces again.', undefined, 8000, s.meta.name)
       const strip = (snap: string) => {
         try {
@@ -1516,9 +1544,9 @@ class AppStore {
             // only the text and style carry over; the photo edge comes from the new file's analysis
             const nd = JSON.parse(newer) as PhotoDraft
             // (details edited during the save are not in the file: they carry over too)
-            const since = editsSince(nd.meta, (JSON.parse(snap) as PhotoDraft).meta)
+            const since = editsSince(nd.meta, (JSON.parse(snap) as PhotoDraft).meta, (k) => this.detailOf(s.meta, k))
             if (since.droppedFaces) this.toast('warn', 'Face changes made while saving were not kept. Check the faces again.', undefined, 8000)
-            fresh.draft = { ...fresh.draft, templateId: this.template(nd.templateId) ? nd.templateId : fresh.draft.templateId, overrides: nd.overrides, blocks: nd.blocks, faceRows: nd.faceRows ?? null, meta: since.meta }
+            fresh.draft = { ...fresh.draft, templateId: this.template(nd.templateId) ? nd.templateId : fresh.draft.templateId, overrides: nd.overrides, blocks: nd.blocks, faceRows: nd.faceRows ?? null, meta: this.withoutNoOps(fresh, since.meta) }
             await this.resolveAll(fresh)
             this.commit(fresh)
           } else {

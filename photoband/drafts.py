@@ -239,3 +239,19 @@ def keep_details_if(path: str, state_hash: str) -> bool:
             return True
         _save_draft(path, {k: st[k] for k in DETAIL_KEYS if k in st} | {"overrides": {}, "blocks": {}})
         return True
+
+
+def delete_written_details(path: str, meta: Any) -> bool:
+    """After the original was written with ``meta`` (an overwrite, a details save): a stored draft
+    that held only those very details (kept for the original after a copy) is done; one with
+    caption edits or other details is kept. True if deleted."""
+    if not meta:
+        return False
+    with _locked(path):
+        st = load_draft_any(path)
+        if not isinstance(st, dict) or st.get("meta") != meta:
+            return False
+        if any(isinstance(b, dict) and b.get("custom") for b in (st.get("blocks") or {}).values()) or st.get("overrides"):
+            return False
+        delete_draft(path)
+        return True
