@@ -244,13 +244,54 @@ def approximate_text(value) -> str:
     return s if re.search(r"[1-9]", s) else ""
 
 
-def render_date(value, fmt: Optional[str] = None) -> str:
+# photokin's date-certainty marker: a "DATE: <pattern>" keyword where the pattern rates the
+# year, month and day it wrote into DateTimeOriginal: "!" confident, "~" best guess, "?" unknown
+# ("@" is an older spelling of "~"). "Y!M~" is a sure year with a guessed month; "Y~" a guessed
+# year (photokin writes a decade guess as its middle year, e.g. 1920s -> 1925-06-15).
+_CERTAINTY_KW_RE = re.compile(r"\s*DATE:\s*(?P<p>Y[!?~@](?:M[!?~@])?(?:D[!?~@])?)\s*", re.IGNORECASE)
+
+
+def certainty_from_keywords(keywords) -> Optional[str]:
+    """The first well-formed ``DATE: <pattern>`` keyword's pattern ("Y!M~"), or None."""
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    for kw in keywords or []:
+        m = _CERTAINTY_KW_RE.fullmatch(kw) if isinstance(kw, str) else None
+        if m:
+            return m.group("p").upper()
+    return None
+
+
+def apply_certainty(d: PartialDate, pattern: Optional[str]):
+    """``(date, approximate)``: ``d`` cut down to what ``pattern`` says is known. Parts rated
+    confident ("!") are kept; the first guessed or unknown part ends the date, so a guessed
+    month or day is left out rather than printed as fact, and a part the pattern does not
+    rate (photokin's mid-point filler) is left out too. A guessed year is kept and marks the
+    date approximate; an unknown year leaves no date (None). No usable pattern: ``(d, False)``."""
+    m = re.fullmatch(r"Y(.)(?:M(.))?(?:D(.))?", (pattern or "").strip().upper())
+    if not m:
+        return d, False
+    y, mo, dd = m.groups()
+    if y == "?":
+        return None, False
+    if y != "!":
+        return PartialDate(d.year), True
+    month = d.month if mo == "!" else None
+    day = d.day if month and dd == "!" else None
+    return PartialDate(d.year, month, day), False
+
+
+def render_date(value, fmt: Optional[str] = None, certainty: Optional[str] = None, circa: str = "c. ") -> str:
     """A date value as a caption prints it. Exact dates use ``fmt``; an approximate one is
     printed as written ("circa 1950" stays "circa 1950"), except that a format of only
-    year fields uses the year when that is certain ("Summer 1962" with ``yyyy`` -> 1962)."""
+    year fields uses the year when that is certain ("Summer 1962" with ``yyyy`` -> 1962).
+    ``certainty`` (a "Y!M~" pattern, see ``apply_certainty``) trims an exact date to its known
+    parts; a guessed year is printed after ``circa`` ("c. 1925")."""
     d = parse_date(value)
     if d is not None:
-        return format_date(d, fmt)
+        d, approx = apply_certainty(d, certainty)
+        out = format_date(d, fmt)
+        return circa + out if approx and out else out
     s = approximate_text(value)
     if not s:
         return ""

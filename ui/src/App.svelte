@@ -4,6 +4,7 @@
   import { actions } from './lib/actions'
   import { dialogs } from './lib/dialogs.svelte'
   import { app } from './lib/store.svelte'
+  import { hasEdits } from './lib/metaedits'
   import BatchView from './components/BatchView.svelte'
   import CoachStrip from './components/CoachStrip.svelte'
   import CommandPalette, { type Command } from './components/CommandPalette.svelte'
@@ -65,6 +66,9 @@
     }
     out.push(
       { id: 'faces', group: 'View', label: app.showFaces ? 'Hide faces' : 'Show faces', key: 'F', disabled: noPhoto, keywords: 'people names', run: () => (app.showFaces = !app.showFaces) },
+      { id: 'add-face', group: 'Details', label: 'Add a face tag', key: 'N', disabled: noPhoto || (tool !== 'pan' ? 'Finish with the photo edge or brush first.' : null), keywords: 'people name tag region box', run: () => preview?.addFace(false) },
+      { id: 'save-details', group: 'Details', label: 'Save edited details to the original', disabled: noPhoto || (!s || !hasEdits(s.draft.meta) ? 'No details are edited for this photo.' : null), keywords: 'metadata title date keywords faces write', run: () => s && app.saveDetails(s) },
+      { id: 'discard-details', group: 'Details', label: 'Discard edited details', disabled: noPhoto || (!s || !hasEdits(s.draft.meta) ? 'No details are edited for this photo.' : null), keywords: 'metadata revert', run: () => s && app.discardDetails(s) },
       { id: 'zoom-fit', group: 'View', label: 'Zoom to fit', key: 'Mod+0', disabled: noPhoto, run: () => preview?.zoomFit() },
       { id: 'zoom-100', group: 'View', label: 'Zoom 1:1 (actual pixels)', key: 'Mod+1', disabled: noPhoto, keywords: '100%', run: () => preview?.zoom100() },
       { id: 'side', group: 'View', label: 'Before and after side by side', key: 'Y', disabled: noPhoto, keywords: 'layout panes', run: () => preview?.arrangeTo('side') },
@@ -195,6 +199,14 @@
     }
     // buttons, tabs, radios, menus, sliders… keep their own Space and arrow behaviour
     if ((arrow || e.key === ' ' || e.key === 'Enter') && onControl(e)) return
+    // Esc leaves face drawing, then lets go of the selected face
+    if (e.key === 'Escape' && (app.faceTool === 'add' || app.selectedFace)) {
+      if (app.faceTool === 'add') {
+        app.faceTool = 'select'
+        app.faceToolTarget = null
+      } else app.selectedFace = null
+      return
+    }
     if (arrow && !onCanvas(e)) return
     if (tool === 'edge' && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
       e.preventDefault()
@@ -210,6 +222,10 @@
       app.prev()
     } else if (k === 'f' && !m) {
       app.showFaces = !app.showFaces
+    } else if (k === 'n' && !m && !e.altKey && s?.meta) {
+      // a face box in the middle of the view, to move with the arrow keys and name
+      e.preventDefault()
+      preview?.addFace(true)
     } else if (e.key === ' ' && onCanvas(e)) {
       e.preventDefault()
       app.showOriginal = true

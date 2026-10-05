@@ -21,6 +21,11 @@ function resetServer() {
     recordTemplate: null as any,
     dpi: [300, 300],
     warnings: [] as string[],
+    faces: null as any,
+    fields: {} as any,
+    saveOut: null as string | null,
+    details: [] as any[],
+    detailsDelay: 0,
     realLayout: false,
     posts: [] as { path: string; body: any }[],
   })
@@ -32,7 +37,8 @@ vi.mock('../lib/api', () => {
   const stat = () => server.stat ?? [1, server.recordOnDisk ? '2' : '1', 'h']
   const meta = (path: string) => ({
     path, name: 'a.tif', info: { upright_width: 1000, upright_height: 800, channels: 3, dpi: server.dpi, pages: 1, format: 'TIFF' },
-    fields: {}, stat: stat(), hasRecord: server.recordOnDisk, warnings: server.warnings,
+    fields: server.fields, stat: stat(), hasRecord: server.recordOnDisk, warnings: server.warnings,
+    faces: server.faces ?? { named: [], unnamed: [], unnamed_count: 0, has_positions: false, warnings: [] },
     draft: server.drafts[path] ?? null,
   })
   const settings = () => ({ general: {}, session: {}, saving: { allowMultipageSave: false } })
@@ -49,6 +55,13 @@ vi.mock('../lib/api', () => {
       server.posts.push({ path: p, body: b })
       if (p === '/api/drafts') { server.drafts[b.path] = b.state; return { ok: true } }
       if (p === '/api/settings') return settings()
+      if (p === '/api/photo/details') {
+        server.details.push(b)
+        if (server.detailsDelay) await new Promise((r) => setTimeout(r, server.detailsDelay))
+        server.fields = { ...server.fields, ...b.edits }
+        server.stat = [2, '9', 'h2']
+        return { ok: true, path: b.path, out_path: b.path, backup_path: '', meta: meta(b.path), notes: [] }
+      }
       if (p === '/api/resolve') {
         const d = (server.resolveDelay || {})[b.templateName] || 0
         if (d) await new Promise((r) => setTimeout(r, d))
@@ -70,7 +83,8 @@ vi.mock('../lib/api', () => {
       await new Promise<void>((r) => (server.saveGate = r))
       server.recordOnDisk = true
       if (!server.keepDraftOnSave) delete server.drafts['/p/a.tif'] // the server deletes the draft it saved
-      return { ok: true, path: '/p/a.tif', out_path: '/p/a.tif', backup_path: '/p/_originals/a.tif' }
+      const out = server.saveOut ?? '/p/a.tif'
+      return { ok: true, path: '/p/a.tif', out_path: out, backup_path: out === '/p/a.tif' ? '/p/_originals/a.tif' : '' }
     }),
   }
 })
@@ -365,12 +379,19 @@ describe('store integrity (review findings)', () => {
 
   // ---- 7. wording
   it('metadata warnings are in plain language', async () => {
-    server.warnings = ['no face regions', 'names without positions', 'region dimensions mismatch']
+    server.warnings = ['no face regions', 'region dimensions mismatch']
     const { app, s } = await open()
     app.templates = [{ ...tpl, blocks: [{ id: 'b1', name: 'People', format: '{names}', style }] }, tpl2]
-    const msgs = app.warnings(s).map((w) => w.message)
-    expect(msgs).toContain('No names are tagged on faces in this photo, so the People line is blank.')
-    expect(msgs).toContain('Names were found, but not where each person is in the photo, so the left-to-right order may be wrong.')
+    let msgs = app.warnings(s).map((w) => w.message)
+    expect(msgs).toContain('No names are tagged on faces in this photo, so the People line is blank. Turn on Faces below the photo to name them.')
+    for (const m of msgs) expect(m).not.toMatch(/[{}]|PersonInImage|RegionInfo|XMP|IPTC|EXIF/)
+    // a name tagged here (no warning any more), then one without a place on the photo
+    app.addFace(s, [0.1, 0.1, 0.1, 0.1], 'Ann')
+    msgs = app.warnings(s).map((w) => w.message)
+    expect(msgs.some((m) => m.startsWith('No names'))).toBe(false)
+    s.meta!.faces = { named: [{ name: 'Bea', box: null, source: 'PersonInImage', ids: ['pii:0'], key: 'pii:0' }], unnamed: [], unnamed_count: 0, has_positions: false, warnings: [] }
+    msgs = app.warnings(s).map((w) => w.message)
+    expect(msgs).toContain('Some names have no place on the photo, so the left-to-right order may be wrong. Mark them in the People list (Metadata tab).')
     for (const m of msgs) expect(m).not.toMatch(/[{}]|PersonInImage|RegionInfo|XMP|IPTC|EXIF/)
   })
 
@@ -402,5 +423,199 @@ describe('store integrity (review findings)', () => {
     expect(l.photoRect).toEqual([118, 236, 1000, 800])
     // 12 pt is a height: 100 px at 600 dpi
     expect(l.runs[0].size).toBeCloseTo(100, 1)
+  })
+})
+
+describe('edited photo details', () => {
+  beforeEach(() => { resetServer(); vi.resetModules() })
+  afterEach(() => {
+    for (const s of lastApp?.sessions.values() ?? []) { clearTimeout(s.draftTimer); clearTimeout(s.resolveTimer) }
+    lastApp = null
+  })
+
+  it('a detail is an edit only while it differs from the file, compared exactly', async () => {
+    server.fields = { title: 'Picnic' }
+    const { app, s } = await open()
+    app.setDetail(s, 'title', 'Picnic ')
+    expect(s.draft.meta).toEqual({ title: 'Picnic ' })   // the space typed before the next word stays
+    app.setDetail(s, 'title', 'Picnic')
+    expect(s.draft.meta).toBeUndefined()
+    app.setDetail(s, 'city', 'Paris')
+    expect(s.dirty).toBe(true)
+    app.undo(s)
+    expect(s.draft.meta).toBeUndefined()
+  })
+
+  it('captions are resolved with the edits, and a resolve made before an edit no longer counts', async () => {
+    const { app, s } = await open()
+    app.setDetail(s, 'title', 'Picnic')
+    await sleep(200)
+    const r = server.posts.filter((x: any) => x.path === '/api/resolve').pop()!
+    expect(r.body.edits).toEqual({ title: 'Picnic' })
+    const job: any = (await app.buildJob(s, 'copy')).job
+    expect(job.meta_edits).toEqual({ title: 'Picnic' })
+    expect(job.state.faceRows).toBeNull()
+  })
+
+  it('details survive the case A default (the draft is rebuilt from the record)', async () => {
+    server.recordOnDisk = true
+    server.drafts['/p/a.tif'] = { templateId: 'tpl', overrides: {}, blocks: {}, mode: 'band', sourceRect: null, photoRect: null,
+      meta: { title: 'Kept' }, faceRows: 2, _stat: [1, '2', 'h'] }
+    const { s } = await open()
+    expect(s.draft.mode).toBe('rebuild')
+    expect(s.draft.meta).toEqual({ title: 'Kept' })
+    expect(s.draft.faceRows).toBe(2)
+  })
+
+  it('a saved copy keeps the details for the original and offers to write them', async () => {
+    server.saveOut = '/p/captioned/a.tif'
+    const { app, s } = await open()
+    app.setDetail(s, 'title', 'Picnic')
+    const p = app.save(s, 'copy')
+    while (!server.saveGate) await sleep(10)
+    server.saveGate()
+    await p
+    await flush()
+    const d = server.drafts['/p/a.tif']
+    expect(d.meta).toEqual({ title: 'Picnic' })
+    expect(d.blocks).toEqual({})
+    expect(app.toasts.some((t: any) => t.action?.label === 'Save to original')).toBe(true)
+  })
+
+  it('save to original writes the details, and nothing is left unsaved when they were all there was', async () => {
+    server.fields = { title: 'Old' }
+    const { app, s } = await open()
+    app.setDetail(s, 'title', 'New')
+    expect(await app.saveDetails(s)).toBe(true)
+    expect(server.details[0].edits).toEqual({ title: 'New' })
+    expect(server.details[0].expected_stat).toEqual([1, '1', 'h'])
+    expect(s.draft.meta).toBeUndefined()
+    expect(s.meta!.fields.title).toBe('New')
+    expect(s.dirty).toBe(false)
+    expect(s.undoStack.some((x: string) => x.includes('"meta"'))).toBe(false)
+    expect(server.posts.some((x: any) => x.path === '/api/drafts' && x.body.state === null)).toBe(true)
+  })
+
+  it('face edits: a rename back is no edit; renames follow the people keywords', async () => {
+    const faces = { named: [{ name: 'Ann', box: [0.1, 0.1, 0.1, 0.1], source: 'MWG', ids: ['mwg:0'], key: 'mwg:0' }],
+      unnamed: [{ name: '', box: [0.5, 0.1, 0.1, 0.1], source: 'MWG', ids: ['mwg:1'], key: 'mwg:1' }], unnamed_count: 1, has_positions: true, warnings: [] }
+    server.faces = faces
+    server.fields = { keywords: ['Ann', 'picnic', 'DATE: Y~'] }
+    const { app, s } = await open()
+    app.updateFace(s, 'mwg:0', { name: 'Anne' })
+    expect(s.draft.meta!.faces!['mwg:0']).toEqual({ was: { name: 'Ann', box: [0.1, 0.1, 0.1, 0.1] }, name: 'Anne' })
+    expect(s.draft.meta!.keywords).toEqual(['picnic', 'Anne'])
+    app.updateFace(s, 'mwg:0', { name: 'Ann' })
+    expect(s.draft.meta).toBeUndefined()                   // back to the file: no edits at all
+    app.updateFace(s, 'mwg:1', { name: 'Bob' })
+    expect(app.faces(s).named.map((f: any) => f.name)).toEqual(['Ann', 'Bob'])
+    expect(s.draft.meta!.keywords).toEqual(['Ann', 'picnic', 'Bob'])
+    const k = app.addFace(s, [0.7, 0.7, 0.1, 0.1], 'Cy')
+    expect(k.startsWith('new:')).toBe(true)
+    app.deleteFace(s, 'mwg:0')
+    expect(app.faces(s).named.map((f: any) => f.name)).toEqual(['Bob', 'Cy'])
+    expect(s.draft.meta!.keywords).toEqual(['picnic', 'Bob', 'Cy'])
+    app.undo(s)
+    expect(app.faces(s).named.map((f: any) => f.name)).toEqual(['Ann', 'Bob', 'Cy'])   // one undo step each
+  })
+
+  it('a draft for another version of the file keeps details, and face edits only where the face is found', async () => {
+    const { draftForFile } = await import('../lib/store.svelte')
+    const meta: any = { info: { upright_width: 1000, upright_height: 800 }, faces: {
+      named: [{ name: 'Ann', box: [0.1, 0.1, 0.1, 0.1], source: 'MWG', ids: ['mwg:2'], key: 'mwg:2' }], unnamed: [] } }
+    const stored = { templateId: 'tpl', overrides: {}, blocks: {}, mode: 'erase', _stat: [9, '9'], _size: [1000, 800],
+      meta: { title: 'T', faces: { 'mwg:0': { name: 'Anne', was: { name: 'Ann', box: [0.1, 0.1, 0.1, 0.1] } },
+        'mwg:5': { deleted: true, was: { name: 'Gone', box: [0.5, 0.5, 0.1, 0.1] } }, 'new:x': { name: 'Bo', box: [0.3, 0.3, 0.1, 0.1] } } } }
+    const base: any = { templateId: 'tpl', overrides: {}, blocks: {}, mode: 'band', sourceRect: null, photoRect: null }
+    const r = draftForFile(stored, [1, '1'], base, () => true, meta)
+    expect(r.stale).toBe(true)
+    expect(r.draft.mode).toBe('band')
+    expect(r.draft.meta!.title).toBe('T')
+    expect(Object.keys(r.draft.meta!.faces!).sort()).toEqual(['mwg:2', 'new:x'])   // Ann found under her new key
+    expect(r.droppedFaces).toBe(1)
+    const other = draftForFile({ ...stored, _size: [800, 1000] }, [1, '1'], base, () => true, meta)
+    expect(other.draft.meta!.faces).toBeUndefined()
+    expect(other.draft.meta!.title).toBe('T')
+  })
+
+  it('save to original after a saved copy leaves no draft behind', async () => {
+    server.saveOut = '/p/captioned/a.tif'
+    const { app, s } = await open()
+    app.setDetail(s, 'title', 'Picnic')
+    const p = app.save(s, 'copy')
+    while (!server.saveGate) await sleep(10)
+    server.saveGate()
+    await p
+    await flush()
+    expect(server.drafts['/p/a.tif'].meta).toEqual({ title: 'Picnic' })
+    server.posts = []
+    expect(await app.saveDetails(s)).toBe(true)
+    expect(server.posts.some((x: any) => x.path === '/api/drafts' && x.body.state === null)).toBe(true)
+    expect(s.dirty).toBe(false)
+  })
+
+  it('a keyword the file has on its own is never removed with a face', async () => {
+    server.faces = { named: [{ name: 'Bob', box: [0.1, 0.1, 0.1, 0.1], source: 'MWG', ids: ['mwg:0'], key: 'mwg:0' }], unnamed: [], unnamed_count: 0, has_positions: true, warnings: [] }
+    server.fields = { keywords: ['Bob', 'Ann'] }        // people as keywords; Ann has no face
+    const { app, s } = await open()
+    const k = app.addFace(s, [0.5, 0.5, 0.1, 0.1], 'Ann')
+    app.deleteFace(s, k)
+    expect(app.keywords(s)).toEqual(['Bob', 'Ann'])
+    app.updateFace(s, 'mwg:0', { name: 'Robert' })      // Bob is there for this face: it follows
+    expect(app.keywords(s)).toEqual(['Ann', 'Robert'])
+  })
+
+  it('a stored draft missing editor fields (written by the server) gets them from the base', async () => {
+    const { draftForFile } = await import('../lib/store.svelte')
+    const base: any = { templateId: 'tpl', overrides: {}, blocks: {}, mode: 'band', sourceRect: null, photoRect: null, keepBand: false }
+    const r = draftForFile({ templateId: 'tpl', blocks: {}, meta: { title: 'T' }, _stat: [1, '1'] }, [1, '1'], base, () => true, null)
+    expect(r.stale).toBe(false)
+    expect(r.draft.mode).toBe('band')
+    expect(r.draft.meta).toEqual({ title: 'T' })
+  })
+
+  it('opened from a draft: a caption change made since is kept when the details are saved', async () => {
+    server.drafts['/p/a.tif'] = { templateId: 'tpl', overrides: {}, blocks: {}, mode: 'band', sourceRect: null, photoRect: null,
+      meta: { title: 'Kept' }, _stat: [1, '1', 'h'] }
+    const { app, s } = await open()
+    await app.setTemplate(s, 'tpl2')
+    expect(await app.saveDetails(s)).toBe(true)
+    expect(s.dirty).toBe(true)
+    const d = server.drafts['/p/a.tif']
+    expect(d.templateId).toBe('tpl2')
+    expect(d.meta).toBeUndefined()
+  })
+
+  it('a date in words reset while saving is not turned into "no date"', async () => {
+    server.fields = { date: 'Summer 1952' }
+    const { app, s } = await open()
+    app.setDate(s, { iso: '1952-07-04', level: 'day' })
+    const { post } = await import('../lib/api')
+    server.detailsDelay = 50
+    const p = app.saveDetails(s)
+    await sleep(20)
+    app.setDate(s, undefined)                       // reset while the save runs
+    expect(await p).toBe(true)
+    expect(s.draft.meta?.date).toBeUndefined()      // never { date: null }
+    expect(app.toasts.some((t: any) => /can’t be written back/.test(t.text))).toBe(true)
+    void post
+  })
+
+  it('photographers are edited as a list: a comma is part of a name', async () => {
+    server.fields = { creator: 'Ann Smith, Bob Jones', creators: ['Ann Smith', 'Bob Jones'] }
+    const { app, s } = await open()
+    app.setCreators(s, ['Smith, Ann', 'Bob Jones'])
+    expect(s.draft.meta!.creator).toEqual(['Smith, Ann', 'Bob Jones'])
+    app.setCreators(s, ['Ann Smith', 'Bob Jones'])
+    expect(s.draft.meta).toBeUndefined()
+  })
+
+  it('a half-typed date blocks saving until it is whole', async () => {
+    const { app, s } = await open()
+    s.invalidDetail = 'Finish the date first'
+    expect(app.canSave(s)).toBe('Finish the date first')
+    app.setDetail(s, 'title', 'x')
+    expect(await app.saveDetails(s)).toBe(false)
+    expect(server.details.length).toBe(0)
   })
 })

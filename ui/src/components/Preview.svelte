@@ -4,8 +4,9 @@
   import { dialogs } from '../lib/dialogs.svelte'
   import { drawFills, drawRuns, rectContains } from '../lib/render'
   import type { Rect } from '../lib/types'
+  import FaceEditor from './FaceEditor.svelte'
   import Icon from './Icon.svelte'
-  import { untrack } from 'svelte'
+  import { tick, untrack } from 'svelte'
   import { LOUPE_SRC, loupeWindow } from '../lib/loupe'
 
   let { tool = $bindable('pan') }: { tool?: 'pan' | 'edge' | 'brush-add' | 'brush-remove' } = $props()
@@ -208,7 +209,7 @@
   }
   $effect(() => {
     // redraw on any of these
-    void [lay, zoom, panX, panY, paneW, paneH, imgTick, app.showFaces, app.showOriginal, detail, s?.existing, s?.draft.photoRect, s?.draft.mode, s?.draft.existingChoice, s?.existingIgnored, edgeDrag, brushMask, app.fontsVersion, stacked, tool, s?.erasePreview]
+    void [lay, zoom, panX, panY, paneW, paneH, imgTick, app.showFaces, app.showOriginal, detail, s?.existing, s?.draft.photoRect, s?.draft.mode, s?.draft.existingChoice, s?.existingIgnored, edgeDrag, brushMask, app.fontsVersion, stacked, tool, s?.erasePreview, s?.draft.meta, app.selectedFace, app.hoverFace]
     schedule()
   })
 
@@ -293,7 +294,7 @@
       else drawPlaceholder(ctx, ox, oy, W * zoom, H * zoom)
       drawDetail(ctx, ox, oy, [0, 0, W, H])
       drawExistingOverlays(ctx, ox, oy)
-      if (app.showFaces) drawFaces(ctx, ox, oy, [0, 0, W, H])
+      // (faces on Before are drawn by the face editor, over this canvas)
       drawMaskOverlay(ctx, ox, oy)
     }
     // --- after: the output
@@ -396,7 +397,7 @@
   }
 
   function drawFaces(ctx: CanvasRenderingContext2D, ox: number, oy: number, clip: Rect) {
-    const faces = s?.meta?.faces
+    const faces = s?.meta ? app.faces(s) : null
     if (!faces || !info) return
     const W = info.upright_width
     const H = info.upright_height
@@ -415,9 +416,10 @@
     const cx1 = ox + (clip[0] + clip[2]) * zoom
     for (const { f, n } of all) {
       const [bx, by, bw, bh] = f.box!
-      ctx.lineWidth = 2
-      ctx.strokeStyle = n ? '#ffd23f' : 'rgba(255,255,255,.7)'
-      ctx.setLineDash(n ? [] : [4, 3])
+      const sel = !!f.key && (f.key === app.selectedFace || f.key === app.hoverFace)
+      ctx.lineWidth = sel ? 3 : 2
+      ctx.strokeStyle = sel ? '#22d3ee' : n ? '#ffd23f' : 'rgba(255,255,255,.7)'
+      ctx.setLineDash(n || sel ? [] : [4, 3])
       ctx.strokeRect(ox + bx * W * zoom, oy + by * H * zoom, bw * W * zoom, bh * H * zoom)
     }
     ctx.setLineDash([])
@@ -639,21 +641,21 @@
   let painting: boolean | null = null
 
   /** The face under a point (source pixels), with its left-to-right number (0 = unnamed). */
-  function faceAt(x: number, y: number): { name: string; n: number; total: number } | null {
-    const faces = s?.meta?.faces
+  function faceAt(x: number, y: number): { name: string; n: number; total: number; key?: string } | null {
+    const faces = s?.meta ? app.faces(s) : null
     if (!faces || !info) return null
     const W = info.upright_width
     const H = info.upright_height
     const named = faces.named.filter((f) => f.box)
     const order = [...named].sort((a, b) => a.box![0] + a.box![2] / 2 - (b.box![0] + b.box![2] / 2))
     const inside = (b: number[]) => x >= b[0] * W && x <= (b[0] + b[2]) * W && y >= b[1] * H && y <= (b[1] + b[3]) * H
-    for (const f of named) if (inside(f.box!)) return { name: f.name, n: order.indexOf(f) + 1, total: order.length }
-    for (const f of faces.unnamed) if (f.box && inside(f.box)) return { name: '', n: 0, total: order.length }
+    for (const f of named) if (inside(f.box!)) return { name: f.name, n: order.indexOf(f) + 1, total: order.length, key: f.key }
+    for (const f of faces.unnamed) if (f.box && inside(f.box)) return { name: '', n: 0, total: order.length, key: f.key }
     return null
   }
 
   function explainFace(f: { name: string; n: number; total: number }) {
-    if (!f.n) app.toast('info', 'This face has no name tag, so it is not in the caption. Name it in your photo organiser to include it.', undefined, 6000)
+    if (!f.n) app.toast('info', 'This face has no name, so it is not in the caption. Click its label on Before to name it.', undefined, 6000)
     else app.toast('info', `${f.name}: person ${f.n} of ${f.total}, counting from the left. Names in the caption follow this order.`, undefined, 6000)
   }
 
@@ -734,9 +736,15 @@
   function up(e?: PointerEvent, pane?: 'before' | 'after') {
     // a click (not a drag) on a face in faces mode says whose face it is
     if (e && pane && downAt && app.showFaces && tool === 'pan' && Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) < 4) {
-      const p = toSource(e, pane === 'before' ? beforeCv : afterCv)
-      const f = faceAt(p.x, p.y)
-      if (f) explainFace(f)
+      if (pane === 'before') app.selectedFace = null   // a click beside the faces
+      else {
+        const p = toSource(e, afterCv)
+        const f = faceAt(p.x, p.y)
+        if (f) {
+          app.selectedFace = f.key ?? null
+          explainFace(f)
+        }
+      }
     }
     downAt = null
     if (painting !== null) {
@@ -877,21 +885,58 @@
     return { horiz: false, at: (x + w - loupe.sx) * k }
   })
   const effArrange = $derived(stacked ? 'stacked' : 'side')
+
+  // --- face editor ------------------------------------------------------------------------
+  let faceEd = $state<FaceEditor | undefined>()
+  // where the source image sits on Before (the same mapping as map(), kept reactive)
+  const beforeShift = $derived.by(() => {
+    if (!lay || lay.mode === 'erase') return { dx: 0, dy: 0 }
+    return { dx: lay.photoRect[0] - lay.sourceRect[0], dy: lay.photoRect[1] - lay.sourceRect[1] }
+  })
+  function toggleAddFace() {
+    app.faceTool = app.faceTool === 'add' ? 'select' : 'add'
+    if (app.faceTool === 'select') app.faceToolTarget = null
+  }
+  /** N: start drawing a face (with the mouse), or, from the keyboard, put one in the middle. */
+  export async function addFace(fromKeyboard: boolean) {
+    if (tool !== 'pan' || !s?.meta) return   // the edge and brush tools own the photo
+    if (!app.showFaces) {
+      app.showFaces = true
+      await tick()   // the face layer mounts
+    }
+    if (fromKeyboard && faceEd) faceEd.addAtCenter()
+    else app.faceTool = 'add'
+  }
+  // never left drawing on another photo or with another tool
+  $effect(() => {
+    void s?.path
+    void tool
+    untrack(() => {
+      if (app.faceTool === 'add') {
+        app.faceTool = 'select'
+        app.faceToolTarget = null
+      }
+      app.selectedFace = null
+    })
+  })
 </script>
 
 <div class="preview-wrap">
   <div class="preview" class:stacked bind:this={host}>
     {#each ['before', 'after'] as pane (pane)}
-      <div class="pane" style="width:{paneW}px;height:{paneH}px">
+      <div class="pane" style="width:{paneW}px;height:{paneH}px" onwheel={(e) => wheel(e, pane as 'before' | 'after')}>
         <div class="tag">{pane === 'before' ? 'Before' : app.showOriginal ? 'After — showing original' : 'After'}</div>
         {#if pane === 'before'}
           <canvas bind:this={beforeCv} tabindex="0" style="width:{paneW}px;height:{paneH}px" class:edge={tool === 'edge'} class:brush={tool.startsWith('brush')}
             onpointerdown={(e) => down(e, 'before')} onpointermove={(e) => move(e, 'before')} onpointerup={(e) => up(e, 'before')} onpointercancel={() => up()}
-            onwheel={(e) => wheel(e, 'before')} aria-label="Before: the file as it is now"></canvas>
+            aria-label="Before: the file as it is now"></canvas>
+          {#if app.showFaces && s && info && lay}
+            <FaceEditor bind:this={faceEd} {s} ox={panX + beforeShift.dx * zoom} oy={panY + beforeShift.dy * zoom} {zoom} W={info.upright_width} H={info.upright_height} inert={tool !== 'pan'} />
+          {/if}
         {:else}
           <canvas bind:this={afterCv} style="width:{paneW}px;height:{paneH}px" class:over-band={!!bandHover} data-tip={bandHover ? 'Click to edit the caption' : undefined}
             onpointerdown={(e) => down(e, 'after')} onpointermove={(e) => { move(e, 'after'); hoverBand(e) }} onpointerleave={() => (bandHover = null)} onpointerup={(e) => up(e, 'after')} onpointercancel={() => up()}
-            onwheel={(e) => wheel(e, 'after')} aria-label="After: the output as it will be saved"></canvas>
+            aria-label="After: the output as it will be saved"></canvas>
         {/if}
         {#if pane === 'after' && bandHover}
           <div class="band-hover" aria-hidden="true" style="left:{bandHover[0]}px;top:{bandHover[1]}px;width:{bandHover[2]}px;height:{bandHover[3]}px"></div>
@@ -923,6 +968,11 @@
       <button class="btn sm ghost" class:on={effArrange === 'side'} aria-pressed={effArrange === 'side'} aria-label="Side by side" data-tip="Before and after side by side" data-tip-key="Y" data-tip-side="top" onclick={() => setArrange('side')}><Icon name="split" size={13} /><span class="lbl">Side by side</span></button>
       <button class="btn sm ghost" class:on={effArrange === 'stacked'} aria-pressed={effArrange === 'stacked'} aria-label="Stacked" data-tip="Before above after" data-tip-key="Y" data-tip-side="top" onclick={() => setArrange('stacked')}><Icon name="stack" size={13} /><span class="lbl">Stacked</span></button>
     </div>
+    <span class="sep"></span>
+    <button class="btn sm ghost faces" class:on={app.showFaces} aria-pressed={app.showFaces} aria-label={app.showFaces ? 'Hide faces' : 'Show faces'} data-tip={app.showFaces ? 'Hide the face tags' : 'Show the face tags: click one to rename, move or remove it'} data-tip-key="F" data-tip-side="top" onclick={() => (app.showFaces = !app.showFaces)}><Icon name="faces" size={13} /><span class="lbl">Faces</span></button>
+    {#if app.showFaces}
+      <button class="btn sm ghost addface" class:on={app.faceTool === 'add'} aria-pressed={app.faceTool === 'add'} aria-label="Add face" data-tip="Draw a box around a face to tag it" data-tip-key="N" data-tip-side="top" disabled={tool !== 'pan' || !s?.meta} onclick={toggleAddFace}><Icon name="plus" size={13} /><span class="lbl">Add face</span></button>
+    {/if}
     <button class="btn sm ghost panels" class:on={app.panelsHidden} aria-pressed={app.panelsHidden} aria-label={app.panelsHidden ? 'Show side panels' : 'Hide side panels'} data-tip="{app.panelsHidden ? 'Show' : 'Hide'} the photo list and the caption panel" data-tip-key="Mod+\" data-tip-side="top" onclick={() => (app.panelsHidden = !app.panelsHidden)}><Icon name="columns" size={13} /><span class="lbl">{app.panelsHidden ? 'Show panels' : 'Hide panels'}</span></button>
     {#if tool.startsWith('brush')}
       <span class="sep"></span>
@@ -962,7 +1012,7 @@
   @keyframes sp { to { transform: rotate(360deg) } }
   @media (max-width: 1279px) {
     .status .btn .lbl, .status .loadnote .lbl { display: none; }
-    .status .seg .btn, .status .panels { width: 24px; padding: 0; }
+    .status .seg .btn, .status .panels, .status .faces, .status .addface { width: 24px; padding: 0; }
     .zoom { min-width: 40px; }
     .zl { display: none; }
     .size { display: flex; flex-direction: column; align-items: flex-end; font-size: 11px; line-height: 1.2; }
@@ -970,7 +1020,7 @@
   }
   .zoom { min-width: 76px; text-align: center; font-variant-numeric: tabular-nums; color: var(--fg-2); }
   .seg { display: flex; gap: 2px; }
-  .seg .btn.on { background: var(--bg-active); color: var(--fg); }
+  .seg .btn.on, .status > .btn.on { background: var(--bg-active); color: var(--fg); }
   .size { color: var(--fg-2); font-variant-numeric: tabular-nums; white-space: nowrap; flex-shrink: 0; }
   .loupe .edge-line { position: absolute; top: 0; bottom: 0; width: 1px; background: #22d3ee; box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.6); }
   .loupe .edge-line.horiz { top: auto; bottom: auto; left: 0; right: 0; width: auto; height: 1px; }

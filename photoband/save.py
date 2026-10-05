@@ -101,6 +101,7 @@ class SaveRequest:
     on_exists: Optional[str] = None   # override for "ask" answered by the UI
     expected_hash: Optional[str] = None           # util.quick_hash of the source when it was opened
     on_backup: Optional[Callable[[str], None]] = None   # told the backup path before the replace
+    meta_edits: Optional[Dict[str, Any]] = None   # photo details the user edited (metaedit), written into the output
 
 
 @dataclass
@@ -427,14 +428,15 @@ def save_preview(src: str, saving: Dict, fields: Optional[Dict], template_name: 
     return out
 
 
-_SHA_CACHE: "OrderedDict[Tuple[str, int, int], str]" = OrderedDict()
+_SHA_CACHE: "OrderedDict[Tuple[str, int, int, int], str]" = OrderedDict()
 _SHA_LOCK = threading.Lock()
 
 
 def _cached_sha256(path: str) -> str:
-    """SHA-256 of a file, remembered per (file, size, mtime) for previews."""
+    """SHA-256 of a file, remembered per (file, size, mtime, file id) for previews. The file id
+    tells a same-size replacement whose modified time was kept from the file it replaced."""
     st = os.stat(path)
-    key = (canonical_path(path), st.st_size, st.st_mtime_ns)
+    key = (canonical_path(path), st.st_size, st.st_mtime_ns, st.st_ino)
     with _SHA_LOCK:
         if key in _SHA_CACHE:
             _SHA_CACHE.move_to_end(key)
@@ -447,10 +449,14 @@ def _cached_sha256(path: str) -> str:
     return sha
 
 
-def opened_full_hash(path: str, size: int, mtime_ns: int) -> Optional[str]:
-    """The full SHA-256 of ``path`` as it was at (size, mtime_ns), if it was hashed then."""
+def opened_full_hash(path: str, size: int, mtime_ns: int, file_id: Optional[int] = None) -> Optional[str]:
+    """The full SHA-256 of ``path`` as it was at (size, mtime_ns[, file id]), if it was hashed then.
+    Without a file id (an older client), any version with that size and time."""
+    cp = canonical_path(path)
     with _SHA_LOCK:
-        return _SHA_CACHE.get((canonical_path(path), size, mtime_ns))
+        if file_id:
+            return _SHA_CACHE.get((cp, size, mtime_ns, file_id))
+        return next((v for k, v in reversed(_SHA_CACHE.items()) if k[:3] == (cp, size, mtime_ns)), None)
 
 
 _OPEN_HASHER = None
@@ -952,6 +958,8 @@ def payload_for_marker(rec: Dict) -> bytes:
          "canvas": rec.get("canvas"), "photoHash": rec.get("photoHash")}
     if rec.get("saveMode") in ("copy", "overwrite"):
         p["saveMode"] = rec["saveMode"]
+    if rec.get("faceRows"):
+        p["faceRows"] = rec["faceRows"]
     return zlib.compress(json.dumps(p, separators=(",", ":"), ensure_ascii=False).encode("utf-8"), 9)
 
 
@@ -1079,27 +1087,65 @@ def keep_creation_time(path: str, src_stat: os.stat_result) -> bool:
     return _creation_time_kept(path, want)
 
 
-def _unchanged(path: str, size: int, mtime_ns: int, want: Tuple, opened_hash: Optional[str]) -> bool:
-    """Is the file still the one opened as ``want`` (size, mtime_ns[, quick_hash])? Same size and
-    modified time: yes, without reading it (the owner's choice). Otherwise the content decides,
+def _unchanged(path: str, size: int, mtime_ns: int, want: Tuple, opened_hash: Optional[str],
+               file_id: Optional[int] = None) -> bool:
+    """Is the file still the one opened as ``want`` (size, mtime_ns[, quick_hash[, file_id]])? Same
+    size, modified time and file id: yes, without reading it (the owner's choice). A file replaced
+    by a same-size one whose modified time was kept (a metadata edit with "keep file dates") has
+    another file id, so then, and otherwise, the content decides,
     so a sync, backup or antivirus tool that only touched the modified time doesn't block the save:
     the whole file against its full hash from when it was opened (taken in the background when the
     photo opens), or, before that hash exists, the quick hash (first and last MB)."""
     vals = list(want)
     size0, mtime0 = int(vals[0]), int(vals[1])
-    if (size, mtime_ns) == (size0, mtime0):
+    fid0 = _int_or_none(vals[3]) if len(vals) > 3 else None
+    replaced = bool(fid0 and file_id and fid0 != file_id)
+    if (size, mtime_ns) == (size0, mtime0) and not replaced:
         return True
     if size != size0:
         return False
-    full = opened_full_hash(path, size0, mtime0)
+    full = opened_full_hash(path, size0, mtime0, fid0)
     if full:
         return file_sha256(path) == full
     h = (str(vals[2]) if len(vals) > 2 and vals[2] else None) or opened_hash
     return bool(h) and quick_hash(path) == h
 
 
+def _int_or_none(v) -> Optional[int]:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _details_for(req: SaveRequest, md: Dict, info: ImageInfo):
+    """(edits, the source's caption fields) for a save that writes edited details; ({}, None) without."""
+    from . import metaedit
+    from .metadata import normalize
+    try:
+        edits = metaedit.validate(req.meta_edits)
+    except metaedit.EditError as e:
+        raise SaveError(f"The edited details can't be saved: {e}", code="details")
+    if not edits:
+        return {}, None
+    fields = normalize(md, info)["fields"]
+    if metaedit.missing_faces(fields, edits.get("faces") or {}):
+        raise SaveError("The faces in this file changed since you edited them. Reload the photo and check your "
+                        "face edits.", code="changed")
+    return edits, fields
+
+
+def _named_fields(fields: Optional[Dict], edits: Dict) -> Optional[Dict]:
+    """The fields a file-name pattern sees: with the edited details applied."""
+    if not edits or fields is None:
+        return fields
+    from .metaedit import apply_to_fields
+    return apply_to_fields(fields, edits)
+
+
 def _check_expected(req: SaveRequest, real: str, info: ImageInfo) -> None:
-    if req.expected_stat and not _unchanged(real, info.size_bytes, info.mtime_ns, req.expected_stat, None):
+    if req.expected_stat and not _unchanged(real, info.size_bytes, info.mtime_ns, req.expected_stat, None,
+                                            info.file_id):
         raise SaveError("The file changed on disk after it was opened.", code="changed")
     # batch jobs carry only the content fingerprint taken when the batch was staged
     if req.expected_hash and not req.expected_stat and req.expected_hash != quick_hash(real):
@@ -1150,6 +1196,7 @@ def save(req: SaveRequest) -> SaveResult:
             _refuse_case_c(saving, batch_erase)
         et = get_exiftool()
         md = et.read_json(real)
+        edits, src_fields = _details_for(req, md, info)
 
         # the source pixels, decoded once: early only if picking the destination needs the
         # photo's pixel identity (an existing file whose sourceKey did not match)
@@ -1187,8 +1234,8 @@ def save(req: SaveRequest) -> SaveResult:
                 out_path = os.path.realpath(out_path)
                 replace_existing = True
         else:
-            out_path, out_fmt = destination_for(src, info, saving, req.fields, req.template_name, req.on_exists,
-                                                notes=res.notes, src_ids=src_ids)
+            out_path, out_fmt = destination_for(src, info, saving, _named_fields(req.fields, edits), req.template_name,
+                                                req.on_exists, notes=res.notes, src_ids=src_ids)
             replace_existing = os.path.exists(out_path)
             if replace_existing:
                 out_path = os.path.realpath(out_path)
@@ -1260,6 +1307,7 @@ def save(req: SaveRequest) -> SaveResult:
             "saved": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
             "templateId": req.state.get("templateId"), "template": req.state.get("template"),
             "overrides": req.state.get("overrides"), "blocks": req.state.get("blocks"),
+            "faceRows": req.state.get("faceRows") if isinstance(req.state.get("faceRows"), int) else None,
             "layout": {k: v for k, v in lay.items() if k != "runs"} | {"runs": lay.get("runs", [])},
             "originalSize": [int(photo_src.shape[1]), int(photo_src.shape[0])],
             "photoOffset": [int(comp.photo_rect[0]), int(comp.photo_rect[1])],
@@ -1387,9 +1435,12 @@ def save(req: SaveRequest) -> SaveResult:
             px_cache.clear()
             px_cache["gone"] = True
 
-        res.notes += write_metadata(tmp, real, md, info, out_fmt, (Wc, Hc), comp.photo_rect,
-                                    region_source_rect, rec) if lay.get("mode") != "erase" else \
-            write_metadata(tmp, real, md, info, out_fmt, (Wc, Hc), region_photo_rect, region_source_rect, rec)
+        res.notes += write_metadata(tmp, real, md, info, out_fmt, (Wc, Hc),
+                                    comp.photo_rect if lay.get("mode") != "erase" else region_photo_rect,
+                                    region_source_rect, rec, edits=edits, fields=src_fields)
+        if edits:
+            from .metaedit import describe
+            res.notes.append("Details changed: " + "; ".join(describe(src_fields, edits)))
 
         # verify: size, orientation, sample format, and the photo region against the source
         v_info = probe(tmp)
@@ -1451,7 +1502,8 @@ def save(req: SaveRequest) -> SaveResult:
             st = os.stat(real)
             exp = list(req.expected_stat or ())
             opened_hash = (exp[2] if len(exp) > 2 else None) or req.expected_hash
-            if not _unchanged(real, st.st_size, st.st_mtime_ns, (info.size_bytes, info.mtime_ns), opened_hash):
+            if not _unchanged(real, st.st_size, st.st_mtime_ns, (info.size_bytes, info.mtime_ns, None, info.file_id),
+                              opened_hash, st.st_ino):
                 raise SaveError("The file changed on disk during the save; nothing was written.", code="changed")
         elif replace_existing and os.path.exists(out_path) and not is_output_of(out_path, real, src_ids):
             # the user confirmed replacing this file, but it is not an earlier copy of this photo
@@ -1555,3 +1607,204 @@ def _erase_inputs(arr: np.ndarray, erase: Dict[str, Any]):
         raise SaveError(str(e), code="mask")
     mask = build_mask(arr, band, blocks, grow=int(erase.get("grow", 2)), add_mask=add, remove_mask=rem)
     return mask, band
+
+
+# --------------------------------------------------------------------------
+# details only: edited metadata written into the original, pixels untouched
+# --------------------------------------------------------------------------
+
+def image_data_hash(path: str) -> str:
+    """A hash of the image data alone (not the metadata): ExifTool's ImageDataHash, or, when the
+    ExifTool in use can't compute it, a hash of the decoded pixels."""
+    try:
+        out, _ = get_exiftool().execute("-s3", "-ImageDataHash", "-api", "ImageHashType=SHA256", files=[path])
+        h = out.strip()
+        if re.fullmatch(r"[0-9a-f]{64}", h):
+            return "x:" + h
+    except ExifToolError:
+        pass
+    arr, _info = load_upright(path)
+    return "p:" + pixel_hash(arr)
+
+
+def _same_image_data(path: str, want: str) -> bool:
+    try:
+        return image_data_hash(path) == want
+    except Exception:   # unreadable, truncated: not a backup of this photo
+        return False
+
+
+def save_details(path: str, meta_edits: Dict[str, Any], settings: Dict[str, Any],
+                 expected_stat: Optional[Sequence] = None) -> SaveResult:
+    """Write edited details (metaedit) into the photo itself, changing nothing else.
+
+    The same guards as an overwrite (not in a backups folder, not read-only, locked against other
+    saves, unchanged since it was opened); the work is done on a copy next to the file, which is
+    read back (every edited detail as the reader sees it) and checked to hold exactly the same image
+    data before it replaces the file. With Backup on, the file is backed up first unless a backup of
+    it already exists (each details save would otherwise keep another full copy of the photo; the
+    save log lists every old value instead)."""
+    from . import metaedit
+    from .exiftool import parse_warnings
+    from .metadata import normalize
+    from .metawrite import _check_too_large, _is_bigtiff
+    t0 = time.time()
+    src = os.path.abspath(path)
+    res = SaveResult(ok=False, path=src)
+    saving = settings.get("saving", {})
+    tmp = jpath = None
+    lock = None
+    try:
+        if not os.path.exists(src):
+            raise SaveError("The file no longer exists.", code="missing")
+        real = os.path.realpath(src)
+        if is_backup_location(real, saving):
+            raise SaveError("This file is in a backups folder. Backups are never changed.", code="backup_folder")
+        if is_readonly(real):
+            raise SaveError("The file is read-only. Make it writable to save its details.", code="readonly")
+        try:
+            lock = file_lock(real).acquire()
+        except LockBusy:
+            raise SaveError("This photo is being saved by another Photoband window or batch. Try again when it "
+                            "finishes.", code="busy")
+        info = probe(real)
+        if expected_stat and not _unchanged(real, info.size_bytes, info.mtime_ns, expected_stat, None, info.file_id):
+            raise SaveError("The file changed on disk after it was opened.", code="changed")
+        if info.format == "TIFF" and _is_bigtiff(real):
+            raise SaveError("Files over 4 GB can't carry metadata (ExifTool can't write BigTIFF).", code="blocked")
+        et = get_exiftool()
+        md = et.read_json(real)
+        try:
+            edits = metaedit.validate(meta_edits)
+        except metaedit.EditError as e:
+            raise SaveError(f"The edited details can't be saved: {e}", code="details")
+        if not edits:
+            raise SaveError("There are no edited details to save.", code="nothing")
+        fields = normalize(md, info)["fields"]
+        if metaedit.missing_faces(fields, edits.get("faces") or {}):
+            raise SaveError("The faces in this file changed since you edited them. Reload the photo and check your "
+                            "face edits.", code="changed")
+        upd, dels, notes = metaedit.tag_updates(md, info, fields, edits)
+        reg = metaedit.region_updates(md, info, fields, edits.get("faces") or {})
+        for key, inner in (("XMP-mwg-rs:RegionInfo", "RegionList"), ("XMP-MP:RegionInfoMP", "Regions"),
+                           ("XMP-iptcExt:PersonInImage", None)):
+            if key not in reg:
+                continue
+            v = reg[key]
+            if (inner and not (v or {}).get(inner)) or (not inner and not v):
+                dels.append(f"-{key}=")
+            else:
+                upd[key] = v
+        if not upd and not dels:
+            # nothing in the file needs to change (it already reads as edited)
+            if metaedit.check_written(metaedit.apply_to_fields(fields, edits), fields, edits, boxes=True):
+                raise SaveError("These details can't be written to this file.", code="details")
+            res.ok = True
+            res.out_path = src
+            res.format = info.format
+            res.notes = ["Nothing needed changing: the file already has these details"]
+            return res
+        notes.append("Previous values: " + metaedit.previous_values(md, metaedit.touched_tags(upd, dels)))
+        before = image_data_hash(real)
+
+        d = os.path.dirname(real)
+        fd, tmp = tempfile.mkstemp(prefix=temp_prefix(".pbtmp-"), suffix=os.path.splitext(real)[1], dir=d)
+        os.close(fd)
+        shutil.copyfile(real, tmp)
+        args = ["-n"] + dels
+        if upd:
+            fd, jpath = tempfile.mkstemp(suffix=".json", dir=paths.sub("tmp"))
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump([{"SourceFile": "*", **upd}], fh, ensure_ascii=False)
+            args += ["-struct", f"-json={jpath}"]
+        try:
+            err = et.write(tmp, args, require_change=False)
+        except ExifToolError as e:
+            raise MetadataError(f"Writing the details failed: {e}")
+        if info.format == "JPEG":
+            _check_too_large(err)
+        notes += [f"ExifTool: {w}" for w in parse_warnings(err)]
+
+        # read back: every edited detail as the reader sees it, and the very same image data
+        got = normalize(et.read_json(tmp), probe(tmp))["fields"]
+        bad = metaedit.check_written(metaedit.apply_to_fields(fields, edits), got, edits, boxes=True)
+        if bad:
+            raise MetadataError("Metadata check failed: your edited " + ", ".join(bad) +
+                                " did not read back as written. Nothing was changed.")
+        if image_data_hash(tmp) != before:
+            raise SaveError("Verification failed: writing the details changed the image data. Nothing was changed.",
+                            code="verify")
+        failed = copy_xattrs(real, tmp)
+        if failed:
+            notes.append("Some extended attributes could not be kept: " + ", ".join(failed))
+        with open(tmp, "rb+") as fh:
+            os.fsync(fh.fileno())
+        _copy_mode(real, tmp)
+
+        if saving.get("backupOriginals", True):
+            # an existing backup suffices only when it really holds this photo (the same image data:
+            # a backup of it with older details); a different, replaced or damaged file does not
+            kept = next((b for b in reversed(_backup_candidates(real, saving)) if _same_image_data(b, before)), None)
+            if kept:
+                notes.append(f"Backup already kept ({_shown_path(kept, real)}); the old details are in this log")
+            else:
+                res.backup_path = ensure_backup(real, saving)
+        st = os.stat(real)
+        if not _unchanged(real, st.st_size, st.st_mtime_ns, (info.size_bytes, info.mtime_ns, None, info.file_id),
+                          None, st.st_ino):
+            raise SaveError("The file changed on disk while its details were saved; nothing was written.",
+                            code="changed")
+        try:
+            replace_with_retry(tmp, real)
+        except PermissionError as e:
+            raise _permission_error(e, real)
+        tmp = None
+        if saving.get("keepFileDates"):
+            try:
+                os.utime(real, ns=(st.st_atime_ns, st.st_mtime_ns))
+            except OSError:
+                notes.append("The file's modified date could not be kept")
+            if not keep_creation_time(real, st):
+                notes.append("The file's creation date could not be kept")
+        fsync_dir(d)
+        res.ok = True
+        res.out_path = src
+        res.format = info.format
+        res.notes = ["Details changed: " + "; ".join(metaedit.describe(fields, edits))] + notes
+        try:
+            from .photos import carry_caches, forget
+            forget(real)   # (a same-size file with its dates kept may look like the old version)
+            carry_caches(real, info, probe(real))
+        except Exception:   # a cache only: the photo is analysed again if this fails
+            log.debug("could not carry caches over", exc_info=True)
+        hash_in_background(real)
+    except SaveError as e:
+        res.error, res.code = str(e), e.code
+    except MetadataError as e:
+        res.error, res.code = str(e), "metadata"
+    except (ImageError, ExifToolError) as e:
+        res.error, res.code = str(e), "save_failed"
+    except PermissionError as e:
+        se = _permission_error(e, getattr(e, "filename", None) or src)
+        res.error, res.code = str(se), se.code
+    except OSError as e:
+        res.error, res.code = f"{e.strerror or e}: {getattr(e, 'filename', '') or ''}".strip(": "), "io"
+    except Exception as e:  # never let an unexpected error escape without cleanup and a log entry
+        import traceback
+        res.error, res.code = f"Unexpected error: {e}", "save_failed"
+        _append_rotating("error.log", f"{_dt.datetime.now().isoformat()} details {src}\n{traceback.format_exc()}\n")
+        log.error("unexpected error saving details of %s", src, exc_info=True)
+    finally:
+        for f in (tmp, jpath):
+            if f and os.path.exists(f):
+                try:
+                    os.unlink(f)
+                except OSError:
+                    pass
+        if lock is not None:
+            lock.release()
+        res.elapsed_ms = int((time.time() - t0) * 1000)
+        append_log({"time": _dt.datetime.now().isoformat(timespec="seconds"), "ok": res.ok, "source": src,
+                    "output": res.out_path, "mode": "details", "format": res.format, "backup": res.backup_path,
+                    "marker": {}, "notes": res.notes, "error": res.error, "ms": res.elapsed_ms, "batch": None})
+    return res

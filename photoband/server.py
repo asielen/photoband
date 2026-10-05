@@ -19,7 +19,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from captiontokens import TOKENS, resolve, validate
 
-from . import __version__, batch as batchmod, decodegate, dialogs, drafts, fonts, paths, photos, security, templates
+from . import __version__, batch as batchmod, decodegate, dialogs, drafts, fonts, metaedit, paths, photos, security, templates
 from .composite import Tile
 from .imageio import ImageError, SUPPORTED_EXT
 from .save import SaveRequest, read_log, save
@@ -385,14 +385,24 @@ def create_app() -> FastAPI:
 
     @app.post("/api/resolve")
     def api_resolve(body: Dict[str, Any] = Body(...)):
+        """Caption text for ``formats``. ``edits``: the photo's edited details (applied first, as a
+        save writes them); ``faceRows``: this photo's row count for {names:rows}; ``rows``: also
+        return how {names:rows} groups the named faces (``_rows``, indexes into fields.faces)."""
+        from captiontokens.tokens import face_row_groups
         fields = body.get("fields")
         if fields is None and body.get("path"):
             fields = photos.meta(security.check(body["path"]))["fields"]
-        fields = dict(fields or {})
+        if not isinstance(fields or {}, dict):
+            raise UserError("fields must be an object")
+        fields = metaedit.apply_to_fields(dict(fields or {}), _edits(body.get("edits")))
         fields.setdefault("template", body.get("templateName", ""))
+        if body.get("faceRows") is not None:
+            fields["face_rows"] = body.get("faceRows")
         out = {}
         for key, fmt in (body.get("formats") or {}).items():
             out[key] = resolve(fmt or "", fields).to_dict()
+        if body.get("rows"):
+            out["_rows"] = face_row_groups(fields)
         return out
 
     @app.post("/api/validate")
@@ -736,10 +746,19 @@ def create_app() -> FastAPI:
             if w > MASK_MAX or h > MASK_MAX:
                 raise HTTPException(400, f"The brush mask is {w}×{h} px; at most {MASK_MAX} px a side")
 
+    def _edits(v):
+        """Edited photo details from a request, checked (400 when they can't be written)."""
+        try:
+            return metaedit.validate(v)
+        except metaedit.EditError as e:
+            raise HTTPException(400, f"The edited details can't be used: {e}")
+
     def _check_job_types(job) -> None:
         """Fields of a save or batch job that are used as given: wrong types are a 400, not a 500."""
         if not isinstance(job, dict):
             raise HTTPException(400, "Invalid job")
+        if job.get("meta_edits") is not None:
+            job["meta_edits"] = _edits(job["meta_edits"])
         if not isinstance(job.get("path"), str) or not job.get("path"):
             raise HTTPException(400, "path must be a file path")
         if not isinstance(job.get("layout"), dict):
@@ -797,6 +816,7 @@ def create_app() -> FastAPI:
         try:
             if fields is None:
                 fields = photos.meta(src)["fields"]
+            fields = metaedit.apply_to_fields(fields, _edits(body.get("edits")))
             return save_preview(src, saving, fields, tname or "")
         except (OSError, ImageError) as e:
             raise HTTPException(404, f"Cannot read {src}: {e}")
@@ -814,7 +834,7 @@ def create_app() -> FastAPI:
                           embed_marker=job.get("embed_marker"), fields=job.get("fields"),
                           template_name=job.get("template_name", ""), on_exists=job.get("on_exists"),
                           expected_stat=tuple(job["expected_stat"]) if job.get("expected_stat") else None,
-                          expected_hash=job.get("expected_hash"))
+                          expected_hash=job.get("expected_hash"), meta_edits=job.get("meta_edits"))
         import anyio
         res = await anyio.to_thread.run_sync(save, req)
         if res.ok:
@@ -825,8 +845,31 @@ def create_app() -> FastAPI:
                 drafts.delete_draft_if(src, str(want), unhashed=True)
             else:
                 drafts.delete_draft(src)
+            if res.out_path and os.path.realpath(res.out_path) == os.path.realpath(src):
+                # the original has these details now: a details-only draft kept for it is done
+                drafts.delete_written_details(src, job.get("meta_edits"))
             security.allow([res.out_path])
         return res.to_json()
+
+    @app.post("/api/photo/details")
+    async def api_save_details(body: Dict[str, Any] = Body(...)):
+        """Write edited details into the photo itself (nothing else changes). Returns the save
+        result and, when it worked, the photo's fresh metadata (``meta``)."""
+        if not isinstance(body.get("path"), str):
+            raise UserError("path must be a file path")
+        src = security.check(body["path"])
+        edits = _edits(body.get("edits"))
+        exp = body.get("expected_stat")
+        if not isinstance(exp, list) or len(exp) < 2:
+            raise UserError("expected_stat (the version of the file that was edited) is required")
+        import anyio
+        from .save import save_details
+        res = await anyio.to_thread.run_sync(lambda: save_details(src, edits, load_settings(), exp))
+        out = res.to_json()
+        if res.ok:
+            drafts.delete_written_details(src, edits)
+            out["meta"] = await anyio.to_thread.run_sync(photos.meta, src)
+        return out
 
     @app.get("/api/log")
     def api_log():
@@ -1011,12 +1054,15 @@ def create_app() -> FastAPI:
             job["expected_hash"] = quick_hash(src)
         except OSError as e:
             raise HTTPException(404, f"Cannot read {src}: {e}")
-        # resolve the copy destination now so a resumed run writes the same file
+        # resolve the copy destination now so a resumed run writes the same file; the name comes from
+        # the fields as the copy will have them (edited details applied, as save() does)
         if job.get("mode") == "copy":
             from .imageio import probe
             from .save import destination_for, SaveError, source_ids_for_file
+            named = metaedit.apply_to_fields(job["fields"], job.get("meta_edits")) \
+                if isinstance(job.get("fields"), dict) else job.get("fields")
             try:
-                out, _fmt = destination_for(src, probe(src), settings["saving"], job.get("fields"),
+                out, _fmt = destination_for(src, probe(src), settings["saving"], named,
                                             job.get("template_name", ""), _batch_on_exists(settings["saving"]),
                                             notes=notes, src_ids=source_ids_for_file(src, job.get("layout")))
             except SaveError as e:
@@ -1027,7 +1073,7 @@ def create_app() -> FastAPI:
             if out.lower() in reserved:
                 # count up from the template's own name (never "name-2-2")
                 try:
-                    plain, _f = destination_for(src, probe(src), settings["saving"], job.get("fields"),
+                    plain, _f = destination_for(src, probe(src), settings["saving"], named,
                                                 job.get("template_name", ""), "overwrite")
                 except SaveError:
                     plain = out

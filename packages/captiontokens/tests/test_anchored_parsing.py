@@ -52,7 +52,7 @@ def test_certain_year_needs_whole_time():
     assert render_date("Summer 1962 99:99", "yyyy") == "Summer 1962 99:99"
 
 
-@pytest.mark.parametrize("v", ["²", "5x", "1.5", "-3", "0", "５"])
+@pytest.mark.parametrize("v", ["²", "5x", "1.5", "-3", "５"])
 def test_max_option_must_be_plain_number(v):
     fmt = "{title|max=" + v + "}"
     assert any(i.kind == "bad_option" for i in validate(fmt))
@@ -62,3 +62,23 @@ def test_max_option_must_be_plain_number(v):
 def test_max_option_plain_number():
     assert not validate("{title|max=5}")
     assert resolve("{title|max= 5 }", {"title": "Hello world"}, T).text == "Hell…"
+
+
+def test_max_zero_means_no_limit():
+    assert not validate("{notes|max=0}")
+    long = "word " * 100
+    assert resolve("{notes|max=0}", {"notes": long}, T).text == long.strip()
+    assert resolve("{title|max=0}", {"title": "Hello world"}, T).text == "Hello world"
+
+
+def test_notes_are_cut_at_200_characters_on_a_word_boundary():
+    notes = "[AI Analysis on 2026-08-24]: " + "Seven adults pose by a car in front of a bungalow. " * 10
+    out = resolve("{notes}", {"notes": notes}, T).text
+    assert len(out) <= 200 and out.endswith("…")
+    assert out[:-1] == notes[:len(out) - 1].rstrip() and notes[len(out) - 1] in " ."   # whole words
+    assert len(resolve("{notes|max=60}", {"notes": notes}, T).text) <= 60
+    assert resolve("{notes}", {"notes": "Short note"}, T).text == "Short note"
+
+
+def test_cut_inside_one_long_word_still_cuts():
+    assert resolve("{title|max=6}", {"title": "Supercalifragilistic"}, T).text == "Super…"

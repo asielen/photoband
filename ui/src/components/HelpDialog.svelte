@@ -90,6 +90,17 @@
       ],
     },
     {
+      name: 'Faces',
+      rows: [
+        [[['N']], 'Add a face tag (a box in the middle of the view; or drag one with Add face)'],
+        [[['Enter']], 'Name the selected face; Enter again saves and moves to the next face without a name'],
+        [[['←'], ['→'], ['↑'], ['↓']], 'Move the selected face (with Shift: 10 pixels at a time)'],
+        [[['Alt', '←'], ['Alt', '↓']], 'Make the selected face box narrower, wider, shorter or taller'],
+        [[['Delete']], 'Remove the selected face tag'],
+        [[['Esc']], 'Stop drawing, or let go of the selected face'],
+      ],
+    },
+    {
       name: 'App',
       rows: [
         [[['Tab'], ['Shift', 'Tab']], 'Move between buttons, fields and panels'],

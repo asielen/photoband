@@ -62,7 +62,8 @@ def server(tmp_path_factory, fixtures_dir):
 @pytest.fixture(scope="module")
 def browser():
     with pw.sync_playwright() as p:
-        b = p.chromium.launch()
+        # PHOTOBAND_CHROMIUM: an installed Chromium when Playwright's own build is not downloaded
+        b = p.chromium.launch(executable_path=os.environ.get("PHOTOBAND_CHROMIUM") or None)
         yield b
         b.close()
 

@@ -4,7 +4,9 @@
 
     {
       "title": str | None, "caption": str | None, "creator": str | None,
+      "notes": str | None,                         # UserComment / Instructions
       "date": "1952-06" | PartialDate | None,      # when the photo was taken, never the scan date
+      "date_certainty": "Y!M~" | None,             # what of "date" is known (dates.apply_certainty)
       "digitized": "2023:05:01 12:00:00" | None,   # when it was scanned / the file was made
       "sublocation": str, "city": str, "state": str, "country": str,
       "keywords": [str, ...],
@@ -12,6 +14,7 @@
       "filename": str, "stem": str, "folder": str,
       "faces": [{"name": str, "box": [x, y, w, h] | None}, ...],
       "faces_unnamed_count": int,
+      "face_rows": int | None,                     # this photo's row count for {names:rows} (None: auto)
       "template": str,
     }
 
@@ -26,7 +29,7 @@ import re
 import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
-from .dates import PartialDate, check_format, format_date, render_date
+from .dates import PartialDate, certainty_from_keywords, check_format, format_date, render_date
 from .faces import Face, cluster_rows, order_names
 from .parser import (Group, Issue, Literal, Style, Token, escape_value, markup_to_plain,
                      parse, split_list, unescape_value)
@@ -47,10 +50,15 @@ class TokenInfo:
 TOKENS: List[TokenInfo] = [
     TokenInfo("title", "Photo title (XMP dc:Title, IPTC ObjectName, Headline, XPTitle)", "{title}", ["case", "max"]),
     TokenInfo("caption", "Photo description (XMP dc:Description, IPTC Caption, ImageDescription)", "{caption}", ["case", "max"]),
+    TokenInfo("notes", "Notes about the photo (EXIF UserComment, IPTC/XMP Instructions); at most 200 characters "
+              "unless max= says otherwise (max=0: no limit)", "{notes}", ["case", "max"]),
     TokenInfo("creator", "Photographer or creator", "{creator}", ["case", "max"]),
     TokenInfo("date", "When the photo was taken (XMP DateCreated, EXIF DateTimeOriginal, IPTC DateCreated; never "
-              "the scan date); partial dates drop missing parts, approximate ones (\"circa 1950\") print as written",
-              "{date:mmmm d, yyyy}", ["case"], ["auto", "yyyy", "yy", "mmmm", "mmm", "mm", "m", "dd", "d", "iso"]),
+              "the scan date); partial dates drop missing parts, approximate ones (\"circa 1950\") print as written. "
+              "A \"DATE: Y!M~\" keyword (photokin) leaves out guessed parts and puts circa= (\"c. \") before a "
+              "guessed year; certainty=ignore prints the date as stored",
+              "{date:mmmm d, yyyy}", ["case", "circa", "certainty"],
+              ["auto", "yyyy", "yy", "mmmm", "mmm", "mm", "m", "dd", "d", "iso"]),
     TokenInfo("digitized", "When the photo was scanned or the file was made (EXIF/XMP CreateDate, DateTimeDigitized)",
               "{digitized:yyyy-mm-dd}", ["case"], ["auto", "yyyy", "yy", "mmmm", "mmm", "mm", "m", "dd", "d", "iso"]),
     TokenInfo("today", "Today's date", "{today:yyyy-mm-dd}", ["case"],
@@ -63,8 +71,9 @@ TOKENS: List[TokenInfo] = [
     TokenInfo("city", "City", "{city}", ["case", "max"]),
     TokenInfo("state", "State or province", "{state}", ["case", "max"]),
     TokenInfo("country", "Country", "{country}", ["case", "max"]),
-    TokenInfo("keywords", "Keywords, merged and deduplicated", "{keywords|sep=, |exclude=\"People,Scan\"}",
-              ["sep", "exclude", "case", "max"]),
+    TokenInfo("keywords", "Keywords, merged and deduplicated; photokin's markers (\"DATE: Y~\", \"... Analyzed\", "
+              "back, negative) are left out unless markers=show", "{keywords|sep=, |exclude=\"People,Scan\"}",
+              ["sep", "exclude", "markers", "case", "max"]),
     TokenInfo("filename", "File name with extension", "{filename}"),
     TokenInfo("stem", "File name without extension", "{stem}"),
     TokenInfo("folder", "Name of the containing folder", "{folder}"),
@@ -74,7 +83,8 @@ TOKEN_NAMES = {t.name for t in TOKENS}
 _TOKEN_INFO = {t.name: t for t in TOKENS}
 # Options accepted beyond those listed for the autocomplete.
 _EXTRA_OPTIONS = {"names": ["row_labels", "row_sep"]}
-_OPTION_VALUES = {"case": ("upper", "lower", "title"), "order": ("lr", "rl", "meta")}
+_OPTION_VALUES = {"case": ("upper", "lower", "title"), "order": ("lr", "rl", "meta"),
+                  "markers": ("hide", "show"), "certainty": ("keyword", "ignore")}
 DATE_TOKENS = ("date", "digitized", "today")
 
 
@@ -142,9 +152,13 @@ def _int(v) -> int:
     return max(0, n)
 
 
+# {notes} holds free text (photokin writes a paragraph of analysis there): cut unless asked
+DEFAULT_MAX = {"notes": 200}
+
+
 def _max_chars(v) -> Optional[int]:
-    """The ``max=N`` option's N: a whole number in ASCII digits, or None. The check and the
-    renderer both use this, so they agree; ``isdigit`` let "²" through to ``int``, which raised."""
+    """The ``max=N`` option's N: a whole number in ASCII digits, or None (0: no limit). The check
+    and the renderer both use this, so they agree; ``isdigit`` let "²" through to ``int``, which raised."""
     m = re.fullmatch(r"\s*([0-9]+)\s*", v) if isinstance(v, str) else None
     return int(m.group(1)) if m else None
 
@@ -159,7 +173,15 @@ def _apply_text_options(value: str, opts: Dict[str, str]) -> str:
         value = " ".join(w[:1].upper() + w[1:] for w in value.split(" "))
     n = _max_chars(opts.get("max"))
     if n and len(value) > n:
-        value = value[:1] if n == 1 else value[: n - 1].rstrip() + "…"
+        if n == 1:
+            return value[:1]
+        head = value[: n - 1]
+        # end on a word boundary when one is near (not "Two boys on a do…")
+        if value[n - 1].strip() and _word_char(value[n - 1]) and _word_char(head[-1]):
+            sp = max(head.rfind(" "), head.rfind("\n"))
+            if sp >= 0.6 * (n - 1):
+                head = head[:sp]
+        value = head.rstrip() + "…"
     return value
 
 
@@ -192,6 +214,36 @@ def _faces(fields) -> List[Face]:
     return out
 
 
+def _face_rows(v) -> Optional[int]:
+    """A photo's own row count for {names:rows}: a whole number 1..9, else None (automatic)."""
+    try:
+        n = int(v) if v is not None and not isinstance(v, bool) else None
+    except (TypeError, ValueError):
+        return None
+    return n if n is not None and 1 <= n <= 9 else None
+
+
+def face_row_groups(fields: Dict[str, Any]) -> List[List[int]]:
+    """How {names:rows} groups this photo's named faces, front row first, each row left to right,
+    as indexes into ``fields["faces"]`` (for the UI's People list). Faces without a position are
+    left out; a single row is still one group."""
+    raw = fields.get("faces") if isinstance(fields, dict) else None
+    if not isinstance(raw, (list, tuple)):
+        return []
+    pos: List[Face] = []
+    index: Dict[int, int] = {}
+    for i, r in enumerate(raw):
+        one = _faces({"faces": [r]})
+        if one and one[0].box is not None:
+            index[id(one[0])] = i
+            pos.append(one[0])
+        elif one:
+            return []   # {names:rows} prints plain names when anyone has no place on the photo
+    if not pos:
+        return []
+    return [[index[id(f)] for f in row] for row in cluster_rows(pos, rows=_face_rows(fields.get("face_rows")))]
+
+
 def _row_label(labels: List[str], i: int, nr: int) -> str:
     """Front row gets the first label, the back row the last, middle rows the
     labels in between in order; ordinal labels when there are too few."""
@@ -218,6 +270,14 @@ def _word_char(ch: str) -> bool:
     """Part of a word in any script: letters, digits and combining marks (``str.isalnum`` is
     False for marks, so "cafe" + U+0301 looked like "cafe" followed by a boundary)."""
     return unicodedata.category(ch)[0] in "LNM"
+
+
+def is_marker_keyword(kw: str) -> bool:
+    """A keyword photokin adds as a processing marker, not a description of the photo: its
+    date-certainty "DATE: Y!M~", its provenance "<Provider> <Model> Analyzed", and the part
+    markers "back" and "negative" (which side or form of the object a scan shows)."""
+    k = kw.strip().lower()
+    return certainty_from_keywords([kw]) is not None or k.endswith(" analyzed") or k in ("back", "negative")
 
 
 def _keyword_excluded(kw: str, paths: List[str], prefixes: List[str]) -> bool:
@@ -254,8 +314,8 @@ def check_token(tok: Token) -> List[Issue]:
                 bad(f"{{{tok.name}}} takes no options (\"{k}\")")
         elif k in _OPTION_VALUES and v.lower() not in _OPTION_VALUES[k]:
             bad(f"Unknown {k}=\"{v}\" (use {', '.join(_OPTION_VALUES[k])})")
-        elif k == "max" and not _max_chars(v):
-            bad(f"max must be a positive whole number (\"{v}\")")
+        elif k == "max" and _max_chars(v) is None:
+            bad(f"max must be a whole number (\"{v}\"; 0 for no limit)")
     return out
 
 
@@ -281,9 +341,14 @@ class Resolver:
     def _value(self, tok: Token) -> Optional[str]:
         n, fmt, o = tok.name, tok.fmt, tok.options
         f = self.f
-        if n in ("title", "caption", "creator", "city", "state", "country"):
+        if n in ("title", "caption", "notes", "creator", "city", "state", "country"):
+            if n in DEFAULT_MAX and "max" not in o:
+                o = {**o, "max": str(DEFAULT_MAX[n])}
             return _apply_text_options(_s(f.get(n)).strip(), o)
-        if n in ("date", "digitized"):
+        if n == "date":
+            cert = None if o.get("certainty", "").lower() == "ignore" else _s(f.get("date_certainty")).strip()
+            return _apply_text_options(render_date(f.get(n), fmt, cert or None, unescape_value(o.get("circa", "c. "))), o)
+        if n == "digitized":
             return _apply_text_options(render_date(f.get(n), fmt), o)
         if n == "today":
             return _apply_text_options(format_date(PartialDate.from_date(self.today), fmt), o)
@@ -293,7 +358,7 @@ class Resolver:
             last = unescape_value(o.get("last", " and "))
             order = o.get("order", "lr").lower()
             if (fmt or "").lower() == "rows" and faces and all(x.box is not None for x in faces):
-                rows = cluster_rows(faces)
+                rows = cluster_rows(faces, rows=_face_rows(f.get("face_rows")))
                 if len(rows) > 1:
                     labels = [unescape_value(x).lstrip() for x in split_list(o.get("row_labels", DEFAULT_ROW_LABELS))]
                     labels = [lb for lb in labels if lb.strip()] or ["Row 1: "]
@@ -315,6 +380,8 @@ class Resolver:
             return _apply_text_options(", ".join(p for p in parts if p), o)
         if n == "keywords":
             kws = _str_list(f.get("keywords"))
+            if o.get("markers", "").lower() != "show":
+                kws = [k for k in kws if not is_marker_keyword(k)]
             excl = [e.strip().lower() for e in split_list(o.get("exclude", ""), ",") if e.strip()]
             if excl:
                 paths = _str_list(f.get("keyword_paths"))

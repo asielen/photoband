@@ -7,9 +7,14 @@ import * as fontsModule from './fonts'
 import { ensureFonts, loadRegistry, resolveFont } from './fonts'
 import { clearMeasureCache, computeLayout, deepAssign, effectiveTemplate } from './layout'
 import { plainText } from './markup'
+import {
+  addKeywords, cleanText, dateState, editsSince, effectiveFaces, hasEdits, isDateMarker, newFaceKey, peopleKeywords, rematchFaces,
+  rememberName, type Box, type DateEdit, type FaceEdit, type MetaEdits, type TextField,
+} from './metaedits'
+import { loadFlag, saveFlag } from './prefs'
 import { renderTextTiles } from './render'
 import type {
-  BlockState, ExistingAnalysis, LayoutResult, Overrides, PhotoDraft, PhotoMeta, Rect, Resolution,
+  BlockState, ExistingAnalysis, Face, LayoutResult, Overrides, PhotoDraft, PhotoMeta, Rect, Resolution,
   SaveResult, Settings, Template, Warning,
 } from './types'
 
@@ -52,9 +57,14 @@ export class PhotoSession {
   undoStack: string[] = []
   redoStack: string[] = []
   lastSnap = ''
+  /** the editor state when the photo had no unsaved edits (after opening or saving it) */
+  cleanSnap = ''
   snapTimer: any = null
   draftTimer: any = null
   draftPendingSince = 0
+  resolveTimer: any = null
+  /** why a detail can't be saved as it is shown (a half-typed date): saving waits for it */
+  invalidDetail = $state<string | null>(null)
   proxyVersion = $state(0)
   erasePreview = $state<string | null>(null)
   /** bumped by every relayout, so a slower earlier layout never replaces a newer one */
@@ -106,7 +116,11 @@ type Geometry = Pick<PhotoDraft, 'mode' | 'sourceRect' | 'photoRect' | 'existing
 
 /** Same version of the file? (size and modification time, as the backend's stat) */
 export function sameFile(a: PhotoMeta['stat'] | null | undefined, b: PhotoMeta['stat'] | null | undefined): boolean {
-  return !!a && !!b && String(a[0]) === String(b[0]) && String(a[1]) === String(b[1])
+  if (!a || !b || String(a[0]) !== String(b[0]) || String(a[1]) !== String(b[1])) return false
+  // a same-size replacement whose modified time was kept is another file id (when both know it)
+  const ia = a[3]
+  const ib = b[3]
+  return !ia || !ib || String(ia) === String(ib)
 }
 
 /** A stored draft as the editor (and a batch using drafts) may use it for this version of the file.
@@ -119,14 +133,35 @@ export function draftForFile(
   stat: PhotoMeta['stat'] | null | undefined,
   base: PhotoDraft,
   hasTemplate: (id: string) => boolean,
-): { draft: PhotoDraft; hash: string | null; stale: boolean } {
-  const { _hash, _stat, ...d } = (stored || {}) as PhotoDraft & { _hash?: string; _stat?: PhotoMeta['stat'] }
+  meta?: PhotoMeta | null,
+): { draft: PhotoDraft; hash: string | null; stale: boolean; droppedFaces: number } {
+  const { _hash, _stat, _size, ...d } = (stored || {}) as PhotoDraft & { _hash?: string; _stat?: PhotoMeta['stat']; _size?: [number, number] }
   const templateId = d.templateId && hasTemplate(d.templateId) ? d.templateId : base.templateId
   const stale = !!_stat && !sameFile(_stat, stat)
-  const draft: PhotoDraft = stale
-    ? { ...base, templateId, overrides: d.overrides || {}, blocks: d.blocks || {} }
-    : { ...d, templateId }
-  return { draft, hash: _hash ?? null, stale }
+  let droppedFaces = 0
+  let draft: PhotoDraft
+  // (a draft missing a field the editor checks, e.g. one written by the server, gets the base's)
+  if (!stale) draft = { ...base, ...d, templateId }
+  else {
+    // edited details are kept (they don't depend on the pixels); face edits only where their face
+    // is found again in this version, and only when the photo still has the same shape
+    const m = d.meta ? { ...d.meta } : undefined
+    if (m?.faces) {
+      const info = meta?.info
+      const sameShape = !!info && (!_size || (_size[0] === info.upright_width && _size[1] === info.upright_height))
+      const r = meta && sameShape ? rematchFaces(m.faces, meta) : { faces: {}, dropped: Object.keys(m.faces).length }
+      droppedFaces = r.dropped
+      if (Object.keys(r.faces).length) m.faces = r.faces
+      else delete m.faces
+    }
+    draft = { ...base, templateId, overrides: d.overrides || {}, blocks: d.blocks || {}, meta: m, faceRows: d.faceRows ?? null }
+  }
+  return { draft, hash: _hash ?? null, stale, droppedFaces }
+}
+
+/** The parts of a draft that are not about the caption's geometry: kept when the draft is rebuilt. */
+function keepDetails(d: PhotoDraft): Pick<PhotoDraft, 'meta' | 'faceRows'> {
+  return { meta: d.meta, faceRows: d.faceRows }
 }
 
 /** Why Overwrite original is off for a scan with a physical caption (case C). */
@@ -158,7 +193,27 @@ class AppStore {
   saving = $state(false)
   /** which kind of save is running, for the toolbar's spinner */
   savingMode = $state<'copy' | 'overwrite' | null>(null)
-  showFaces = $state(false)
+  private _showFaces = $state(loadFlag('showFaces'))
+  /** face boxes on the photo (remembered) */
+  get showFaces() {
+    return this._showFaces
+  }
+  set showFaces(v: boolean) {
+    this._showFaces = v
+    saveFlag('showFaces', v)
+    if (!v) {
+      this.faceTool = 'select'
+      this.faceToolTarget = null
+      this.selectedFace = null
+    }
+  }
+  /** the face editor: 'add' draws a new box with the next drag */
+  faceTool = $state<'select' | 'add'>('select')
+  /** the face the next drawn box is for (a name that has no place on the photo yet) */
+  faceToolTarget = $state<string | null>(null)
+  /** the face selected on the photo (its key), and the one hovered here or in the People list */
+  selectedFace = $state<string | null>(null)
+  hoverFace = $state<string | null>(null)
   showOriginal = $state(false)
   incompleteBatches = $state<any[]>([])
   fontsVersion = $state(0)
@@ -403,6 +458,31 @@ class AppStore {
     s.existingIgnored = false
     s.preExisting = null
     s.draft = { ...s.draft, ...BAND_GEOMETRY }
+    if (s.draft.meta?.faces) {
+      // face edits follow their faces into this version of the file, where they can be found
+      const r = rematchFaces(s.draft.meta.faces, s.meta)
+      const m = { ...s.draft.meta }
+      if (Object.keys(r.faces).length) m.faces = r.faces
+      else delete m.faces
+      s.draft = { ...s.draft, meta: m }
+      if (r.dropped) this.toast('warn', `${r.dropped} face edit${r.dropped > 1 ? 's were' : ' was'} dropped: the faces changed in the file.`, undefined, 8000, s.meta.name)
+      // undo and redo steps name faces by the same keys: move them onto this version's faces too
+      const meta = s.meta
+      const fix = (snap: string) => {
+        try {
+          const d = JSON.parse(snap) as PhotoDraft
+          if (!d.meta?.faces) return snap
+          const f = rematchFaces(d.meta.faces, meta).faces
+          d.meta = { ...d.meta, faces: f }
+          if (!Object.keys(f).length) delete d.meta.faces
+          return JSON.stringify(d)
+        } catch {
+          return snap
+        }
+      }
+      s.undoStack = s.undoStack.map(fix)
+      s.redoStack = s.redoStack.map(fix)
+    }
     this.rebaseHistory(s, BAND_GEOMETRY)
     s.lastSnap = this.snap(s)
     s.existingPromise = (async () => {
@@ -444,15 +524,18 @@ class AppStore {
         // a draft made for another version of this file (e.g. edits typed while it was
         // overwritten) keeps only its text; the photo edge and mode come from this version's
         // existing-caption check
-        s.draft = draftForFile(meta.draft, meta.stat, base, (id) => !!this.template(id)).draft
+        const r = draftForFile(meta.draft, meta.stat, base, (id) => !!this.template(id), meta)
+        s.draft = r.draft
         s.dirty = true
         this.setStatus(s.path, 'draft')
+        if (r.droppedFaces) this.toast('warn', `${r.droppedFaces} face edit${r.droppedFaces > 1 ? 's were' : ' was'} dropped: the faces changed in the file since you edited them.`, undefined, 8000, meta.name)
       } else {
         s.draft = base
         if (opts.offerStale !== false) this.offerStaleDraft(s)
       }
       await this.resolveAll(s)
       s.lastSnap = this.snap(s)
+      if (!s.dirty) s.cleanSnap = s.lastSnap
       await this.relayout(s)
       // existing caption detection runs in the background (OCR can take a moment)
       s.existingPromise = this.loadExisting(s)
@@ -488,12 +571,14 @@ class AppStore {
         label: 'Use them',
         run: async () => {
           // only the text and style: the photo edge and mode belong to the old version of the file
-          const d = r.state as PhotoDraft
+          const old = draftForFile(r.state, null, s.draft, (id) => !!this.template(id), s.meta)
           s.draft = {
             ...s.draft,
-            templateId: this.template(d.templateId) ? d.templateId : s.draft.templateId,
-            overrides: d.overrides || {},
-            blocks: d.blocks || {},
+            templateId: old.draft.templateId,
+            overrides: old.draft.overrides,
+            blocks: old.draft.blocks,
+            meta: old.draft.meta,
+            faceRows: old.draft.faceRows,
           }
           await this.resolveAll(s)
           this.commit(s)
@@ -562,7 +647,10 @@ class AppStore {
       keepBand: false,
     }
     const tplChanged = tid !== s.draft.templateId
-    s.draft = { templateId: tid!, overrides, blocks, ...geom }
+    // edited details stay; the row count is the one saved with the caption unless one was chosen here
+    const faceRows = 'faceRows' in s.draft ? s.draft.faceRows ?? null : st?.faceRows ?? null
+    const rowsChanged = (faceRows ?? null) !== (s.draft.faceRows ?? null)
+    s.draft = { templateId: tid!, overrides, blocks, ...geom, ...keepDetails(s.draft), faceRows }
     if (auto) {
       // the base state: earlier history steps get this geometry too, so undo never goes back
       // to treating the whole captioned image as the photo
@@ -574,11 +662,12 @@ class AppStore {
       clearTimeout(s.snapTimer)
       s.snapTimer = null
       s.lastSnap = this.snap(s)
-      if (tplChanged) await this.resolveAll(s)
+      if (!s.dirty) s.cleanSnap = s.lastSnap
+      if (tplChanged || rowsChanged) await this.resolveAll(s)
       this.relayout(s)
       if (s.dirty) this.scheduleDraft(s)
     } else {
-      if (tplChanged) await this.resolveAll(s)
+      if (tplChanged || rowsChanged) await this.resolveAll(s)
       this.commit(s)
     }
   }
@@ -661,7 +750,8 @@ class AppStore {
     if (s.preExisting) {
       const prev = JSON.parse(s.preExisting) as PhotoDraft
       s.preExisting = null
-      s.draft = { ...prev, ...BAND_GEOMETRY, keepBand }
+      // back to the caption as it was; details edited since then stay
+      s.draft = { ...prev, ...BAND_GEOMETRY, keepBand, ...keepDetails(s.draft) }
     } else {
       s.draft = { ...s.draft, ...BAND_GEOMETRY, keepBand }
     }
@@ -683,15 +773,41 @@ class AppStore {
     const key = this.resolveKey(s)
     const formats: Record<string, string> = {}
     for (const b of t.blocks) formats[b.id] = b.format
-    const res = await post('/api/resolve', { fields: s.meta.fields, formats, templateName: (t.fromFile?.name ?? t.name) })
+    const res = await post('/api/resolve', { ...this.fieldsBody(s), formats, templateName: (t.fromFile?.name ?? t.name) })
     if (gen !== s.resolveGen) return false
     s.resolved = res
     s.resolvedFor = key
     return true
   }
 
+  /** What /api/resolve needs to fill in this photo's fields as they will be saved: the file's
+   *  fields, the edited details (applied by the server, as a save writes them) and the row count. */
+  fieldsBody(s: PhotoSession): { fields: Record<string, any> | undefined; edits?: MetaEdits; faceRows?: number | null } {
+    return { fields: s.meta?.fields, edits: hasEdits(s.draft.meta) ? s.draft.meta : undefined, faceRows: s.draft.faceRows ?? null }
+  }
+
   private resolveKey(s: PhotoSession): string {
-    return `${s.draft.templateId}|${s.meta?.stat?.join(':') ?? ''}`
+    return `${s.draft.templateId}|${s.meta?.stat?.join(':') ?? ''}|${stateHash(JSON.stringify([s.draft.meta ?? null, s.draft.faceRows ?? null]))}`
+  }
+
+  /** Re-resolve after edited details changed (debounced: one request per pause in typing). */
+  private scheduleResolve(s: PhotoSession) {
+    clearTimeout(s.resolveTimer)
+    s.resolveTimer = setTimeout(async () => {
+      try {
+        if (await this.resolveAll(s)) this.relayout(s)
+      } catch (e: any) {
+        this.resolveFailed(e)
+      }
+    }, 120)
+  }
+
+  private resolveFailedMsg = ''
+  private resolveFailed(e: any) {
+    const msg = `The caption couldn’t be updated: ${e instanceof ApiError ? e.message : e?.message || e}`
+    if (msg !== this.resolveFailedMsg) this.toast('error', msg)
+    this.resolveFailedMsg = msg
+    setTimeout(() => { if (this.resolveFailedMsg === msg) this.resolveFailedMsg = '' }, 5000)
   }
 
   /** Waits until `resolved` belongs to the current template (saving needs the right text). */
@@ -700,6 +816,9 @@ class AppStore {
       if (!this.template(s.draft.templateId) || !s.meta) return
       await this.resolveAll(s)
     }
+    // never save caption text made from older details than the ones being saved
+    if (this.template(s.draft.templateId) && s.meta && s.resolvedFor !== this.resolveKey(s))
+      throw new Error('The caption is still being updated. Try again in a moment.')
   }
 
   blockText(s: PhotoSession, id: string): string {
@@ -851,11 +970,19 @@ class AppStore {
     return JSON.stringify(s.draft)
   }
 
-  commit(s: PhotoSession, markDirty = true) {
+  /** Record a change. `boundary`: a separate undo step even right after another change (a face
+   *  dropped, a name entered), instead of merging it with the keystrokes before it. */
+  commit(s: PhotoSession, markDirty = true, boundary = false) {
     if (markDirty) {
       s.dirty = true
       this.setStatus(s.path, 'draft')
     }
+    if (boundary) {
+      clearTimeout(s.snapTimer)
+      s.snapTimer = null
+    }
+    // edited details change the fields the caption is made from
+    if (s.resolvedFor && s.resolvedFor !== this.resolveKey(s)) this.scheduleResolve(s)
     // coalesce keystrokes into one undo step
     const cur = this.snap(s)
     if (cur !== s.lastSnap) {
@@ -896,7 +1023,11 @@ class AppStore {
     s.dirty = true
     this.setStatus(s.path, 'draft')
     this.scheduleDraft(s)
-    await this.resolveAll(s)
+    try {
+      await this.resolveAll(s)
+    } catch (e: any) {
+      this.resolveFailed(e)
+    }
     this.relayout(s)
   }
 
@@ -919,10 +1050,26 @@ class AppStore {
     s.draftPendingSince = 0
     if (!s.dirty || !s.meta || s.retired || this.batchReview || (s as any).__batch) return Promise.resolve()
     const snap = this.snap(s)
-    const state = { ...JSON.parse(snap), _stat: s.meta.stat }
+    // _size: face edits of a stale draft are only re-used on a photo of the same shape
+    const state = { ...JSON.parse(snap), _stat: s.meta.stat, _size: [s.meta.info.upright_width, s.meta.info.upright_height] }
     return post('/api/drafts', { path: s.path, state, hash: stateHash(snap) }, { keepalive: true })
       .then(() => {})
       .catch((e) => console.debug('draft autosave failed', e))
+  }
+
+  /** A draft holding only the edited details (after a copy was saved: the caption is done, the
+   *  original's details are not). */
+  keepDetailsDraft(s: PhotoSession) {
+    if (!s.meta || s.retired || !hasEdits(s.draft.meta)) return
+    const d = JSON.parse(this.snap(s)) as PhotoDraft
+    const state = { templateId: d.templateId, overrides: {}, blocks: {}, ...BAND_GEOMETRY, meta: d.meta, faceRows: d.faceRows ?? null,
+      _stat: s.meta.stat, _size: [s.meta.info.upright_width, s.meta.info.upright_height] }
+    // the hash a session that opens this draft computes for it (an overwrite of the original with
+    // these details removes it in any case: the server deletes a details-only draft it wrote)
+    const { _stat, _size, ...plain } = state
+    void _stat
+    void _size
+    post('/api/drafts', { path: s.path, state, hash: stateHash(JSON.stringify(plain)) }, { keepalive: true }).catch(() => {})
   }
 
   /** Write every pending draft (closing the window, Close all). */
@@ -1004,18 +1151,331 @@ class AppStore {
     }
   }
 
+  // ------------------------------------------------------------------ photo details & faces
+  /** The faces as they will be saved (the file's, with this photo's face edits). */
+  faces(s: PhotoSession): { named: Face[]; unnamed: Face[] } {
+    return effectiveFaces(s.meta, s.draft.meta)
+  }
+
+  /** The file's own value of a text detail. */
+  fileDetail(s: PhotoSession, key: TextField): string {
+    return String(s.meta?.fields?.[key] ?? '')
+  }
+
+  /** The photographers the file names, one by one. */
+  fileCreators(s: PhotoSession): string[] {
+    const f = s.meta?.fields || {}
+    if (Array.isArray(f.creators)) return f.creators as string[]
+    return f.creator ? [String(f.creator)] : []
+  }
+
+  /** The photographers as they will be saved. */
+  creators(s: PhotoSession): string[] {
+    const e = s.draft.meta?.creator
+    if (e === undefined) return this.fileCreators(s)
+    return Array.isArray(e) ? e : e.trim() ? [e.trim()] : []
+  }
+
+  setCreators(s: PhotoSession, list: string[]) {
+    const file = this.fileCreators(s)
+    const same = list.length === file.length && list.every((x, i) => x === file[i])
+    if (same) this.setMeta(s, {}, ['creator'], true)
+    else this.setMeta(s, { creator: list }, [], true)
+  }
+
+  /** The keywords the file has, without photokin's date marker (the date editor owns that one). */
+  fileKeywords(s: PhotoSession): string[] {
+    return ((s.meta?.fields?.keywords as string[]) || []).filter((k) => !isDateMarker(k))
+  }
+
+  private setMeta(s: PhotoSession, patch: Partial<MetaEdits>, drop: (keyof MetaEdits)[] = [], boundary = false) {
+    const m: MetaEdits = { ...(s.draft.meta || {}), ...patch }
+    for (const k of drop) delete m[k]
+    s.draft = { ...s.draft, meta: Object.keys(m).length ? m : undefined }
+    this.commit(s, true, boundary)
+  }
+
+  /** Edit a text detail; typing the file's own value back is no edit. (Compared exactly, not trimmed:
+   *  a space typed between two words must not be taken back while typing.) */
+  setDetail(s: PhotoSession, key: TextField, value: string) {
+    value = cleanText(value, key === 'caption' || key === 'notes')
+    if (value === this.fileDetail(s, key)) this.setMeta(s, {}, [key])
+    else this.setMeta(s, { [key]: value })
+  }
+
+  resetDetail(s: PhotoSession, key: keyof MetaEdits) {
+    this.setMeta(s, {}, [key], true)
+  }
+
+  setKeywords(s: PhotoSession, list: string[]) {
+    const clean = addKeywords([], list)
+    const file = this.fileKeywords(s)
+    const same = clean.length === file.length && clean.every((k, i) => k === file[i])
+    if (same) this.setMeta(s, {}, ['keywords'], true)
+    else this.setMeta(s, { keywords: clean }, [], true)
+  }
+
+  /** The keywords as they will be saved (edited or the file's), without the date marker. */
+  keywords(s: PhotoSession): string[] {
+    return s.draft.meta?.keywords ?? this.fileKeywords(s)
+  }
+
+  /** undefined: back to the file's date; null: no date. */
+  setDate(s: PhotoSession, d: DateEdit | null | undefined) {
+    if (d === undefined) this.setMeta(s, {}, ['date'], true)
+    else this.setMeta(s, { date: d }, [], true)
+  }
+
+  discardDetails(s: PhotoSession) {
+    s.draft = { ...s.draft, meta: undefined }
+    this.commit(s, true, true)
+  }
+
+  setFaceRows(s: PhotoSession, n: number | null) {
+    s.draft = { ...s.draft, faceRows: n }
+    this.commit(s, true, true)
+  }
+
+  private faceEdits(s: PhotoSession): Record<string, FaceEdit> {
+    return { ...(s.draft.meta?.faces || {}) }
+  }
+
+  private putFaces(s: PhotoSession, faces: Record<string, FaceEdit>, boundary: boolean, keywords?: string[] | null) {
+    const patch: Partial<MetaEdits> = {}
+    const drop: (keyof MetaEdits)[] = []
+    if (Object.keys(faces).length) patch.faces = faces
+    else drop.push('faces')
+    if (keywords) {
+      // the file's own keywords again (a name renamed back): no edit, in the file's order
+      const file = this.fileKeywords(s)
+      const same = keywords.length === file.length && keywords.every((k) => file.includes(k))
+      if (same) drop.push('keywords')
+      else patch.keywords = keywords
+    }
+    this.setMeta(s, patch, drop, boundary)
+  }
+
+  /** Change a face's name and/or box. A rename is reflected in the keywords when the file lists its
+   *  people as keywords (Lightroom does), so the two stay in step. */
+  updateFace(s: PhotoSession, key: string, patch: { name?: string; box?: Box | null }, boundary = true) {
+    const base = [...(s.meta?.faces.named || []), ...(s.meta?.faces.unnamed || [])].find((f) => f.key === key)
+    const before = this.faces(s)
+    const cur = [...before.named, ...before.unnamed].find((f) => f.key === key)
+    if (!cur) return
+    const faces = this.faceEdits(s)
+    const e: FaceEdit = { ...(faces[key] || (base ? { was: { name: base.name, box: base.box as Box | null } } : {})) }
+    if (patch.name !== undefined) e.name = patch.name.trim()
+    if (patch.box !== undefined) e.box = patch.box
+    if (base) {
+      // back to the file's value: no edit
+      if (e.name !== undefined && e.name === base.name) delete e.name
+      if (e.box !== undefined && JSON.stringify(e.box) === JSON.stringify(base.box)) delete e.box
+    }
+    if (base && e.name === undefined && e.box === undefined && !e.deleted) delete faces[key]
+    else faces[key] = e
+    let kws: string[] | null = null
+    if (patch.name !== undefined && patch.name.trim() !== cur.name) {
+      if (patch.name.trim()) rememberName(patch.name)
+      const after = [...before.named.filter((f) => f.key !== key).map((f) => f.name), patch.name.trim()].filter(Boolean)
+      kws = peopleKeywords(this.keywords(s), this.peopleAsKeywords(s), after, cur.name, patch.name.trim(), this.removableName(s, cur.name, base))
+    }
+    this.putFaces(s, faces, boundary, kws)
+  }
+
+  /** Does the file list its tagged people as keywords too (as Lightroom does)? Decided from the
+   *  file's own faces and keywords, never from edits. */
+  private peopleAsKeywords(s: PhotoSession): boolean {
+    const kws = new Set(this.fileKeywords(s).map((k) => k.toLowerCase()))
+    return (s.meta?.faces?.named || []).some((f) => f.name && kws.has(f.name.toLowerCase()))
+  }
+
+  /** May a name's keyword go when the name leaves the faces? Only when it was there because of
+   *  this face (the file's name for it) or was added by these edits, never a keyword of its own. */
+  private removableName(s: PhotoSession, name: string, base: Face | undefined): boolean {
+    const own = this.fileKeywords(s).some((k) => k.toLowerCase() === name.toLowerCase())
+    return !own || (!!base && base.name.toLowerCase() === name.toLowerCase())
+  }
+
+  deleteFace(s: PhotoSession, key: string) {
+    const before = this.faces(s)
+    const cur = [...before.named, ...before.unnamed].find((f) => f.key === key)
+    if (!cur) return
+    const faces = this.faceEdits(s)
+    if (key.startsWith('new:')) delete faces[key]
+    else {
+      const base = [...(s.meta?.faces.named || []), ...(s.meta?.faces.unnamed || [])].find((f) => f.key === key)
+      faces[key] = { was: { name: base?.name ?? cur.name, box: (base?.box ?? cur.box) as Box | null }, deleted: true }
+    }
+    const after = before.named.filter((f) => f.key !== key).map((f) => f.name)
+    const fileFace = [...(s.meta?.faces.named || []), ...(s.meta?.faces.unnamed || [])].find((f) => f.key === key)
+    const kws = cur.name ? peopleKeywords(this.keywords(s), this.peopleAsKeywords(s), after, cur.name, '', this.removableName(s, cur.name, fileFace)) : null
+    if (this.selectedFace === key) this.selectedFace = null
+    this.putFaces(s, faces, true, kws)
+  }
+
+  /** A new face box (normalized, upright), optionally with a name; returns its key. */
+  addFace(s: PhotoSession, box: Box, name = ''): string {
+    const faces = this.faceEdits(s)
+    const key = newFaceKey()
+    faces[key] = { name: name.trim(), box }
+    let kws: string[] | null = null
+    if (name.trim()) {
+      rememberName(name)
+      const before = this.faces(s)
+      const names = before.named.map((f) => f.name)
+      kws = peopleKeywords(this.keywords(s), this.peopleAsKeywords(s), [...names, name.trim()], '', name.trim(), false)
+    }
+    this.putFaces(s, faces, true, kws)
+    return key
+  }
+
+  /** A detail or face name still being typed is committed (its field loses focus) before a save
+   *  takes its snapshot. */
+  async commitTyping() {
+    if (typeof document === 'undefined') return
+    const el = document.activeElement as HTMLElement | null
+    if (el && el !== document.body && el.closest?.('.details, .faces-layer') && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) {
+      el.blur()
+      await sleep(0)
+    }
+  }
+
+  /** Is the caption part of the draft untouched (only details were edited)? */
+  private captionUnedited(s: PhotoSession): boolean {
+    const strip = (snap: string) => {
+      try {
+        const d = JSON.parse(snap)
+        delete d.meta
+        return JSON.stringify(d)
+      } catch {
+        return snap
+      }
+    }
+    if (s.cleanSnap) return strip(this.snap(s)) === strip(s.cleanSnap)
+    // no clean state to compare with (opened from a draft): only a caption no one has touched in
+    // any way counts as unedited (the default template, no text, style, rows or photo-edge choices)
+    const d = s.draft
+    return d.templateId === this.defaultTemplateId() && !Object.values(d.blocks || {}).some((b) => b.custom) &&
+      !this.hasOverrides(s) && !d.faceRows && (d.mode ?? 'band') === 'band' && !d.sourceRect && !d.photoRect &&
+      !d.existingChoice && !d.keepBand && !d.brushAdd && !d.brushRemove
+  }
+
+  /** A detail as `meta` (a version of the file) has it, in the shape an edit of it takes. */
+  detailOf(meta: PhotoMeta | null | undefined, k: keyof MetaEdits): unknown {
+    const f = meta?.fields || {}
+    if (k === 'faces') return undefined
+    if (k === 'keywords') return ((f.keywords as string[]) || []).filter((x) => !isDateMarker(x))
+    if (k === 'creator') return Array.isArray(f.creators) ? f.creators : f.creator ? [String(f.creator)] : []
+    if (k === 'date') {
+      const d = dateState(f)
+      // a date in words ("Summer 1952") is no edit the date editor can make: undefined, not
+      // "no date" (the caller says it could not be put back)
+      return d.kind === 'date' ? { iso: d.iso, level: d.level } : d.kind === 'none' ? null : undefined
+    }
+    return String(f[k] ?? '')
+  }
+
+  /** Edits that only say what the file already has are no edits. */
+  private withoutNoOps(s: PhotoSession, m: MetaEdits | undefined): MetaEdits | undefined {
+    if (!m) return undefined
+    const out: MetaEdits = { ...m }
+    for (const k of Object.keys(out) as (keyof MetaEdits)[]) {
+      if (k !== 'faces' && JSON.stringify(out[k]) === JSON.stringify(this.detailOf(s.meta, k))) delete out[k]
+    }
+    return Object.keys(out).length ? out : undefined
+  }
+
+  /** Write the edited details into the photo itself (nothing else changes). */
+  async saveDetails(s: PhotoSession): Promise<boolean> {
+    await this.commitTyping()
+    if (s.invalidDetail) {
+      this.toast('warn', s.invalidDetail)
+      return false
+    }
+    const edits = s.draft.meta
+    if (!s.meta || !hasEdits(edits)) return false
+    if (this.batchReview) {
+      this.toast('warn', 'In batch review, edits are saved with Save all.')
+      return false
+    }
+    if (this.saving) return false
+    this.saving = true
+    clearTimeout(s.draftTimer)
+    const sent = JSON.stringify(edits)
+    try {
+      const res = await post<SaveResult & { meta?: PhotoMeta }>('/api/photo/details', { path: s.path, edits, expected_stat: s.meta.stat })
+      if (!res.ok || !res.meta) {
+        this.flushDraft(s)
+        if (res.code === 'changed')
+          this.toast('error', `Details not saved: ${res.error} Your edits are kept.`, { label: 'Reload photo', run: () => this.reloadPhoto(s) })
+        else this.toast('error', `Details not saved: ${res.error}`)
+        return false
+      }
+      // the file has them now: the same pixels, so the caption geometry and analysis stay
+      const beforeMeta = s.meta
+      s.meta = { ...res.meta, draft: null } as PhotoMeta
+      // details changed while the file was written stay edits (face edits can't: the file's faces
+      // were just renumbered)
+      const lost: string[] = []
+      const since = editsSince(s.draft.meta, JSON.parse(sent), (k) => {
+        const v = this.detailOf(beforeMeta, k)
+        if (v === undefined && k !== 'faces') lost.push(k === 'date' ? `the date “${beforeMeta?.fields?.date}”` : k)
+        return v
+      })
+      s.draft = { ...s.draft, meta: this.withoutNoOps(s, since.meta) }
+      if (lost.length) this.toast('warn', `Reset while saving, but ${lost.join(', ')} can’t be written back by Photoband; the photo keeps what was saved.`, undefined, 10000, s.meta.name)
+      if (since.droppedFaces) this.toast('warn', 'Face changes made while saving were not kept. Check the faces again.', undefined, 8000, s.meta.name)
+      const strip = (snap: string) => {
+        try {
+          const d = JSON.parse(snap)
+          delete d.meta
+          return JSON.stringify(d)
+        } catch {
+          return snap
+        }
+      }
+      // undo no longer steps back into edits that are saved now
+      s.undoStack = s.undoStack.map(strip)
+      s.redoStack = s.redoStack.map(strip)
+      s.lastSnap = this.snap(s)
+      this.selectedFace = null
+      await this.resolveAll(s)
+      this.relayout(s)
+      if (!hasEdits(s.draft.meta) && this.captionUnedited(s)) {
+        // the details were all there was: nothing is left unsaved, and no draft either (one may
+        // remain from a saved copy, made for the file as it was)
+        s.dirty = false
+        this.setStatus(s.path, 'saved')
+        post('/api/drafts', { path: s.path, state: null }).catch(() => {})
+      } else {
+        s.dirty = true
+        this.flushDraft(s)
+      }
+      const extra = res.backup_path ? ' (original backed up first)' : ''
+      this.toast('success', `Saved the details into the photo${extra}.`, undefined, 4000, s.meta.name)
+      return true
+    } catch (e: any) {
+      this.flushDraft(s)
+      this.toast('error', `Details not saved: ${e instanceof ApiError ? e.message : e?.message || e}`)
+      return false
+    } finally {
+      this.saving = false
+    }
+  }
+
   warnings(s: PhotoSession): Warning[] {
     const out: Warning[] = [...(s.layout?.warnings || [])]
     const mw = s.meta?.warnings || []
-    for (const w of mw) {
-      if (w === 'region dimensions mismatch')
-        out.push({ kind: 'metadata', code: 'names-regions', message: 'The face tags were made for a different size of this image, so the left-to-right order of the names may be off.' })
-      else if (w === 'no face regions') {
-        const eff = this.effective(s)
-        const nb = eff?.blocks.find((b) => b.format.includes('{names'))
-        if (nb) out.push({ kind: 'metadata', code: 'names-missing', message: `No names are tagged on faces in this photo, so the ${nb.name} line is blank.` })
-      } else if (w === 'names without positions')
-        out.push({ kind: 'metadata', code: 'names-order', message: 'Names were found, but not where each person is in the photo, so the left-to-right order may be wrong.' })
+    if (mw.includes('region dimensions mismatch'))
+      out.push({ kind: 'metadata', code: 'names-regions', message: 'The face tags were made for a different size of this image, so the left-to-right order of the names may be off.' })
+    // the faces as edited here, not only as the file has them
+    if (s.meta) {
+      const faces = this.faces(s)
+      if (!faces.named.length) {
+        const nb = this.effective(s)?.blocks.find((b) => b.format.includes('{names'))
+        if (nb) out.push({ kind: 'metadata', code: 'names-missing', message: `No names are tagged on faces in this photo, so the ${nb.name} line is blank. Turn on Faces below the photo to name them.` })
+      } else if (faces.named.some((f) => !f.box))
+        out.push({ kind: 'metadata', code: 'names-order', message: 'Some names have no place on the photo, so the left-to-right order may be wrong. Mark them in the People list (Metadata tab).' })
     }
     const info = s.meta?.info
     if (info?.save_blocked) out.unshift({ kind: 'info', message: info.save_blocked })
@@ -1027,6 +1487,7 @@ class AppStore {
   canSave(s: PhotoSession | null): string | null {
     if (this.batchReview) return 'In batch review, edits are saved with Save all.'
     if (!s?.meta || !s.layout) return 'Nothing to save yet.'
+    if (s.invalidDetail) return s.invalidDetail
     const info = s.meta.info
     if (info.save_blocked) return info.save_blocked
     if (info.pages > 1 && !this.settings.saving.allowMultipageSave) return 'This is a multi-page TIFF, and saving keeps only the first page. Allow it in Settings › Saving › Advanced.'
@@ -1062,6 +1523,7 @@ class AppStore {
   }
 
   async save(s: PhotoSession, mode: 'copy' | 'overwrite' | 'copyAs', opts: { destPath?: string; onExists?: string; embedMarker?: boolean } = {}): Promise<SaveResult | null> {
+    await this.commitTyping()
     // the existing-caption check decides where the photo is: never save before it has finished
     if (s.existingLoading) await this.existingReady(s)
     const why = this.canSave(s)
@@ -1091,12 +1553,20 @@ class AppStore {
           if (!overwrote) this.flushDraft(s)
         } else {
           s.dirty = false
+          s.cleanSnap = snap
           this.setStatus(s.path, 'saved')
         }
         const extra = res.backup_path ? ' (backup kept)' : ''
         const show = { label: 'Show in folder', run: () => { post('/api/open-folder', { which: 'file', path: res.out_path }).catch(() => {}) } }
         if (overwrote) this.toast('success', 'Overwrote the original' + extra, show)
         else this.toast('success', 'Saved' + extra, show, 5000, basename(res.out_path))
+        const savedMeta = (JSON.parse(snap) as PhotoDraft).meta
+        if (!overwrote && hasEdits(savedMeta)) {
+          // the copy has the edited details; the original doesn't yet. Keep them for it, so they
+          // are not lost when the app closes, and offer to write them now.
+          if (!newer) this.keepDetailsDraft(s)   // (newer edits were autosaved whole just above)
+          this.toast('info', 'The edited details went into the copy. The original still has its old details.', { label: 'Save to original', run: () => this.saveDetails(s) }, 12000, s.meta?.name)
+        }
         if (newer) this.toast('info', 'Changes made while saving are kept as unsaved edits.')
         if (overwrote) {
           // the file changed: reload its state (it is now a case A photo). The old session must
@@ -1115,7 +1585,16 @@ class AppStore {
             await this.existingReady(fresh)
             // only the text and style carry over; the photo edge comes from the new file's analysis
             const nd = JSON.parse(newer) as PhotoDraft
-            fresh.draft = { ...fresh.draft, templateId: this.template(nd.templateId) ? nd.templateId : fresh.draft.templateId, overrides: nd.overrides, blocks: nd.blocks }
+            // (details edited during the save are not in the file: they carry over too)
+            const lostDate = { v: false }
+            const since = editsSince(nd.meta, (JSON.parse(snap) as PhotoDraft).meta, (k) => {
+              const v = this.detailOf(s.meta, k)
+              if (v === undefined && k === 'date') lostDate.v = true
+              return v
+            })
+            if (lostDate.v) this.toast('warn', `The date was reset while saving, but “${s.meta?.fields?.date}” can’t be written back by Photoband; the photo keeps the date that was saved.`, undefined, 10000)
+            if (since.droppedFaces) this.toast('warn', 'Face changes made while saving were not kept. Check the faces again.', undefined, 8000)
+            fresh.draft = { ...fresh.draft, templateId: this.template(nd.templateId) ? nd.templateId : fresh.draft.templateId, overrides: nd.overrides, blocks: nd.blocks, faceRows: nd.faceRows ?? null, meta: this.withoutNoOps(fresh, since.meta) }
             await this.resolveAll(fresh)
             this.commit(fresh)
           } else {
@@ -1165,8 +1644,10 @@ class AppStore {
       dest_path: opts.destPath,
       on_exists: opts.onExists,
       embed_marker: opts.embedMarker,
-      state: { templateId: tpl?.fromFile?.id ?? d.templateId, template: this.recordTemplate(tpl), overrides: d.overrides, blocks },
+      state: { templateId: tpl?.fromFile?.id ?? d.templateId, template: this.recordTemplate(tpl), overrides: d.overrides, blocks, faceRows: d.faceRows ?? null },
+      // the file's fields; the server applies the edited details (meta_edits) as it writes them
       fields: s.meta!.fields,
+      meta_edits: hasEdits(d.meta) ? d.meta : undefined,
       template_name: tpl?.fromFile?.name ?? eff.name,
       case: s.existing?.case && d.mode !== 'band' ? s.existing.case : null,
       expected_stat: s.meta!.stat,

@@ -6,9 +6,9 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from captiontokens.dates import parse_date
+from captiontokens.dates import certainty_from_keywords, parse_date
 
-from .imageio import ImageInfo, orient_box
+from .imageio import ImageInfo, is_tifffile_shape_description, orient_box
 
 EXIF_GROUPS = ("IFD0", "ExifIFD", "IFD1", "EXIF")
 
@@ -132,6 +132,8 @@ def _list(v) -> List[str]:
 FIELD_SOURCES = {
     "title": ["XMP-dc:Title", "IPTC:ObjectName", "XMP-photoshop:Headline", "EXIF:XPTitle"],
     "caption": ["XMP-dc:Description", "IPTC:Caption-Abstract", "EXIF:ImageDescription", "EXIF:XPComment"],
+    # free-text notes: photokin writes its analysis to UserComment; Instructions is IPTC's notes field
+    "notes": ["EXIF:UserComment", "XMP-exif:UserComment", "XMP-photoshop:Instructions", "IPTC:SpecialInstructions"],
     # when the photo was taken; never the scan / file date, which has its own field below
     "date": ["XMP-photoshop:DateCreated", "EXIF:DateTimeOriginal", "IPTC:DateCreated", "XMP-exif:DateTimeOriginal"],
     # when it was scanned or the file was made: on a scan this is the scan date
@@ -264,7 +266,12 @@ def _text_view(md: Dict[str, Any]) -> Dict[str, Any]:
 
 def parse_regions(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
     """Face regions from MWG and MP, converted to upright normalized top-left boxes.
-    A region without usable coordinates keeps its name with box None."""
+    A region without usable coordinates keeps its name with box None.
+
+    Every face carries ``ids``: the regions it was read from ("mwg:<index in RegionList>",
+    "mp:<index>", "pii:<index>"), including the duplicates this reader folds into it (the MP copy
+    of an MWG face, an unnamed region on a named face), so an edit can change all of them; and
+    ``key``, the ids joined, which names the face for this version of the file."""
     md = _text_view(md)
     warnings: List[str] = []
     if _dims_mismatch(md, info):
@@ -273,43 +280,63 @@ def parse_regions(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
     mwg_unnamed: List[Dict[str, Any]] = []
     mwg = md.get("XMP-mwg-rs:RegionInfo")
     regions = mwg.get("RegionList") if isinstance(mwg, dict) else None
-    for r in regions if isinstance(regions, list) else []:
+    for ri, r in enumerate(regions if isinstance(regions, list) else []):
         if not isinstance(r, dict):
             continue
         if str(r.get("Type", "Face")).strip().lower() != "face":
             continue
         name = _name(r.get("Name"))
-        entry = {"name": name, "box": _mwg_box(r.get("Area"), region_frame_orientation(md, info, r)), "source": "MWG"}
+        entry = {"name": name, "box": _mwg_box(r.get("Area"), region_frame_orientation(md, info, r)), "source": "MWG",
+                 "ids": [f"mwg:{ri}"]}
         (mwg_named if name else mwg_unnamed).append(entry)
     named, unnamed = list(mwg_named), list(mwg_unnamed)
     mp = md.get("XMP-MP:RegionInfoMP")
     mp_regions = mp.get("Regions") if isinstance(mp, dict) else None
-    for r in mp_regions if isinstance(mp_regions, list) else []:
+    for i, r in enumerate(mp_regions if isinstance(mp_regions, list) else []):
         if not isinstance(r, dict):
             continue
         name = _name(r.get("PersonDisplayName"))
-        entry = {"name": name, "box": _mp_box(r.get("Rectangle"), int(info.orientation or 1)), "source": "MP"}  # MP has no ATD: file orientation
+        entry = {"name": name, "box": _mp_box(r.get("Rectangle"), int(info.orientation or 1)), "source": "MP",
+                 "ids": [f"mp:{i}"]}  # MP has no ATD: file orientation
         if name:
             # the same person named by both sources: keep the MWG one
-            dup = any(e["name"].lower() == name.lower() and
-                      (_iou(e["box"], entry["box"]) > 0.5 or e["box"] is None or entry["box"] is None)
-                      for e in mwg_named)
-            if not dup:
+            dup = next((e for e in mwg_named if e["name"].lower() == name.lower() and
+                        (_iou(e["box"], entry["box"]) > 0.5 or e["box"] is None or entry["box"] is None)), None)
+            if dup is None:
                 named.append(entry)
+            else:
+                dup["ids"].append(f"mp:{i}")
         else:
-            if entry["box"] is None or not any(_iou(e["box"], entry["box"]) > 0.5 for e in mwg_unnamed):
+            same = None
+            if entry["box"] is not None:
+                same = next((e for e in mwg_unnamed if _iou(e["box"], entry["box"]) > 0.5), None)
+            if same is None:
                 unnamed.append(entry)
+            else:
+                same["ids"].append(f"mp:{i}")
     # an unnamed region on the same face as a named one (either source) is not extra
-    unnamed = [u for u in unnamed if not any(_iou(u["box"], n["box"]) > 0.5 for n in named)]
-    if not named:
-        pii = _list(_get(md, "XMP-iptcExt:PersonInImage")[0])
-        if pii:
-            named = [{"name": n, "box": None, "source": "PersonInImage"} for n in pii]
-            warnings.append("names without positions")
-    elif any(n["box"] is None for n in named):
+    kept = []
+    for u in unnamed:
+        on = next((n for n in named if _iou(u["box"], n["box"]) > 0.5), None)
+        if on is None:
+            kept.append(u)
+        else:
+            on["ids"].extend(u["ids"])
+    unnamed = kept
+    # people named in the photo without a face region (IPTC PersonInImage): named faces without a
+    # position, unless a region already names them (tools that write both list everyone there)
+    pii = _list(_get(md, "XMP-iptcExt:PersonInImage")[0])
+    have = {n["name"].lower() for n in named}
+    for i, n in enumerate(pii):
+        if n.lower() not in have:
+            have.add(n.lower())
+            named.append({"name": n, "box": None, "source": "PersonInImage", "ids": [f"pii:{i}"]})
+    if any(n["box"] is None for n in named):
         warnings.append("names without positions")
     if not named and not unnamed:
         warnings.append("no face regions")
+    for f in named + unnamed:
+        f["key"] = "+".join(f["ids"])
     return {"named": named, "unnamed_count": len(unnamed), "unnamed": unnamed,
             "has_positions": any(n["box"] is not None for n in named), "warnings": warnings}
 
@@ -335,7 +362,20 @@ def normalize(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
                 v, src = first
             fields[key] = _text(v)
         else:
-            v, src = _get(md, *srcs)
+            v, src = None, None
+            for cand, c in _iter_sources(md, srcs):
+                if key == "caption" and c.endswith(":ImageDescription") and is_tifffile_shape_description(cand):
+                    continue   # tifffile's note of the array shape, not a description
+                v, src = cand, c
+                break
+            if key == "creator":
+                # the photographers one by one (edited as a list, so no name is ever split), and
+                # joined for captions ("Smith, John; Jones, Mary" when a name holds a comma)
+                from .metaedit import creator_separator
+                fields["creators"] = [str(x).strip() for x in (v if isinstance(v, list) else [v] if v else [])
+                                      if str(x).strip()]
+                if isinstance(v, list) and len(v) > 1:
+                    v = creator_separator(v).join(fields["creators"])
             fields[key] = _text(v)
         if src:
             sources[key] = src
@@ -347,6 +387,7 @@ def normalize(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
                 seen.add(k.lower())
                 kws.append(k)
     fields["keywords"] = kws
+    fields["date_certainty"] = _date_certainty(md, fields, kws)
     fields["keyword_paths"] = _list(md.get("XMP-lr:HierarchicalSubject"))
     base = os.path.basename(info.path)
     fields["filename"] = base
@@ -355,7 +396,34 @@ def normalize(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
     faces = parse_regions(md, info)
     fields["faces"] = faces["named"]
     fields["faces_unnamed_count"] = faces["unnamed_count"]
+    fields["faces_unnamed"] = faces["unnamed"]
     return {"fields": fields, "sources": sources, "faces": faces, "warnings": list(faces["warnings"])}
+
+
+def _date_certainty(md: Dict[str, Any], fields: Dict[str, Any], kws: List[str]) -> Optional[str]:
+    """photokin's "DATE: Y!M~" keyword rates the DateTimeOriginal it wrote. It describes the
+    caption date only when that date is DateTimeOriginal, or another tag holding the same
+    date (Lightroom keeps XMP DateCreated in step with it); a different date in a tag that
+    wins over it (a person's own XMP DateCreated) is not what the keyword rates.
+
+    photokin's model adds the keyword to every photo it analyzes, rating its own guess, but
+    photokin writes that guess into DateTimeOriginal only when it replaces the date, and then
+    at midnight. A date with a time of day ("2017:04:05 17:01:07") came from a camera or
+    scanner clock and is not the guess the keyword rates, so it is never cut down."""
+    pattern = certainty_from_keywords(kws)
+    d = parse_date(fields.get("date"))
+    if pattern is None or d is None:
+        return None
+    dto = _text(_get(md, "EXIF:DateTimeOriginal", "XMP-exif:DateTimeOriginal")[0])
+    full = parse_date(dto)
+    # the caption date is DateTimeOriginal, or the same date written with less detail (an XMP
+    # DateCreated "1952-06" next to the filled-in 1952:06:15 that photokin and Photoband write)
+    if full is None or full.year != d.year or (d.month and d.month != full.month) or (d.day and d.day != full.day):
+        return None
+    m = re.match(r"\s*\d{4}[-:]\d{1,2}[-:]\d{1,2}[ T](\d{1,2}):(\d{2})(?::(\d{2}))?", dto or "")
+    if m and any(int(x or 0) for x in m.groups()):
+        return None
+    return pattern
 
 
 def raw_listing(md: Dict[str, Any], limit: int = 400) -> List[Tuple[str, str]]:

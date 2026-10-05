@@ -74,8 +74,9 @@ def meta(path: str) -> Dict[str, Any]:
         "warnings": norm["warnings"],
         "raw": raw_listing(md),
         "hasRecord": rec is not None,
-        # size, mtime (string: JS numbers lose ns precision), quick content hash for change detection
-        "stat": [info.size_bytes, str(info.mtime_ns), quick_hash(path)],
+        # size, mtime (string: JS numbers lose ns precision), quick content hash for change detection,
+        # and the file id (as text): a file replaced by a same-size copy with its modified time kept
+        "stat": [info.size_bytes, str(info.mtime_ns), quick_hash(path), str(info.file_id or "")],
     }
     with _lock:
         _cache[k] = {"meta": res, "md": md, "info": info}
@@ -86,6 +87,40 @@ def meta(path: str) -> Dict[str, Any]:
     from .save import hash_in_background
     hash_in_background(path)
     return res
+
+
+def forget(path: str) -> None:
+    """Drop the in-memory metadata of every version of ``path`` (after Photoband rewrote it)."""
+    pre = os.path.abspath(path) + "|"
+    with _lock:
+        for k in [k for k in _cache if k.startswith(pre)]:
+            del _cache[k]
+
+
+def carry_caches(path: str, old: ImageInfo, new: ImageInfo) -> None:
+    """After a details-only save (metadata edited; pixels, orientation, ICC profile and Photoband
+    record untouched, image data verified identical): the new file version's proxy, thumbnail and
+    existing-caption analysis are the old version's, so they are not computed again."""
+    if (old.width, old.height, old.orientation, old.icc) != (new.width, new.height, new.orientation, new.icc):
+        return
+    ok = proxy.cache_key(path, old.size_bytes, old.mtime_ns, old.file_id)
+    nk = proxy.cache_key(path, new.size_bytes, new.mtime_ns, new.file_id)
+    if ok == nk:
+        return
+    d = paths.sub("cache")
+    for fn in os.listdir(d):
+        if fn.startswith(ok + "."):
+            try:
+                with open(os.path.join(d, fn), "rb") as fh:
+                    atomic_write_bytes(os.path.join(d, nk + fn[len(ok):]), fh.read())
+            except OSError:
+                pass
+    with _lock:
+        hit = _cache.get(_key(path, old))
+        if hit and "existing" in hit:
+            ent = _cache.setdefault(_key(path, new), {})
+            ent.setdefault("existing", hit["existing"])
+            ent.setdefault("existing_ocr", hit.get("existing_ocr"))
 
 
 _current = {"path": None}
