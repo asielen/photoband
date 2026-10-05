@@ -55,8 +55,9 @@ TOKENS: List[TokenInfo] = [
     TokenInfo("creator", "Photographer or creator", "{creator}", ["case", "max"]),
     TokenInfo("date", "When the photo was taken (XMP DateCreated, EXIF DateTimeOriginal, IPTC DateCreated; never "
               "the scan date); partial dates drop missing parts, approximate ones (\"circa 1950\") print as written. "
-              "A \"DATE: Y!M~\" keyword (photokin) leaves out guessed parts and puts circa= (\"c. \") before a "
-              "guessed year; certainty=ignore prints the date as stored",
+              "A \"DATE: Y!M~\" keyword (photokin) says which parts are known: unknown parts are left out, and "
+              "when the printed date shows a guessed part it gets circa= (\"c. \") before it (\"c. July 1944\"; "
+              "yyyy alone prints a known year without it); certainty=ignore prints the date as stored",
               "{date:mmmm d, yyyy}", ["case", "circa", "certainty"],
               ["auto", "yyyy", "yy", "mmmm", "mmm", "mm", "m", "dd", "d", "iso"]),
     TokenInfo("digitized", "When the photo was scanned or the file was made (EXIF/XMP CreateDate, DateTimeDigitized)",

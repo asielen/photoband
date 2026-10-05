@@ -152,9 +152,28 @@ def test_edit_details_and_faces_then_save_to_original(page, server):
     assert not pg.errors, pg.errors
 
 
+def test_a_half_typed_date_blocks_saving_and_a_revert_does_not(page):
+    pg = page
+    pg.click('[role="tab"]:has-text("Metadata")')
+    year = pg.locator('input[aria-label="Year"]')
+    pw.expect(year).to_have_value("1952")
+    year.fill("")                                          # cleared: the date shown is not complete
+    pw.expect(pg.locator(".datef .warnline")).to_be_visible()
+    pw.expect(pg.locator("header.tb button.save")).to_be_disabled()
+    year.fill("1952")                                      # back to what the file has
+    pw.expect(pg.locator(".datef .warnline")).to_have_count(0)
+    pw.expect(pg.locator("header.tb button.save")).to_be_enabled()
+    est = pg.locator('.datef input[type="checkbox"]')
+    est.check()
+    pw.expect(pg.locator(".datef .pv")).to_have_text("c. June 1952")
+    est.uncheck()                                          # on and off again: no edit is left
+    pw.expect(pg.locator(".datef .pv")).to_have_text("June 1952")
+    pw.expect(pg.locator(".details .bar")).to_have_count(0)
+
 def test_faces_toggle_is_remembered(page):
     pg = page
     pw.expect(pg.locator('button[aria-label="Hide faces"]')).to_be_visible()
     pg.reload()
     pg.wait_for_selector("text=Caption your photos")
     assert pg.evaluate("localStorage.getItem('photoband.showFaces')") == "1"
+

@@ -773,3 +773,15 @@ def test_a_format_left_with_nothing_prints_nothing():
     assert render_date("1944:06:14", "'Taken in' yyyy", "Y?M!D!") == ""
     assert render_date("1944:06:14", "iso", "Y?M!D!") == "--06-14"
     assert render_date("1944:06:14", "'Taken' mmmm d", "Y?M!D!") == "Taken June 14"
+
+
+@pytest.mark.parametrize("bad", [0, 1, 0.0, 1.0, "true"])
+def test_estimate_must_be_a_json_boolean(bad):
+    with pytest.raises(metaedit.EditError):
+        metaedit.validate({"date": {"iso": "1944", "level": "year", "estimate": bad}})
+
+
+def test_the_date_tokens_help_matches_what_captions_print():
+    from captiontokens import TOKENS
+    info = next(t for t in TOKENS if t.name == "date").description
+    assert "c. July 1944" in info and "leaves out guessed parts" not in info

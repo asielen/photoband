@@ -30,17 +30,18 @@
   let estimate = $state(false)
   // the file's own pattern: kept while only the values change (see DateEdit.pattern)
   let pattern = $state<string | undefined>(undefined)
-  // changed here since the date was shown (only then can the inputs be "incomplete")
-  let touched = $state(false)
+  // the inputs as the date was shown: they are "incomplete" only when they differ from it (an edit
+  // under way) and make no date; going back to what was shown is never incomplete
+  let shownInputs = $state('')
   let year = $state<number | null>(null)
   let month = $state<number | null>(null)
   let day = $state<number | null>(null)
+  const inputs = $derived(JSON.stringify([level, estimate, year, month, day]))
   let lastKey = ''
   $effect(() => {
     const key = JSON.stringify([s.path, shown])
     if (key === lastKey) return
     lastKey = key
-    touched = false
     if (shown.kind === 'date') {
       const [y, m, d] = shown.iso.split('-').map(Number)
       level = shown.level
@@ -62,10 +63,11 @@
       estimate = false
       pattern = undefined
     }
+    shownInputs = JSON.stringify([level, estimate, year, month, day])
   })
 
   const iso = $derived(isoFor(level, year, month, day))
-  const incomplete = $derived(touched && (year !== null || month !== null || day !== null) && !iso)
+  const incomplete = $derived(inputs !== shownInputs && (year !== null || month !== null || day !== null) && !iso)
   // a half-typed date is not what a save would write: saving waits until it is whole (or cleared)
   $effect(() => {
     const session = s
@@ -74,7 +76,6 @@
   })
 
   function apply() {
-    touched = true
     if (iso) app.setDate(s, { iso, level, estimate, ...(pattern ? { pattern } : {}) })
   }
   function setEstimate(v: boolean) {

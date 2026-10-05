@@ -196,7 +196,7 @@ def _check_date(v: Any) -> Optional[Dict[str, str]]:
     if not isinstance(v, dict) or v.get("level") not in LEVELS or not isinstance(v.get("iso"), str):
         raise EditError("date must be {iso, level}")
     iso, level = v["iso"].strip(), v["level"]
-    if v.get("estimate") not in (None, True, False):
+    if v.get("estimate") is not None and not isinstance(v.get("estimate"), bool):
         raise EditError("estimate must be true or false")
     estimate = bool(v.get("estimate"))
     if level == "circa":          # (an older edit: an estimated year)
