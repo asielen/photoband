@@ -14,6 +14,7 @@
       "filename": str, "stem": str, "folder": str,
       "faces": [{"name": str, "box": [x, y, w, h] | None}, ...],
       "faces_unnamed_count": int,
+      "face_rows": int | None,                     # this photo's row count for {names:rows} (None: auto)
       "template": str,
     }
 
@@ -49,7 +50,8 @@ class TokenInfo:
 TOKENS: List[TokenInfo] = [
     TokenInfo("title", "Photo title (XMP dc:Title, IPTC ObjectName, Headline, XPTitle)", "{title}", ["case", "max"]),
     TokenInfo("caption", "Photo description (XMP dc:Description, IPTC Caption, ImageDescription)", "{caption}", ["case", "max"]),
-    TokenInfo("notes", "Notes about the photo (EXIF UserComment, IPTC/XMP Instructions)", "{notes}", ["case", "max"]),
+    TokenInfo("notes", "Notes about the photo (EXIF UserComment, IPTC/XMP Instructions); at most 200 characters "
+              "unless max= says otherwise (max=0: no limit)", "{notes}", ["case", "max"]),
     TokenInfo("creator", "Photographer or creator", "{creator}", ["case", "max"]),
     TokenInfo("date", "When the photo was taken (XMP DateCreated, EXIF DateTimeOriginal, IPTC DateCreated; never "
               "the scan date); partial dates drop missing parts, approximate ones (\"circa 1950\") print as written. "
@@ -150,9 +152,13 @@ def _int(v) -> int:
     return max(0, n)
 
 
+# {notes} holds free text (photokin writes a paragraph of analysis there): cut unless asked
+DEFAULT_MAX = {"notes": 200}
+
+
 def _max_chars(v) -> Optional[int]:
-    """The ``max=N`` option's N: a whole number in ASCII digits, or None. The check and the
-    renderer both use this, so they agree; ``isdigit`` let "²" through to ``int``, which raised."""
+    """The ``max=N`` option's N: a whole number in ASCII digits, or None (0: no limit). The check
+    and the renderer both use this, so they agree; ``isdigit`` let "²" through to ``int``, which raised."""
     m = re.fullmatch(r"\s*([0-9]+)\s*", v) if isinstance(v, str) else None
     return int(m.group(1)) if m else None
 
@@ -167,7 +173,15 @@ def _apply_text_options(value: str, opts: Dict[str, str]) -> str:
         value = " ".join(w[:1].upper() + w[1:] for w in value.split(" "))
     n = _max_chars(opts.get("max"))
     if n and len(value) > n:
-        value = value[:1] if n == 1 else value[: n - 1].rstrip() + "…"
+        if n == 1:
+            return value[:1]
+        head = value[: n - 1]
+        # end on a word boundary when one is near (not "Two boys on a do…")
+        if value[n - 1].strip() and _word_char(value[n - 1]) and _word_char(head[-1]):
+            sp = max(head.rfind(" "), head.rfind("\n"))
+            if sp >= 0.6 * (n - 1):
+                head = head[:sp]
+        value = head.rstrip() + "…"
     return value
 
 
@@ -198,6 +212,34 @@ def _faces(fields) -> List[Face]:
         if name:
             out.append(Face(name, _box(box), getattr(f, "source", "") if isinstance(f, Face) else ""))
     return out
+
+
+def _face_rows(v) -> Optional[int]:
+    """A photo's own row count for {names:rows}: a whole number 1..9, else None (automatic)."""
+    try:
+        n = int(v) if v is not None and not isinstance(v, bool) else None
+    except (TypeError, ValueError):
+        return None
+    return n if n is not None and 1 <= n <= 9 else None
+
+
+def face_row_groups(fields: Dict[str, Any]) -> List[List[int]]:
+    """How {names:rows} groups this photo's named faces, front row first, each row left to right,
+    as indexes into ``fields["faces"]`` (for the UI's People list). Faces without a position are
+    left out; a single row is still one group."""
+    raw = fields.get("faces") if isinstance(fields, dict) else None
+    if not isinstance(raw, (list, tuple)):
+        return []
+    pos: List[Face] = []
+    index: Dict[int, int] = {}
+    for i, r in enumerate(raw):
+        one = _faces({"faces": [r]})
+        if one and one[0].box is not None:
+            index[id(one[0])] = i
+            pos.append(one[0])
+    if not pos:
+        return []
+    return [[index[id(f)] for f in row] for row in cluster_rows(pos, rows=_face_rows(fields.get("face_rows")))]
 
 
 def _row_label(labels: List[str], i: int, nr: int) -> str:
@@ -270,8 +312,8 @@ def check_token(tok: Token) -> List[Issue]:
                 bad(f"{{{tok.name}}} takes no options (\"{k}\")")
         elif k in _OPTION_VALUES and v.lower() not in _OPTION_VALUES[k]:
             bad(f"Unknown {k}=\"{v}\" (use {', '.join(_OPTION_VALUES[k])})")
-        elif k == "max" and not _max_chars(v):
-            bad(f"max must be a positive whole number (\"{v}\")")
+        elif k == "max" and _max_chars(v) is None:
+            bad(f"max must be a whole number (\"{v}\"; 0 for no limit)")
     return out
 
 
@@ -298,6 +340,8 @@ class Resolver:
         n, fmt, o = tok.name, tok.fmt, tok.options
         f = self.f
         if n in ("title", "caption", "notes", "creator", "city", "state", "country"):
+            if n in DEFAULT_MAX and "max" not in o:
+                o = {**o, "max": str(DEFAULT_MAX[n])}
             return _apply_text_options(_s(f.get(n)).strip(), o)
         if n == "date":
             cert = None if o.get("certainty", "").lower() == "ignore" else _s(f.get("date_certainty")).strip()
@@ -312,7 +356,7 @@ class Resolver:
             last = unescape_value(o.get("last", " and "))
             order = o.get("order", "lr").lower()
             if (fmt or "").lower() == "rows" and faces and all(x.box is not None for x in faces):
-                rows = cluster_rows(faces)
+                rows = cluster_rows(faces, rows=_face_rows(f.get("face_rows")))
                 if len(rows) > 1:
                     labels = [unescape_value(x).lstrip() for x in split_list(o.get("row_labels", DEFAULT_ROW_LABELS))]
                     labels = [lb for lb in labels if lb.strip()] or ["Row 1: "]

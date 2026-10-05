@@ -235,7 +235,8 @@ def analyze_existing(arr: np.ndarray, info: ImageInfo, md: Dict[str, Any], run_o
             out.update(case="A", source="record", confidence=1.0,
                        sourceRect=rect,
                        state={"template": rec.get("template"), "templateId": rec.get("templateId"),
-                              "overrides": rec.get("overrides"), "blocks": rec.get("blocks")},
+                              "overrides": rec.get("overrides"), "blocks": rec.get("blocks"),
+                              "faceRows": rec.get("faceRows")},
                        originalText=rec.get("originalText"),
                        lossyRecaption=info.format == "JPEG")
             # isCopy (set above): a captioned copy Photoband saved (copies sit next to their
@@ -279,7 +280,8 @@ def analyze_existing(arr: np.ndarray, info: ImageInfo, md: Dict[str, Any], run_o
         if p and hash_ok:
             out.update(case="A", source="marker+payload", confidence=1.0, sourceRect=list(mk.photo_rect),
                        state={"template": p.get("template"), "templateId": (p.get("template") or {}).get("id"),
-                              "overrides": p.get("overrides"), "blocks": p.get("blocks")},
+                              "overrides": p.get("overrides"), "blocks": p.get("blocks"),
+                              "faceRows": p.get("faceRows")},
                        band=band.to_json(), lossyRecaption=info.format == "JPEG")
             if not rec:
                 # what the record path gives the editor (mode: erase in place keeps the paper band)

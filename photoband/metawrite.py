@@ -29,7 +29,9 @@ Decisions worth knowing:
   EXIF/XMP subject area are handled the same way as MP (the stored pixels,
   with the EXIF orientation applied), because that is how they were
   written by the camera/tool against the stored image.
-* Nothing Photoband renders (the caption) is ever written into a metadata field.
+* Nothing Photoband renders (the caption) is ever written into a metadata field. Details the
+  user edited (metaedit) are: they are written in pass 2 on top of the copied values, face edits
+  are applied to the source regions before the remap, and the result is read back and checked.
 """
 from __future__ import annotations
 
@@ -608,13 +610,20 @@ def _check_too_large(err: str) -> None:
                             "not be written as extended XMP.")
 
 
-def _dc_missing(src_t: Dict, out_md: Dict) -> List[str]:
-    """XMP-dc tags the source has that the output lacks."""
+def _dc_missing(src_t: Dict, out_md: Dict, exempt=()) -> List[str]:
+    """XMP-dc tags the source has that the output lacks (``exempt``: tags an edit removed)."""
     return sorted(k for k, v in src_t.items()
-                  if k.startswith("XMP-dc:") and v not in (None, "", [], {}) and k not in out_md)
+                  if k.startswith("XMP-dc:") and v not in (None, "", [], {}) and k not in out_md
+                  and k not in exempt and _lang_base(k) not in exempt)
 
 
-def _verify(et, tmp: str, out_fmt: str, canvas, rec: Dict, src_t: Optional[Dict] = None) -> Dict:
+def _lang_base(k: str) -> str:
+    """"XMP-dc:Title-de" -> "XMP-dc:Title" (a lang-alt variant's tag)."""
+    grp, _, tag = k.partition(":")
+    return f"{grp}:{tag.split('-')[0]}"
+
+
+def _verify(et, tmp: str, out_fmt: str, canvas, rec: Dict, src_t: Optional[Dict] = None, exempt=()) -> Dict:
     try:
         md2 = et.read_json(tmp)
     except ExifToolError as e:
@@ -637,17 +646,32 @@ def _verify(et, tmp: str, out_fmt: str, canvas, rec: Dict, src_t: Optional[Dict]
         if k.endswith((":ThumbnailImage", ":PreviewImage", ":PhotoshopThumbnail")):
             raise MetadataError("Metadata check failed: an old embedded thumbnail is still present.")
     if src_t:
-        missing = _dc_missing(src_t, md2)
+        missing = _dc_missing(src_t, md2, exempt)
         if missing:
             raise MetadataError("Metadata check failed: " + ", ".join(k.split(":", 1)[1] for k in missing)
                                 + " from the source did not reach the output.")
     return md2
 
 
+def _verify_edits(md2: Dict, path: str, fields: Dict, edits: Dict, notes: List[str], boxes: bool) -> None:
+    """The edited details read back from ``path`` as the reader will see them."""
+    import re
+    from . import metaedit
+    from .imageio import probe
+    from .metadata import normalize
+    got = normalize(md2, probe(path))["fields"]
+    dropped = [m.group(1) for n in notes for m in [re.search(r"region “(.+)” was left out", n)] if m]
+    bad = metaedit.check_written(metaedit.apply_to_fields(fields, edits), got, edits, boxes=boxes, dropped=dropped)
+    if bad:
+        raise MetadataError("Metadata check failed: your edited " + ", ".join(bad) + " did not read back as written.")
+
+
 def write_metadata(tmp: str, src: str, md: Dict, info: ImageInfo, out_fmt: str, canvas_size, photo_rect,
-                   source_rect, rec: Dict) -> List[str]:
+                   source_rect, rec: Dict, edits: Optional[Dict] = None, fields: Optional[Dict] = None) -> List[str]:
     """Copy and update metadata on ``tmp``. Returns notes for the save log (dropped
-    regions, Lightroom settings changed, ExifTool warnings). Raises MetadataError."""
+    regions, Lightroom settings changed, ExifTool warnings). ``edits``: details the user edited
+    (metaedit), written on top; ``fields``: the source's caption fields as read (what the edits
+    change). Raises MetadataError."""
     et = get_exiftool()
     notes: List[str] = []
     warn: List[str] = []
@@ -726,11 +750,36 @@ def write_metadata(tmp: str, src: str, md: Dict, info: ImageInfo, out_fmt: str, 
         p2[-1:-1] = [f"-XMP-xmpMM:History+={{Action=converted,Parameters=from {_mime(info.format)} "
                      f"to {_mime(out_fmt)}}}"]
 
-    updates = build_region_updates(md, info, source_rect, photo_rect, (Wc, Hc), notes)
+    region_md = md
+    e_upd: Dict[str, Any] = {}
+    e_del: List[str] = []
+    reg: Dict[str, Any] = {}
+    if edits:
+        from . import metaedit
+        e_upd, e_del, e_notes = metaedit.tag_updates(md, info, fields or {}, edits)
+        notes += e_notes
+        reg = metaedit.region_updates(md, info, fields or {}, edits.get("faces") or {})
+        if reg:
+            region_md = {**t, **reg}
+    updates = build_region_updates(region_md, info, source_rect, photo_rect, (Wc, Hc), notes)
+    for key, inner in (("XMP-mwg-rs:RegionInfo", "RegionList"), ("XMP-MP:RegionInfoMP", "Regions")):
+        if key in reg and not (reg[key] or {}).get(inner):
+            updates.pop(key, None)
+            e_del.append(f"-{key}=")   # every face removed
+    if "XMP-iptcExt:PersonInImage" in reg:
+        if reg["XMP-iptcExt:PersonInImage"]:
+            e_upd["XMP-iptcExt:PersonInImage"] = reg["XMP-iptcExt:PersonInImage"]
+        else:
+            e_del.append("-XMP-iptcExt:PersonInImage=")
     gupd, gdel = build_geometry_updates(md, info, source_rect, photo_rect, (Wc, Hc), notes)
     updates.update(gupd)
     updates.update(_text_field_updates(t, info, out_fmt))
-    p2 += gdel
+    # the user's edits win over carried values; a cleared field is not filled again from elsewhere
+    gone = {d[1:].split("=", 1)[0] for d in e_del}
+    for k in gone:
+        updates.pop(k, None)
+    updates.update(e_upd)
+    p2 += gdel + e_del
 
     jpath = None
     if updates:
@@ -779,7 +828,10 @@ def write_metadata(tmp: str, src: str, md: Dict, info: ImageInfo, out_fmt: str, 
             _copy_png_custom_text(info.path or src, tmp)
         except OSError:
             log.debug("copying PNG text chunks failed", exc_info=True)
-    _verify(et, tmp, out_fmt, (Wc, Hc), rec, t)
+    exempt = set(e_upd) | gone
+    md2 = _verify(et, tmp, out_fmt, (Wc, Hc), rec, t, exempt)
+    if edits:
+        _verify_edits(md2, tmp, fields or {}, edits, notes, boxes=False)
 
     if out_fmt == "PNG" and info.icc and out_fmt != info.format:
         notes.append("ICC profile carried into the PNG")

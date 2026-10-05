@@ -21,7 +21,8 @@
   $effect(() => {
     // refresh for another photo, other Saving settings, another template (file-name pattern) and after each save
     const path = s.path
-    const body = { path, fields: s.meta?.fields, templateName: tplName }
+    // edited details count: a file-name pattern may use them
+    const body = { path, fields: s.meta?.fields, edits: s.draft.meta && Object.keys(s.draft.meta).length ? $state.snapshot(s.draft.meta) : undefined, templateName: tplName }
     void savingKey
     // once the caption check has read the photo, the server can confirm the original backup applies
     void s.existingLoading

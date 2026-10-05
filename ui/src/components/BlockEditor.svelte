@@ -151,7 +151,7 @@
       formats['names:rows'] = '{names:rows}'
       formats['date:yyyy'] = '{date:yyyy}'
       try {
-        const r = await post('/api/resolve', { fields: s.meta?.fields, formats })
+        const r = await post('/api/resolve', { ...app.fieldsBody(s), formats })
         insertValues = Object.fromEntries(Object.entries(r).map(([k, v]: any) => [k, v.plain]))
       } catch {
         insertValues = {}

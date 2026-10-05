@@ -266,7 +266,12 @@ def _text_view(md: Dict[str, Any]) -> Dict[str, Any]:
 
 def parse_regions(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
     """Face regions from MWG and MP, converted to upright normalized top-left boxes.
-    A region without usable coordinates keeps its name with box None."""
+    A region without usable coordinates keeps its name with box None.
+
+    Every face carries ``ids``: the regions it was read from ("mwg:<index in RegionList>",
+    "mp:<index>", "pii:<index>"), including the duplicates this reader folds into it (the MP copy
+    of an MWG face, an unnamed region on a named face), so an edit can change all of them; and
+    ``key``, the ids joined, which names the face for this version of the file."""
     md = _text_view(md)
     warnings: List[str] = []
     if _dims_mismatch(md, info):
@@ -275,43 +280,59 @@ def parse_regions(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
     mwg_unnamed: List[Dict[str, Any]] = []
     mwg = md.get("XMP-mwg-rs:RegionInfo")
     regions = mwg.get("RegionList") if isinstance(mwg, dict) else None
-    for r in regions if isinstance(regions, list) else []:
+    for ri, r in enumerate(regions if isinstance(regions, list) else []):
         if not isinstance(r, dict):
             continue
         if str(r.get("Type", "Face")).strip().lower() != "face":
             continue
         name = _name(r.get("Name"))
-        entry = {"name": name, "box": _mwg_box(r.get("Area"), region_frame_orientation(md, info, r)), "source": "MWG"}
+        entry = {"name": name, "box": _mwg_box(r.get("Area"), region_frame_orientation(md, info, r)), "source": "MWG",
+                 "ids": [f"mwg:{ri}"]}
         (mwg_named if name else mwg_unnamed).append(entry)
     named, unnamed = list(mwg_named), list(mwg_unnamed)
     mp = md.get("XMP-MP:RegionInfoMP")
     mp_regions = mp.get("Regions") if isinstance(mp, dict) else None
-    for r in mp_regions if isinstance(mp_regions, list) else []:
+    for i, r in enumerate(mp_regions if isinstance(mp_regions, list) else []):
         if not isinstance(r, dict):
             continue
         name = _name(r.get("PersonDisplayName"))
-        entry = {"name": name, "box": _mp_box(r.get("Rectangle"), int(info.orientation or 1)), "source": "MP"}  # MP has no ATD: file orientation
+        entry = {"name": name, "box": _mp_box(r.get("Rectangle"), int(info.orientation or 1)), "source": "MP",
+                 "ids": [f"mp:{i}"]}  # MP has no ATD: file orientation
         if name:
             # the same person named by both sources: keep the MWG one
-            dup = any(e["name"].lower() == name.lower() and
-                      (_iou(e["box"], entry["box"]) > 0.5 or e["box"] is None or entry["box"] is None)
-                      for e in mwg_named)
-            if not dup:
+            dup = next((e for e in mwg_named if e["name"].lower() == name.lower() and
+                        (_iou(e["box"], entry["box"]) > 0.5 or e["box"] is None or entry["box"] is None)), None)
+            if dup is None:
                 named.append(entry)
+            else:
+                dup["ids"].append(f"mp:{i}")
         else:
-            if entry["box"] is None or not any(_iou(e["box"], entry["box"]) > 0.5 for e in mwg_unnamed):
+            same = next((e for e in mwg_unnamed if _iou(e["box"], entry["box"]) > 0.5), None)                 if entry["box"] is not None else None
+            if same is None:
                 unnamed.append(entry)
+            else:
+                same["ids"].append(f"mp:{i}")
     # an unnamed region on the same face as a named one (either source) is not extra
-    unnamed = [u for u in unnamed if not any(_iou(u["box"], n["box"]) > 0.5 for n in named)]
+    kept = []
+    for u in unnamed:
+        on = next((n for n in named if _iou(u["box"], n["box"]) > 0.5), None)
+        if on is None:
+            kept.append(u)
+        else:
+            on["ids"].extend(u["ids"])
+    unnamed = kept
     if not named:
         pii = _list(_get(md, "XMP-iptcExt:PersonInImage")[0])
         if pii:
-            named = [{"name": n, "box": None, "source": "PersonInImage"} for n in pii]
+            named = [{"name": n, "box": None, "source": "PersonInImage", "ids": [f"pii:{i}"]}
+                     for i, n in enumerate(pii)]
             warnings.append("names without positions")
     elif any(n["box"] is None for n in named):
         warnings.append("names without positions")
     if not named and not unnamed:
         warnings.append("no face regions")
+    for f in named + unnamed:
+        f["key"] = "+".join(f["ids"])
     return {"named": named, "unnamed_count": len(unnamed), "unnamed": unnamed,
             "has_positions": any(n["box"] is not None for n in named), "warnings": warnings}
 
@@ -358,6 +379,7 @@ def normalize(md: Dict[str, Any], info: ImageInfo) -> Dict[str, Any]:
     faces = parse_regions(md, info)
     fields["faces"] = faces["named"]
     fields["faces_unnamed_count"] = faces["unnamed_count"]
+    fields["faces_unnamed"] = faces["unnamed"]
     return {"fields": fields, "sources": sources, "faces": faces, "warnings": list(faces["warnings"])}
 
 
@@ -376,7 +398,10 @@ def _date_certainty(md: Dict[str, Any], fields: Dict[str, Any], kws: List[str]) 
     if pattern is None or d is None:
         return None
     dto = _text(_get(md, "EXIF:DateTimeOriginal", "XMP-exif:DateTimeOriginal")[0])
-    if parse_date(dto) != d:
+    full = parse_date(dto)
+    # the caption date is DateTimeOriginal, or the same date written with less detail (an XMP
+    # DateCreated "1952-06" next to the filled-in 1952:06:15 that photokin and Photoband write)
+    if full is None or full.year != d.year or (d.month and d.month != full.month) or (d.day and d.day != full.day):
         return None
     m = re.match(r"\s*\d{4}[-:]\d{1,2}[-:]\d{1,2}[ T](\d{1,2}):(\d{2})(?::(\d{2}))?", dto or "")
     if m and any(int(x or 0) for x in m.groups()):

@@ -37,28 +37,34 @@ def order_names(faces: List[Face], order: str = "lr") -> List[str]:
     return [f.name for f in positioned] + [f.name for f in faces if f.box is None]
 
 
-def cluster_rows(faces: List[Face], factor: float = 0.6) -> List[List[Face]]:
+def cluster_rows(faces: List[Face], factor: float = 0.6, rows: Optional[int] = None) -> List[List[Face]]:
     """Group faces into rows by center y, ordered front (lowest in frame) to back.
 
-    Two faces share a row when their centers differ by less than
-    ``factor`` x the median face height. Rows are the connected groups of
-    that rule (single linkage): faces sorted by center y are chained while
-    each gap to the next face is below the threshold, so a tilted row stays
-    together. Faces without a position are ignored here.
-    """
+    Faces sorted by center y are cut into rows at the gaps that are large for THIS photo: a gap
+    of at least ``factor`` x the median face height that is also at least 2.5 x the median gap
+    between neighbours, or at least 1.2 x the median face height whatever the other gaps are.
+    People standing side by side differ in height (and lean), so neighbouring heads in one row
+    can be most of a face height apart; what sets a row behind them apart is a gap clearly bigger
+    than those. Single linkage keeps a tilted row together. ``rows``: cut into exactly that many
+    rows (at the largest gaps) instead. Faces without a position are ignored here."""
     positioned = [f for f in faces if f.box is not None]
     if not positioned:
         return [list(faces)] if faces else []
-    mh = median(f.box[3] for f in positioned)
-    thr = factor * mh
-    rows: List[List[Face]] = []
-    prev = None
-    for f in sorted(positioned, key=lambda f: -f.cy):  # front (bottom) first
-        if rows and prev is not None and abs(prev.cy - f.cy) < thr:
-            rows[-1].append(f)
+    order = sorted(positioned, key=lambda f: -f.cy)  # front (bottom) first
+    gaps = [order[i].cy - order[i + 1].cy for i in range(len(order) - 1)]
+    if rows is not None and rows >= 1:
+        k = min(int(rows), len(order)) - 1
+        cuts = set(sorted(range(len(gaps)), key=lambda i: -gaps[i])[:k])
+    else:
+        mh = median(f.box[3] for f in positioned)
+        thr = max(factor * mh, min(1.2 * mh, 2.5 * median(gaps))) if gaps else 0.0
+        cuts = {i for i, g in enumerate(gaps) if g >= thr}
+    out: List[List[Face]] = [[order[0]]]
+    for i, f in enumerate(order[1:]):
+        if i in cuts:
+            out.append([f])
         else:
-            rows.append([f])
-        prev = f
-    for r in rows:
+            out[-1].append(f)
+    for r in out:
         r.sort(key=lambda f: f.cx)
-    return rows
+    return out

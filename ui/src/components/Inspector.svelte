@@ -2,6 +2,7 @@
   import { families, hasItalic, weightsFor, family as famOf } from '../lib/fonts'
   import { app, type PhotoSession } from '../lib/store.svelte'
   import BlockEditor from './BlockEditor.svelte'
+  import DetailsPanel from './DetailsPanel.svelte'
   import ColorField from './ColorField.svelte'
   import Disclosure from './Disclosure.svelte'
   import Icon from './Icon.svelte'
@@ -10,7 +11,6 @@
   import { dialogs } from '../lib/dialogs.svelte'
   import { actions } from '../lib/actions'
   import { post } from '../lib/api'
-  import { dateRowText } from '../lib/datetext'
 
   let { s }: { s: PhotoSession } = $props()
 
@@ -79,12 +79,15 @@
   const layoutForce = $derived(warns.some((w) => w.kind === 'overflow' || (w.kind === 'small' && !w.block)))
   const noOverrides = $derived(!app.hasOverrides(s))
   const NO_CHANGES = 'Change a style or layout setting first. Changes made here apply to this photo only.'
-  const noFaces = $derived(!!s.meta && s.meta.faces.named.length === 0 && s.meta.faces.unnamed_count === 0)
+  const noFaces = $derived.by(() => {
+    const f = app.faces(s)
+    return !!s.meta && f.named.length === 0 && f.unnamed.length === 0
+  })
   const TABS = [
     ['text', 'Text', 'Edit the caption text'],
     ['style', 'Style', 'Font, size, colour and alignment of each caption line'],
     ['layout', 'Layout', 'Border sizes, band height and colours'],
-    ['metadata', 'Metadata', 'The details found in the file (read-only)'],
+    ['metadata', 'Metadata', 'The photo’s details: title, date, place, keywords and people. Edit them here.'],
   ] as const
 
   // tab pattern: one tab stop, arrows / Home / End move between tabs
@@ -123,13 +126,6 @@
     if (ok) await app.saveOverridesAsTemplate(s, false)
   }
 
-  const facesLR = $derived.by(() => {
-    const f = s.meta?.faces
-    if (!f) return []
-    const named = f.named.slice()
-    if (named.every((x) => x.box)) named.sort((a, b) => a.box![0] + a.box![2] / 2 - (b.box![0] + b.box![2] / 2))
-    return named
-  })
   let rawFilter = $state('')
   /** "(Binary data 1161 bytes, use -b option to extract)" → "binary · 1.1 KB" */
   function humanize(v: string): string {
@@ -139,38 +135,6 @@
     return `binary · ${n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`}`
   }
   const raw = $derived((s.meta?.raw || []).map(([k, v]) => [k, humanize(v)] as [string, string]).filter(([k, v]) => !rawFilter || (k + ' ' + v).toLowerCase().includes(rawFilter.toLowerCase())))
-  // the dates as captions print them ({date}, {digitized}), not the raw metadata values
-  let dateText = $state('')
-  let scanText = $state('')
-  $effect(() => {
-    const f = s.meta?.fields
-    dateText = ''
-    scanText = ''
-    if (!f?.date && !f?.digitized) return
-    let live = true
-    post<Record<string, { plain?: string; text?: string }>>('/api/resolve', { fields: f, formats: { date: '{date}', digitized: '{digitized}' } })
-      .then((r) => {
-        if (!live) return
-        dateText = r.date?.plain || r.date?.text || ''
-        scanText = r.digitized?.plain || r.digitized?.text || ''
-      })
-      .catch(() => {})
-    return () => { live = false }
-  })
-  const fieldRows = $derived.by(() => {
-    const f = s.meta?.fields || {}
-    const src = s.meta?.fieldSources || {}
-    return [
-      ['Title', f.title, src.title],
-      ['Caption', f.caption, src.caption],
-      ['Notes', f.notes, src.notes],
-      ['Date', dateRowText(dateText, f.date), src.date],
-      ['Scan date', dateRowText(scanText, f.digitized), src.digitized],
-      ['Creator', f.creator, src.creator],
-      ['Location', [f.sublocation, f.city, f.state, f.country].filter(Boolean).join(', '), src.city || src.sublocation],
-      ['Keywords', (f.keywords || []).join(', '), ''],
-    ] as [string, string, string][]
-  })
 </script>
 
 <aside class="insp">
@@ -190,8 +154,8 @@
           <BlockEditor {s} block={b} lowConfidence={lowConf} />
         {/each}
         <div class="row quiet">
-          <label class="row check" class:off={noFaces} data-tip={noFaces ? 'This photo has no tagged faces to show.' : 'Outline each tagged face with its name and left-to-right number. Never saved.'} data-tip-key="F">
-            <input type="checkbox" bind:checked={app.showFaces} disabled={noFaces} /> Show faces
+          <label class="row check" data-tip={noFaces ? 'This photo has no tagged faces yet. Turn this on to add them.' : 'Outline each tagged face with its name and left-to-right number; click a face to edit it.'} data-tip-key="F">
+            <input type="checkbox" bind:checked={app.showFaces} /> Show faces
           </label>
           <span class="grow"></span>
           <button class="btn sm ghost" disabled={!app.hasEdits(s)} data-tip={app.hasEdits(s) ? "Discard this photo's text and style edits. You can undo this." : 'Nothing to revert: this photo follows its template.'} onclick={actions.revertToTemplate}><Icon name="reset" size={13} /> Revert to template</button>
@@ -357,25 +321,7 @@
       </div>
     {:else}
       <div class="col pad stack">
-        <section class="col">
-          <h3 class="section-h">Details</h3>
-          <dl class="kv">
-            {#each fieldRows as [k, v, src]}
-              <div class="kvrow" data-tip={src ? `Read from the file's ${src} field` : undefined} data-tip-side="left"><dt>{k}</dt><dd class:faint={!v}>{v || '—'}</dd></div>
-            {/each}
-          </dl>
-        </section>
-        <section class="col">
-          <h3 class="section-h">People, left to right</h3>
-          {#if facesLR.length}
-            <ol class="faces">
-              {#each facesLR as f}<li data-tip={f.box ? `Tagged on a face in the photo (${f.source})` : `Named without a face position (${f.source}), so its place in the order may be wrong`} data-tip-side="left">{f.name}{#if !f.box}<span class="faint"> · no position</span>{/if}</li>{/each}
-            </ol>
-          {:else}
-            <p class="faint small">No named faces.</p>
-          {/if}
-          {#if s.meta?.faces.unnamed_count}<p class="faint small">{s.meta.faces.unnamed_count} face{s.meta.faces.unnamed_count > 1 ? 's' : ''} without a name.</p>{/if}
-        </section>
+        <DetailsPanel {s} />
         {#if s.meta}
           <section class="col">
             <h3 class="section-h">File</h3>
@@ -426,7 +372,6 @@
   @container insp (max-width: 359px) { .grid2 { grid-template-columns: minmax(0, 1fr); } }
   .k { color: var(--fg-2); font-size: 12px; }
   .check { gap: 8px; color: var(--fg-2); font-size: 12.5px; min-height: 28px; }
-  .check.off { opacity: 0.55; }
   .quiet { margin-top: -8px; }
   .sub { padding-left: 24px; }
   .small { font-size: 12px; margin: 0; }
@@ -441,16 +386,11 @@
   .foot { padding: 6px 8px; border-top: 1px solid var(--line); gap: 2px; flex-wrap: wrap; flex: none; }
   .foot .btn { padding: 0 6px; }
   .note { background: var(--info-bg); color: var(--info-fg); padding: 8px 12px; border-radius: var(--radius); font-size: 12px; }
-  .kv { margin: 0; font-size: 12.5px; display: flex; flex-direction: column; }
-  .kvrow { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 12px; padding: 4px 0; }
-  .kv dt { color: var(--fg-2); }
-  .kv dd { margin: 0; word-break: break-word; user-select: text; }
   /* key above value: long ExifTool names and values both get the full width */
   .raw { margin: 0; font-size: 11px; }
   .rawrow { padding: 4px 0; }
   .rawrow + .rawrow { border-top: 1px solid var(--line); }
   .raw dt { font: 10.5px var(--font-mono); color: var(--fg-3); word-break: break-all; }
   .raw dd { margin: 1px 0 0; font: 11.5px var(--font-mono); color: var(--fg); word-break: break-word; user-select: text; }
-  .faces { margin: 0; padding-left: 20px; font-size: 12.5px; display: flex; flex-direction: column; gap: 2px; }
   .filter { width: 100%; }
 </style>

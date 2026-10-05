@@ -1013,7 +1013,8 @@ def _run_job(bid: str, idx: int, d: str, job: Dict[str, Any]) -> Dict[str, Any]:
                       erase=job.get("erase"), original_text=job.get("original_text"), case=job.get("case"),
                       expected_stat=tuple(job["expected_stat"]) if job.get("expected_stat") else None,
                       batch_job=f"{bid}:{idx}", fields=job.get("fields"), template_name=job.get("template_name", ""),
-                      on_exists=job.get("on_exists"), expected_hash=job.get("expected_hash"), on_backup=on_backup)
+                      on_exists=job.get("on_exists"), expected_hash=job.get("expected_hash"), on_backup=on_backup,
+                      meta_edits=job.get("meta_edits"))
     r = save(req)
     out = r.to_json()
     if r.ok:

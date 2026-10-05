@@ -4,6 +4,32 @@ All notable changes to Photoband. The version lives in one place: `photoband/__i
 
 ## Unreleased
 
+### Edit the photo's details and faces
+- The Metadata tab is now a form: title, description, notes, date, photographer, place (location,
+  city, state, country) and keywords (as chips) can be edited. Captions follow the edits as you type.
+  Edits are saved into the photo with the next save (a copy or an overwrite), or into the original
+  on their own with **Save to original** (only the metadata is rewritten: the image data is checked
+  to be byte-for-byte the same, the file is backed up first when Backup is on and it has no backup
+  yet, and every old value is written to the save log). A saved copy keeps the edits waiting for the
+  original. Undo covers every edit.
+- The date editor knows partial dates: a day, a month, a year, or "about" a year. It writes them as
+  photokin does (a filled-in DateTimeOriginal at midnight, XMP DateCreated with the known part, and a
+  "DATE: Y!M!" keyword), and reads photokin's dates back the same way.
+- Values are kept in step across the standards a file already uses (XMP, IPTC, EXIF, Windows tags);
+  clearing a field removes it everywhere captions read it from. IPTC is never created, and text IPTC
+  can't hold is kept in XMP only.
+- Face tags can be edited on the photo, like in a photo organiser: **Faces** below the photo shows
+  them; click a face to select it, drag it or its handles to move or resize, click its label (or
+  press Enter) to name it with suggestions, Delete to remove it. **Add face** (N) draws a new one.
+  Lightroom's region frames on rotated photos are respected; when a file lists its people as
+  keywords (Lightroom does), renames follow there too. The Faces setting is remembered.
+- People in the Metadata tab are listed in rows as `{names:rows}` prints them, with a per-photo
+  row count (Auto, 1-4), saved with the caption.
+
+### Rows of people
+- `{names:rows}` no longer splits one row of standing people of different heights into several rows:
+  rows break at gaps that are large for that photo (a crouching person in front still gets their own row).
+
 ### Captions from photokin
 - New `{notes}` field: the photo's notes from EXIF UserComment (where photokin writes its
   analysis) or the IPTC/XMP Instructions field. Shown in the Details panel and the Insert menu.
@@ -13,6 +39,7 @@ All notable changes to Photoband. The version lives in one place: `photoband/__i
   out ("Y!M~" prints only the year) and a guessed year prints as "c. 1925" (`circa=` changes the
   prefix, `certainty=ignore` prints the stored date). It applies only to the DateTimeOriginal
   photokin wrote: a date with a clock time (a camera's own) is never cut down.
+- `{notes}` prints at most 200 characters (cut at a word) unless `max=` says otherwise; `max=0`: no limit.
 
 ## 1.0.1 - 2026-10-03
 

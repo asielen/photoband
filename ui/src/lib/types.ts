@@ -1,5 +1,7 @@
 // Shared data shapes between the UI and the Python backend.
 
+import type { MetaEdits } from './metaedits'
+
 export type Align = 'left' | 'center' | 'right' | 'justify'
 export type CaseMode = 'none' | 'upper' | 'lower' | 'smallcaps'
 export type ScaleMode = 'relative' | 'physical'
@@ -96,6 +98,9 @@ export interface Face {
   name: string
   box: [number, number, number, number] | null
   source: string
+  /** the regions the face was read from ("mwg:0", "mp:1", "pii:0"), and their key */
+  ids?: string[]
+  key?: string
 }
 
 export interface ImageInfo {
@@ -167,7 +172,7 @@ export interface ExistingAnalysis {
   sourceRect?: Rect
   /** a captioned copy Photoband saved (not an original captioned in place) */
   isCopy?: boolean
-  state?: { template: Template | null; templateId: string | null; overrides: Overrides | null; blocks: BlockState[] | null }
+  state?: { template: Template | null; templateId: string | null; overrides: Overrides | null; blocks: BlockState[] | null; faceRows?: number | null }
   originalText?: any
   band?: BandInfo
   blocks?: { box: Rect; lines: TextLineInfo[]; role?: 'caption' | 'other' }[]
@@ -211,6 +216,10 @@ export interface PhotoDraft {
   brushRemove?: string | null
   /** case A: the user chose "Add a new band" (keep the old Photoband band as part of the photo) */
   keepBand?: boolean
+  /** photo details edited here (written with the next save, or with "Save to original") */
+  meta?: MetaEdits
+  /** this photo's row count for {names:rows}; none or null: automatic */
+  faceRows?: number | null
 }
 
 export interface Run {

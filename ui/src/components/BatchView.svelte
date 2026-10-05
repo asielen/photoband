@@ -281,6 +281,8 @@
       else {
         action = 'rebuild'
         s.draft.sourceRect = ex.sourceRect!
+        // the row grouping chosen when the caption was made
+        if (ex.state?.faceRows) s.draft.faceRows = ex.state.faceRows
       }
       if (bs.which === 'uncaptioned') action = 'skip'
     } else if (ex?.case === 'B') {
@@ -309,7 +311,7 @@
     if (draft && action !== 'skip') {
       // the editor's rule: a draft made for another version of the file gives back only its text
       // and style; the mode and photo edges stay as planned here for this version
-      const d = draftForFile(draft, meta.stat, s.draft, (id) => !!app.template(id))
+      const d = draftForFile(draft, meta.stat, s.draft, (id) => !!app.template(id), meta)
       s.draft = d.draft
       p.usesDraft = true
       p.draftHash = d.hash

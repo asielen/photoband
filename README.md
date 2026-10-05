@@ -10,6 +10,7 @@
 - **What you see is what you get.** The preview is pixel-for-pixel what gets saved.
 - **Your originals are safe.** *Save copy* never touches the original. *Overwrite* keeps a backup first.
 - **Built for archives.** 8 and 16-bit TIFF, JPEG and PNG. Photo pixels are never resampled, and all metadata (including face tags) is carried over.
+- **Fix the details as you go.** Edit the title, date (a day, a month, a year or "about" a year), place, keywords and notes in the *Metadata* tab, and tag, rename, move or remove faces right on the photo. Save them with the caption, or into the original on their own.
 - **One photo or a thousand.** Caption a folder in one go with Batch.
 
 ## Install
