@@ -29,7 +29,7 @@ import re
 import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
-from .dates import PartialDate, certainty_from_keywords, check_format, format_date, render_date
+from .dates import PartialDate, check_format, format_date, render_date
 from .faces import Face, cluster_rows, order_names
 from .parser import (Group, Issue, Literal, Style, Token, escape_value, markup_to_plain,
                      parse, split_list, unescape_value)
@@ -55,8 +55,9 @@ TOKENS: List[TokenInfo] = [
     TokenInfo("creator", "Photographer or creator", "{creator}", ["case", "max"]),
     TokenInfo("date", "When the photo was taken (XMP DateCreated, EXIF DateTimeOriginal, IPTC DateCreated; never "
               "the scan date); partial dates drop missing parts, approximate ones (\"circa 1950\") print as written. "
-              "A \"DATE: Y!M~\" keyword (photokin) leaves out guessed parts and puts circa= (\"c. \") before a "
-              "guessed year; certainty=ignore prints the date as stored",
+              "A \"DATE: Y!M~\" keyword (photokin) says which parts are known: unknown parts are left out, and "
+              "when the printed date shows a guessed part it gets circa= (\"c. \") before it (\"c. July 1944\"; "
+              "yyyy alone prints a known year without it); certainty=ignore prints the date as stored",
               "{date:mmmm d, yyyy}", ["case", "circa", "certainty"],
               ["auto", "yyyy", "yy", "mmmm", "mmm", "mm", "m", "dd", "d", "iso"]),
     TokenInfo("digitized", "When the photo was scanned or the file was made (EXIF/XMP CreateDate, DateTimeDigitized)",
@@ -277,7 +278,9 @@ def is_marker_keyword(kw: str) -> bool:
     date-certainty "DATE: Y!M~", its provenance "<Provider> <Model> Analyzed", and the part
     markers "back" and "negative" (which side or form of the object a scan shows)."""
     k = kw.strip().lower()
-    return certainty_from_keywords([kw]) is not None or k.endswith(" analyzed") or k in ("back", "negative")
+    # photokin takes any keyword starting "DATE:" for its date marker (a reviewed date), well-formed
+    # or not, so none of them is a description of the photo
+    return k.startswith("date:") or k.endswith(" analyzed") or k in ("back", "negative")
 
 
 def _keyword_excluded(kw: str, paths: List[str], prefixes: List[str]) -> bool:

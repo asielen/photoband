@@ -8,7 +8,7 @@ import { ensureFonts, loadRegistry, resolveFont } from './fonts'
 import { clearMeasureCache, computeLayout, deepAssign, effectiveTemplate } from './layout'
 import { plainText } from './markup'
 import {
-  addKeywords, cleanText, dateState, editsSince, effectiveFaces, hasEdits, isDateMarker, newFaceKey, peopleKeywords, rematchFaces,
+  addKeywords, cleanText, dateState, editsSince, normDate, sameDate, effectiveFaces, hasEdits, isDateMarker, newFaceKey, peopleKeywords, rematchFaces,
   rememberName, type Box, type DateEdit, type FaceEdit, type MetaEdits, type TextField,
 } from './metaedits'
 import { loadFlag, saveFlag } from './prefs'
@@ -1220,10 +1220,11 @@ class AppStore {
     return s.draft.meta?.keywords ?? this.fileKeywords(s)
   }
 
-  /** undefined: back to the file's date; null: no date. */
+  /** undefined: back to the file's date; null: no date. The file's own date again is no edit. */
   setDate(s: PhotoSession, d: DateEdit | null | undefined) {
-    if (d === undefined) this.setMeta(s, {}, ['date'], true)
-    else this.setMeta(s, { date: d }, [], true)
+    const file = this.detailOf(s.meta, 'date') as DateEdit | null | undefined
+    if (d === undefined || (file !== undefined && (d === null ? file === null : sameDate(d, file)))) this.setMeta(s, {}, ['date'], true)
+    else this.setMeta(s, { date: d ? normDate(d) : null }, [], true)
   }
 
   discardDetails(s: PhotoSession) {
@@ -1370,7 +1371,7 @@ class AppStore {
       const d = dateState(f)
       // a date in words ("Summer 1952") is no edit the date editor can make: undefined, not
       // "no date" (the caller says it could not be put back)
-      return d.kind === 'date' ? { iso: d.iso, level: d.level } : d.kind === 'none' ? null : undefined
+      return d.kind === 'date' ? normDate(d) : d.kind === 'none' ? null : undefined
     }
     return String(f[k] ?? '')
   }
@@ -1380,7 +1381,9 @@ class AppStore {
     if (!m) return undefined
     const out: MetaEdits = { ...m }
     for (const k of Object.keys(out) as (keyof MetaEdits)[]) {
-      if (k !== 'faces' && JSON.stringify(out[k]) === JSON.stringify(this.detailOf(s.meta, k))) delete out[k]
+      const file = this.detailOf(s.meta, k)
+      if (k === 'date' ? (out.date === null ? file === null : !!out.date && sameDate(out.date, file as DateEdit)) :
+        k !== 'faces' && JSON.stringify(out[k]) === JSON.stringify(file)) delete out[k]
     }
     return Object.keys(out).length ? out : undefined
   }

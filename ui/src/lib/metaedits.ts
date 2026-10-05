@@ -6,7 +6,8 @@ import type { Face, PhotoMeta } from './types'
 import { loadPref, savePref } from './prefs'
 
 export type Box = [number, number, number, number]
-export type DateLevel = 'day' | 'month' | 'year' | 'circa'
+/** How much of a date is known: the day, the month or the year. */
+export type DateLevel = 'day' | 'month' | 'year'
 
 export interface FaceEdit {
   name?: string
@@ -18,7 +19,40 @@ export interface FaceEdit {
 
 export interface DateEdit {
   iso: string // '1952' | '1952-06' | '1952-06-14'
-  level: DateLevel
+  /** ('circa' in older drafts: an estimated year) */
+  level: DateLevel | 'circa'
+  /** the finest part known is a best guess (summer 1944 -> July, around Thanksgiving -> the 23rd): printed "c." */
+  estimate?: boolean
+  /** the file's own photokin pattern, kept while only the values are edited (a known birthday with a
+   *  guessed year stays "Y~M!D!"); none: the level's own (Y!M!D~, Y!M~, Y~ or the exact ones) */
+  pattern?: string
+}
+
+export type NormDate = { iso: string; level: DateLevel; estimate: boolean; pattern?: string }
+
+/** A date edit in today's shape (an older draft's 'circa' is an estimated year; a pattern that is
+ *  just the level's own is left out, so equal dates compare equal). */
+export function normDate(d: DateEdit): NormDate {
+  const n: NormDate = d.level === 'circa' ? { iso: d.iso, level: 'year', estimate: true } : { iso: d.iso, level: d.level, estimate: !!d.estimate }
+  const p = d.pattern?.toUpperCase()
+  if (p && d.level !== 'circa' && p !== datePattern(n.level, n.estimate)) n.pattern = p
+  return n
+}
+
+/** Same date, level, guess and pattern? */
+export function sameDate(a: DateEdit | null | undefined, b: DateEdit | null | undefined): boolean {
+  if (!a || !b) return !a && !b
+  return JSON.stringify(normDate(a)) === JSON.stringify(normDate(b))
+}
+
+/** Which part of a pattern is the guess, in words, when it is not the finest one shown ("the
+ *  year" for a known birthday with a guessed year); '' otherwise. */
+export function guessedPart(pattern: string | undefined, level: DateLevel): string {
+  const m = /^Y([!?~@])(?:M([!?~@]))?(?:D([!?~@]))?$/.exec((pattern || '').toUpperCase())
+  if (!m) return ''
+  const g = (c?: string) => c === '~' || c === '@'
+  const parts = [g(m[1]) ? 'year' : '', g(m[2]) ? 'month' : '', g(m[3]) ? 'day' : ''].filter(Boolean)
+  return parts.length && !(parts.length === 1 && parts[0] === level) ? `the ${parts.join(' and ')}` : ''
 }
 
 export interface MetaEdits {
@@ -39,7 +73,10 @@ export interface MetaEdits {
 export const TEXT_FIELDS = ['title', 'caption', 'notes', 'creator', 'sublocation', 'city', 'state', 'country'] as const
 export type TextField = (typeof TEXT_FIELDS)[number]
 
-export const LEVEL_PATTERN: Record<DateLevel, string> = { day: 'Y!M!D!', month: 'Y!M!', year: 'Y!', circa: 'Y~' }
+/** photokin's "DATE:" pattern for a level of detail (the backend writes it). */
+export function datePattern(level: DateLevel, estimate: boolean): string {
+  return { day: estimate ? 'Y!M!D~' : 'Y!M!D!', month: estimate ? 'Y!M~' : 'Y!M!', year: estimate ? 'Y~' : 'Y!' }[level]
+}
 
 /** Number of edited details (each edited face counts once). */
 export function editCount(m: MetaEdits | null | undefined): number {
@@ -91,8 +128,12 @@ export function newFaceKey(): string {
 
 // ---------------------------------------------------------------------------- dates
 
-export type DateState = { kind: 'none' } | { kind: 'date'; iso: string; level: DateLevel } | { kind: 'text'; text: string; year: number | null }
+export type DateState =
+  | { kind: 'none' }
+  | { kind: 'date'; iso: string; level: DateLevel; estimate: boolean; pattern?: string }
+  | { kind: 'text'; text: string; year: number | null; month?: number; day?: number }
 
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
 const DATE_RE = /^\s*(\d{4})(?:[-:/.](\d{1,2})(?:[-:/.](\d{1,2}))?)?(?=$|[\sT])(.*)$/
 
 function pad(n: number) {
@@ -118,23 +159,35 @@ export function dateState(fields: Record<string, any> | null | undefined): DateS
   if (mo > 12 || d > 31) return { kind: 'text', text: raw, year: y }
   const pattern = String(fields?.date_certainty ?? '').toUpperCase()
   let level: DateLevel = d ? 'day' : mo ? 'month' : 'year'
-  const pm = /^Y(.)(?:M(.))?(?:D(.))?$/.exec(pattern)
+  let estimate = false
+  const pm = /^Y([!?~@])(?:M([!?~@]))?(?:D([!?~@]))?$/.exec(pattern)
   if (pm) {
+    // as the backend reads photokin's patterns: each part rated known ("!") or a guess ("~", "@")
+    // is kept while the coarser ones are; an unknown ("?") or unrated part is left out
+    const known = (c: string | undefined) => c === '!' || c === '~' || c === '@'
     const [, py, pmo, pd] = pm
-    if (py === '?') return { kind: 'none' }
-    if (py !== '!') level = 'circa'
-    else if (pmo === '!' && pd === '!' && d) level = 'day'
-    else if (pmo === '!' && mo) level = 'month'
-    else level = 'year'
+    const monthKept = known(pmo) && !!mo
+    const dayKept = monthKept && known(pd) && !!d
+    if (py === '?') {
+      // the year is unknown (a birthday): the editor can't hold that, so it is shown as words
+      if (!monthKept) return { kind: 'none' }
+      return { kind: 'text', text: `${MONTH_NAMES[mo - 1]}${dayKept ? ` ${d}` : ''} (year unknown)`, year: null,
+        month: mo, ...(dayKept ? { day: d } : {}) }
+    }
+    level = dayKept ? 'day' : monthKept ? 'month' : 'year'
+    estimate = py !== '!' || (monthKept && pmo !== '!') || (dayKept && pd !== '!')
+    const iso0 = level === 'day' ? `${y}-${pad(mo)}-${pad(d)}` : level === 'month' ? `${y}-${pad(mo)}` : `${y}`
+    // the file's own pattern goes along (kept while only the values are edited)
+    return { kind: 'date', ...normDate({ iso: iso0, level, estimate, pattern }) }
   }
   const iso = level === 'day' ? `${y}-${pad(mo)}-${pad(d)}` : level === 'month' ? `${y}-${pad(mo || 6)}` : `${y}`
-  return { kind: 'date', iso, level }
+  return { kind: 'date', iso, level, estimate }
 }
 
 /** An ISO date for a level from year / month / day inputs, or null when they don't make one. */
 export function isoFor(level: DateLevel, y: number | null, mo: number | null, d: number | null): string | null {
   if (!y || !Number.isInteger(y) || y < 1000 || y > new Date().getFullYear() + 1) return null
-  if (level === 'year' || level === 'circa') return String(y)
+  if (level === 'year') return String(y)
   if (!mo || !Number.isInteger(mo) || mo < 1 || mo > 12) return null
   if (level === 'month') return `${y}-${pad(mo)}`
   if (!d || !Number.isInteger(d) || d < 1) return null
@@ -148,7 +201,9 @@ export function isoFor(level: DateLevel, y: number | null, mo: number | null, d:
 /** photokin's processing markers: shown apart from the photo's own keywords. */
 export function isMarkerKeyword(kw: string): boolean {
   const k = kw.trim().toLowerCase()
-  return isDateMarker(kw) || k.endsWith(' analyzed') || k === 'back' || k === 'negative'
+  // (photokin takes any keyword starting "DATE:" for its date marker; only well-formed ones are
+  // the date editor's, see isDateMarker)
+  return k.startsWith('date:') || k.endsWith(' analyzed') || k === 'back' || k === 'negative'
 }
 
 /** photokin's date-certainty keyword ("DATE: Y!M~"), and only that: "Date: ask Ann" is a keyword. */

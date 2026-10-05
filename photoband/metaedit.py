@@ -5,7 +5,7 @@ An edit set (``edits``) is the draft's ``meta``::
 
     {"title": "Picnic", "caption": "", ...}       a text field present = edited ("" = clear)
     {"keywords": ["family", "picnic"]}           the whole visible list (no "DATE:" markers)
-    {"date": {"iso": "1952-06", "level": "month"}}   or None to clear the date
+    {"date": {"iso": "1952-06", "level": "month", "estimate": False}}   or None to clear the date
     {"faces": {"<face key>": {"name": .., "box": [x, y, w, h] | None, "deleted": True,
                               "was": {"name": .., "box": ..}},
                "new:<id>": {"name": .., "box": [..]}}}
@@ -39,7 +39,31 @@ class EditError(ValueError):
 
 TEXT_FIELDS = ("title", "caption", "notes", "creator", "sublocation", "city", "state", "country")
 MULTILINE = ("caption", "notes")
+# how much of a date is known, and whether its finest part is a best guess (photokin's patterns):
+# a day (around Thanksgiving: Y!M!D~), a month (the summer: Y!M~) or a year (the 1920s: Y~)
 LEVELS = {"day": "Y!M!D!", "month": "Y!M!", "year": "Y!", "circa": "Y~"}
+ESTIMATED = {"day": "Y!M!D~", "month": "Y!M~", "year": "Y~"}
+
+
+def date_pattern(d: Dict[str, Any]) -> str:
+    """The "DATE:" keyword pattern for a date edit: the file's own pattern when the edit keeps it
+    (only the values changed: a guessed year with a known birthday stays "Y~M!D!"), else the one
+    for the level and the Estimated switch."""
+    if d.get("pattern"):
+        return d["pattern"]
+    return ESTIMATED[d["level"]] if d.get("estimate") else LEVELS[d["level"]]
+
+
+def _pattern_fits(pattern: str, level: str, estimate: bool) -> bool:
+    """Does a photokin pattern describe a date of this level, guessed or not? (its finest kept
+    part is the level; it has a guess exactly when the edit says so; the year is known or guessed)"""
+    from captiontokens.dates import certainty_parts
+    probe = PartialDate(1944, 6, 14)
+    d, guessed = certainty_parts(probe, pattern)
+    if d is None or "-y" in guessed:
+        return False
+    finest = "day" if d.day else "month" if d.month else "year"
+    return finest == level and bool(guessed) == estimate
 # photokin's date-certainty keyword, and only that: a keyword like "Date: ask Ann" is the user's own
 DATE_MARKER = re.compile(r"\s*DATE:\s*Y[!?~@](?:M[!?~@])?(?:D[!?~@])?\s*$", re.IGNORECASE)
 
@@ -172,10 +196,22 @@ def _check_date(v: Any) -> Optional[Dict[str, str]]:
     if not isinstance(v, dict) or v.get("level") not in LEVELS or not isinstance(v.get("iso"), str):
         raise EditError("date must be {iso, level}")
     iso, level = v["iso"].strip(), v["level"]
+    if v.get("estimate") is not None and not isinstance(v.get("estimate"), bool):
+        raise EditError("estimate must be true or false")
+    estimate = bool(v.get("estimate"))
+    if level == "circa":          # (an older edit: an estimated year)
+        level, estimate = "year", True
+    pattern = v.get("pattern")
+    if pattern is not None:
+        if not isinstance(pattern, str) or not re.fullmatch(r"Y[!?~@](?:M[!?~@])?(?:D[!?~@])?", pattern.strip().upper()):
+            raise EditError("a date pattern is written like Y!M~ (photokin's)")
+        pattern = pattern.strip().upper()
+        if not _pattern_fits(pattern, level, estimate):
+            pattern = None          # it no longer describes this date: the level's own is written
     m = re.fullmatch(r"(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?", iso)
     if not m:
         raise EditError("date must be written as YYYY, YYYY-MM or YYYY-MM-DD")
-    want = {"day": 3, "month": 2, "year": 1, "circa": 1}[level]
+    want = {"day": 3, "month": 2, "year": 1}[level]
     if sum(1 for g in m.groups() if g) != want:
         raise EditError(f"a {level} date is written as " + ("YYYY-MM-DD", "YYYY-MM", "YYYY")[3 - want])
     y = int(m.group(1))
@@ -185,7 +221,10 @@ def _check_date(v: Any) -> Optional[Dict[str, str]]:
         PartialDate(y, int(m.group(2) or 0), int(m.group(3) or 0))
     except ValueError:
         raise EditError(f"{iso} is not a date")
-    return {"iso": iso, "level": level}
+    out = {"iso": iso, "level": level, "estimate": estimate}
+    if pattern and pattern != (ESTIMATED[level] if estimate else LEVELS[level]):
+        out["pattern"] = pattern
+    return out
 
 
 def _check_faces(v: Any) -> Dict[str, Dict[str, Any]]:
@@ -264,11 +303,13 @@ def keywords_after(fields: Dict[str, Any], edits: Dict[str, Any]) -> List[str]:
     """The keyword list a file has once ``edits`` are written: the edited list (or the file's
     own, without date markers) plus the date marker the date edit calls for, or the file's own
     markers when the date is not edited."""
+    # (only well-formed markers are replaced: a keyword like "Date: ask Ann" may be the user's own
+    # note, so it is kept even though photokin would take it for a marker too)
     cur = [k for k in (fields.get("keywords") or []) if isinstance(k, str)]
     kws = list(edits["keywords"]) if "keywords" in edits else [k for k in cur if not is_date_marker(k)]
     if "date" in edits:
         if edits["date"] is not None:
-            kws.append(f"DATE: {LEVELS[edits['date']['level']]}")
+            kws.append(f"DATE: {date_pattern(edits['date'])}")
     else:
         kws += [k for k in cur if is_date_marker(k)]
     return kws
@@ -292,7 +333,7 @@ def apply_to_fields(fields: Dict[str, Any], edits: Optional[Dict[str, Any]]) -> 
     if "date" in edits:
         d = edits["date"]
         f["date"] = d["iso"] if d else None
-        f["date_certainty"] = LEVELS[d["level"]] if d else None
+        f["date_certainty"] = date_pattern(d) if d else None
     if edits.get("faces"):
         named, unnamed = _faces_after(fields, edits["faces"])
         f["faces"], f["faces_unnamed"], f["faces_unnamed_count"] = named, unnamed, len(unnamed)
@@ -463,7 +504,8 @@ def face_renames(fields: Dict[str, Any], faces_edit: Dict[str, Dict[str, Any]]) 
     return out
 
 
-def _keyword_updates(w: _Writer, kws: List[str], fields: Dict[str, Any], renames: Optional[Dict[str, str]] = None) -> None:
+def _keyword_updates(w: _Writer, kws: List[str], fields: Dict[str, Any], renames: Optional[Dict[str, str]] = None,
+                     date_edited: bool = False) -> None:
     t = w.t
     w.set("XMP-dc:Subject", kws)
     if "IPTC:Keywords" in t:
@@ -488,6 +530,8 @@ def _keyword_updates(w: _Writer, kws: List[str], fields: Dict[str, Any], renames
         for h in items:
             path = str(h).split("|")
             leaf = path[-1].strip().lower()
+            if date_edited and is_date_marker(path[-1]):
+                continue   # the old date marker, however it is spaced (the new one is a flat keyword)
             if renames and leaf in renames and renames[leaf].lower() in keep and (leaf in gone or leaf == renames[leaf].lower()):
                 # a renamed person (or the same name, newly capitalised): same place, new name
                 new.append("|".join(path[:-1] + [renames[leaf]]))
@@ -513,8 +557,9 @@ def _date_updates(w: _Writer, d: Optional[Dict[str, str]]) -> None:
     partial = iso.replace("-", ":")
     keep_time = False
     cur = None
-    if level == "day":
-        # the same day as the file says (a camera's own date): its time of day stays
+    if level == "day" and not d.get("estimate"):
+        # the same day as the file says (a camera's own date): its time of day stays (an estimated
+        # day has no time of day: it is written at midnight, as photokin writes its guesses)
         cur = next((t[k] for k in DATE_TAGS_ORIGINAL if _same_day(t.get(k), (y, m, dd))), None)
         keep_time = cur is not None
     if keep_time:
@@ -564,7 +609,8 @@ def tag_updates(md: Dict[str, Any], info: ImageInfo, fields: Dict[str, Any], edi
         if k in edits:
             _text_updates(w, k, edits[k], fields.get(k))
     if "keywords" in edits or "date" in edits:
-        _keyword_updates(w, keywords_after(fields, edits), fields, face_renames(fields, edits.get("faces") or {}))
+        _keyword_updates(w, keywords_after(fields, edits), fields, face_renames(fields, edits.get("faces") or {}),
+                         "date" in edits)
     if "date" in edits:
         _date_updates(w, edits["date"])
     if "Photoshop:IPTCDigest" in t and any(k.startswith("IPTC:") for k in touched_tags(w.upd, w.dels)):

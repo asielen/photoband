@@ -52,7 +52,7 @@ def test_blank_notes_leave_the_line_out():
 
 # -- marker keywords ----------------------------------------------------------------
 
-@pytest.mark.parametrize("kw", ["DATE: Y~", "date: Y!M!D!", "DATE:Y!", "Claude claude-opus-5-5 Analyzed",
+@pytest.mark.parametrize("kw", ["DATE: Y~", "date: Y!M!D!", "DATE:Y!", "DATE: ", "Claude claude-opus-5-5 Analyzed",
                                 "Gemini Analyzed", "back", "Negative"])
 def test_photokin_markers_are_markers(kw):
     assert is_marker_keyword(kw)
@@ -76,12 +76,14 @@ def test_keywords_leave_markers_out_unless_asked():
 @pytest.mark.parametrize("pattern, expect", [
     ("Y!M!D!", (PartialDate(1942, 11, 25), False)),
     ("Y!M!", (PartialDate(1942, 11), False)),        # day not rated: photokin's filler
-    ("Y!M~", (PartialDate(1942), False)),            # guessed month left out
-    ("Y!M!D~", (PartialDate(1942, 11), False)),
+    ("Y!M~", (PartialDate(1942, 11), True)),         # a best-guess month is kept, as a guess
+    ("Y!M!D~", (PartialDate(1942, 11, 25), True)),   # a best-guess day too (around Thanksgiving)
+    ("Y!M?", (PartialDate(1942), False)),            # an unknown month is left out
     ("Y!", (PartialDate(1942), False)),
     ("Y~", (PartialDate(1942), True)),               # guessed year: "c. 1942"
-    ("Y@M!", (PartialDate(1942), True)),             # "@" is an older "~"
-    ("Y?M!D!", (None, False)),                       # unknown year: no date
+    ("Y@M!", (PartialDate(1942, 11), True)),         # "@" is an older "~"; the known month stays
+    ("Y?M!D!", (PartialDate(1942, 11, 25), True)),   # unknown year: the month and day (printed without it)
+    ("Y?", (None, False)),                           # nothing known: no date
     ("y!m!", (PartialDate(1942, 11), False)),
     ("banana", (PartialDate(1942, 11, 25), False)),  # not a pattern: the date as stored
     (None, (PartialDate(1942, 11, 25), False)),
@@ -112,10 +114,18 @@ def test_decade_guess_prints_as_circa_year():
     assert text("{date|certainty=ignore}", md) == "June 15, 1925"
 
 
-def test_sure_year_guessed_month_prints_the_year():
+def test_a_guessed_month_prints_with_circa_and_a_year_only_format_without():
     md = _photokin("1960:05:15 00:00:00", "Y!M~")
-    assert text("{date:mmmm d, yyyy}", md) == "1960"
-    assert text("Taken {date:d mmmm yyyy}", md) == "Taken 1960"
+    assert text("{date:mmmm d, yyyy}", md) == "c. May 1960"
+    assert text("Taken {date:d mmmm yyyy}", md) == "Taken c. May 1960"
+    assert text("{date:yyyy}", md) == "1960"        # the year is certain: no "c."
+
+
+def test_a_guessed_day():
+    md = _photokin("1944:11:23 00:00:00", "Y!M!D~")
+    assert text("{date}", md) == "c. November 23, 1944"
+    assert text("{date:mmmm yyyy}", md) == "November 1944"
+    assert text("{date|circa=around }", md) == "around November 23, 1944"
 
 
 def test_sure_month_drops_only_the_filler_day():
@@ -123,8 +133,31 @@ def test_sure_month_drops_only_the_filler_day():
     assert text("{date:mmmm d, yyyy}", _photokin("1942:11:25", "Y!M!D!")) == "November 25, 1942"
 
 
-def test_unknown_year_prints_no_date():
-    assert text("[Taken {date}]", _photokin("1950:06:15", "Y?M!D!")) == ""
+def test_an_unknown_year_prints_the_month_and_day_without_it():
+    assert text("[Taken {date}]", _photokin("1950:06:15", "Y?M!D!")) == "Taken June 15"
+    assert text("[Taken {date:yyyy}]", _photokin("1950:06:15", "Y?M!D!")) == ""
+    assert text("[Taken {date}]", _photokin("1950:06:15", "Y?")) == ""
+
+
+# every pattern photokin's spec allows: Y[!?~@](M[!?~@])?(D[!?~@])?, read as the parts it rates
+@pytest.mark.parametrize("pattern, auto, year_only", [
+    ("Y!", "1944", "1944"), ("Y~", "c. 1944", "c. 1944"), ("Y@", "c. 1944", "c. 1944"), ("Y?", "", ""),
+    ("Y!M!", "June 1944", "1944"), ("Y!M~", "c. June 1944", "1944"), ("Y!M?", "1944", "1944"),
+    ("Y~M!", "c. June 1944", "c. 1944"), ("Y?M!", "June", ""),
+    ("Y!M!D!", "June 14, 1944", "1944"), ("Y!M!D~", "c. June 14, 1944", "1944"), ("Y!M!D?", "June 1944", "1944"),
+    ("Y!M~D!", "c. June 14, 1944", "1944"), ("Y!M?D!", "1944", "1944"), ("Y~M!D!", "c. June 14, 1944", "c. 1944"),
+    ("Y~M~D~", "c. June 14, 1944", "c. 1944"), ("Y?M!D!", "June 14", ""), ("Y?M~D~", "c. June 14", ""),
+    ("y!m!d!", "June 14, 1944", "1944"),
+])
+def test_every_pattern_in_photokins_spec(pattern, auto, year_only):
+    md = _photokin("1944:06:14 00:00:00", pattern)
+    assert text("{date}", md) == auto
+    assert text("{date:yyyy}", md) == year_only
+
+
+@pytest.mark.parametrize("kw", ["DATE: ", "DATE:Y!", "date: y~", "DATE: Y!M!D!x", "Date: ask Ann"])
+def test_whatever_photokin_takes_for_its_date_marker_stays_out_of_captions(kw):
+    assert text("{keywords}", {"XMP-dc:Subject": ["family", kw]}) == "family"
 
 
 def test_certainty_only_rates_date_time_original():

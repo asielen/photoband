@@ -618,4 +618,15 @@ describe('edited photo details', () => {
     expect(await app.saveDetails(s)).toBe(false)
     expect(server.details.length).toBe(0)
   })
+
+  it('turning Estimated on and off again leaves no edit; so does the file’s own date', async () => {
+    server.fields = { date: '1944:06:14 00:00:00', date_certainty: 'Y~M!D!' }
+    const { app, s } = await open()
+    app.setDate(s, { iso: '1944-06-14', level: 'day', estimate: true, pattern: 'Y~M!D!' })
+    expect(s.draft.meta).toBeUndefined()
+    app.setDate(s, { iso: '1944-06-15', level: 'day', estimate: true, pattern: 'Y~M!D!' })
+    expect(s.draft.meta!.date).toEqual({ iso: '1944-06-15', level: 'day', estimate: true, pattern: 'Y~M!D!' })
+    app.setDate(s, { iso: '1944-06-14', level: 'day', estimate: true, pattern: 'Y~M!D!' })
+    expect(s.draft.meta).toBeUndefined()
+  })
 })

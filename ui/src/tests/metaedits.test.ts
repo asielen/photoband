@@ -1,17 +1,38 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { addKeywords, cleanText, dateState, detailProblem, editCount, editsSince, effectiveFaces, isDateMarker, isMarkerKeyword, isoFor, peopleKeywords, rematchFaces, splitKeywords, suggestNames } from '../lib/metaedits'
+import { addKeywords, cleanText, datePattern, dateState, guessedPart, normDate, sameDate, detailProblem, editCount, editsSince, effectiveFaces, isDateMarker, isMarkerKeyword, isoFor, peopleKeywords, rematchFaces, splitKeywords, suggestNames } from '../lib/metaedits'
 
 describe('date editor state', () => {
   it('takes the level from photokin’s certainty keyword, else from how much is written', () => {
-    expect(dateState({ date: '1952:06:14 00:00:00' })).toEqual({ kind: 'date', iso: '1952-06-14', level: 'day' })
-    expect(dateState({ date: '1952:06' })).toEqual({ kind: 'date', iso: '1952-06', level: 'month' })
-    expect(dateState({ date: '1952:06:00 00:00:00' })).toEqual({ kind: 'date', iso: '1952-06', level: 'month' })
-    expect(dateState({ date: '1925:06:15 00:00:00', date_certainty: 'Y~' })).toEqual({ kind: 'date', iso: '1925', level: 'circa' })
-    expect(dateState({ date: '1960:05:15 00:00:00', date_certainty: 'Y!M~' })).toEqual({ kind: 'date', iso: '1960', level: 'year' })
-    expect(dateState({ date: '1960:05:15', date_certainty: 'Y!M!' })).toEqual({ kind: 'date', iso: '1960-05', level: 'month' })
-    expect(dateState({ date: '1950:06:15', date_certainty: 'Y?M!D!' })).toEqual({ kind: 'none' })
-    expect(dateState({ date: '2017-04-05T17:01:07+02:00' })).toEqual({ kind: 'date', iso: '2017-04-05', level: 'day' })
+    const D = (iso: string, level: string, estimate = false, pattern?: string) => ({ kind: 'date', iso, level, estimate, ...(pattern ? { pattern } : {}) })
+    expect(dateState({ date: '1952:06:14 00:00:00' })).toEqual(D('1952-06-14', 'day'))
+    expect(dateState({ date: '1952:06' })).toEqual(D('1952-06', 'month'))
+    expect(dateState({ date: '1952:06:00 00:00:00' })).toEqual(D('1952-06', 'month'))
+    expect(dateState({ date: '1925:06:15 00:00:00', date_certainty: 'Y~' })).toEqual(D('1925', 'year', true))
+    expect(dateState({ date: '1944:07:15 00:00:00', date_certainty: 'Y!M~' })).toEqual(D('1944-07', 'month', true))   // the summer
+    expect(dateState({ date: '1944:11:23 00:00:00', date_certainty: 'Y!M!D~' })).toEqual(D('1944-11-23', 'day', true))  // around Thanksgiving
+    expect(dateState({ date: '1960:05:15', date_certainty: 'Y!M!' })).toEqual(D('1960-05', 'month'))
+    expect(dateState({ date: '1960:05:15', date_certainty: 'Y!M?' })).toEqual(D('1960', 'year', false, 'Y!M?'))
+    expect(dateState({ date: '1950:06:15', date_certainty: 'Y?M!D!' })).toEqual({ kind: 'text', text: 'June 15 (year unknown)', year: null, month: 6, day: 15 })
+    expect(dateState({ date: '2017-04-05T17:01:07+02:00' })).toEqual(D('2017-04-05', 'day'))
+    // the rest of photokin's spec, read as the backend reads it
+    expect(dateState({ date: '1944:06:14', date_certainty: 'Y~M!D!' })).toEqual(D('1944-06-14', 'day', true, 'Y~M!D!'))   // the year is the guess: kept
+    expect(dateState({ date: '1944:06:14', date_certainty: 'Y!M?D!' })).toEqual(D('1944', 'year', false, 'Y!M?D!'))
+    expect(dateState({ date: '1944:06:14', date_certainty: 'Y@' })).toEqual(D('1944', 'year', true, 'Y@'))
+    expect(dateState({ date: '1944:06:14', date_certainty: 'Y?M!D!' })).toEqual({ kind: 'text', text: 'June 14 (year unknown)', year: null, month: 6, day: 14 })
+    expect(dateState({ date: '1944:06:14', date_certainty: 'Y?' })).toEqual({ kind: 'none' })
+  })
+  it('which part is the guess, when it is not the finest one', () => {
+    expect(guessedPart('Y~M!D!', 'day')).toBe('the year')
+    expect(guessedPart('Y!M!D~', 'day')).toBe('')
+    expect(guessedPart('Y!M~', 'month')).toBe('')
+    expect(sameDate({ iso: '1944', level: 'circa' }, { iso: '1944', level: 'year', estimate: true, pattern: 'Y~' })).toBe(true)
+    expect(sameDate({ iso: '1944-06-14', level: 'day', estimate: true }, { iso: '1944-06-14', level: 'day', estimate: true, pattern: 'Y~M!D!' })).toBe(false)
+  })
+  it('an older draft’s circa is an estimated year; each level has its pattern', () => {
+    expect(normDate({ iso: '1925', level: 'circa' })).toEqual({ iso: '1925', level: 'year', estimate: true })
+    expect(['day', 'month', 'year'].map((l) => datePattern(l as any, true))).toEqual(['Y!M!D~', 'Y!M~', 'Y~'])
+    expect(['day', 'month', 'year'].map((l) => datePattern(l as any, false))).toEqual(['Y!M!D!', 'Y!M!', 'Y!'])
   })
   it('a date in words is shown as written, with its year when there is one', () => {
     expect(dateState({ date: '1950s' })).toEqual({ kind: 'text', text: '1950s', year: 1950 })
@@ -24,7 +45,7 @@ describe('date editor state', () => {
     expect(isoFor('day', 1952, 2, 30)).toBeNull()
     expect(isoFor('day', 1952, 6, null)).toBeNull()
     expect(isoFor('month', 1952, 6, null)).toBe('1952-06')
-    expect(isoFor('circa', 1925, null, null)).toBe('1925')
+    expect(isoFor('year', 1925, null, null)).toBe('1925')
     expect(isoFor('year', 999, null, null)).toBeNull()
     expect(isoFor('year', new Date().getFullYear() + 2, null, null)).toBeNull()
   })
@@ -82,7 +103,7 @@ describe('review regressions', () => {
   it('only well-formed markers are photokin’s', () => {
     expect(isDateMarker('DATE: Y!M~')).toBe(true)
     expect(isDateMarker('Date: ask Ann')).toBe(false)
-    expect(isMarkerKeyword('Date: ask Ann')).toBe(false)
+    expect(isMarkerKeyword('Date: ask Ann')).toBe(true)     // photokin takes it for its marker (kept, never printed)
   })
   it('text is cleaned as the backend stores it', () => {
     expect(cleanText('a\u000bb\u2028c\u0000', true)).toBe('a\nb\nc')

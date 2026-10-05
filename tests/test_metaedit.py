@@ -708,3 +708,80 @@ def test_a_single_photographer_typed_with_a_comma_stays_one():
     assert metaedit.apply_to_fields({}, {"creator": ["Smith, Ann", "Bo"]})["creator"] == "Smith, Ann; Bo"
     with pytest.raises(metaedit.EditError):
         metaedit.validate({"creator": ["a\nb"]})
+
+
+# -- estimated months and days ------------------------------------------------------------
+
+@pytest.mark.parametrize("iso, level, shown, marker", [
+    ("1944-11-23", "day", "c. November 23, 1944", "Y!M!D~"),    # around Thanksgiving
+    ("1944-07", "month", "c. July 1944", "Y!M~"),               # the summer of 1944
+    ("1925", "year", "c. 1925", "Y~"),
+])
+def test_estimated_dates(tmp_path, iso, level, shown, marker):
+    p = _img(str(tmp_path / "a.jpg"))
+    _details(p, {"date": {"iso": iso, "level": level, "estimate": True}})
+    assert _caption(p) == shown
+    md = _md(p)
+    assert L(md["XMP-dc:Subject"]) == [f"DATE: {marker}"]
+    assert md["ExifIFD:DateTimeOriginal"].endswith("00:00:00")
+
+
+def test_an_estimated_day_never_keeps_a_cameras_time(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-ExifIFD:DateTimeOriginal=1944:11:23 17:01:07")
+    _details(p, {"date": {"iso": "1944-11-23", "level": "day", "estimate": True}})
+    assert _md(p)["ExifIFD:DateTimeOriginal"] == "1944:11:23 00:00:00"
+    assert _caption(p) == "c. November 23, 1944"
+
+
+def test_an_older_circa_edit_is_an_estimated_year():
+    assert metaedit.validate({"date": {"iso": "1925", "level": "circa"}})["date"] == \
+        {"iso": "1925", "level": "year", "estimate": True}
+
+
+# -- estimated dates: review regressions --------------------------------------------------
+
+def test_a_value_edit_keeps_which_part_is_the_guess(tmp_path):
+    # a known birthday with a guessed year: fixing the day must not make the year "known"
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-ExifIFD:DateTimeOriginal=1944:06:14 00:00:00", "-XMP-dc:Subject=DATE: Y~M!D!")
+    _details(p, {"date": {"iso": "1944-06-15", "level": "day", "estimate": True, "pattern": "Y~M!D!"}})
+    assert L(_md(p)["XMP-dc:Subject"]) == ["DATE: Y~M!D!"]
+    assert _caption(p) == "c. June 15, 1944" and _caption(p, "{date:yyyy}") == "c. 1944"
+
+
+def test_a_pattern_that_no_longer_fits_gives_way_to_the_levels_own():
+    e = metaedit.validate({"date": {"iso": "1944-06", "level": "month", "estimate": True, "pattern": "Y~M!D!"}})
+    assert e["date"] == {"iso": "1944-06", "level": "month", "estimate": True}
+    assert metaedit.date_pattern(e["date"]) == "Y!M~"
+    with pytest.raises(metaedit.EditError):
+        metaedit.validate({"date": {"iso": "1944", "level": "year", "estimate": "false"}})
+
+
+def test_an_old_marker_leaves_the_lightroom_hierarchy_however_it_is_spaced(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-XMP-dc:Subject=family", "-XMP-dc:Subject=DATE: Y~", "-XMP-lr:HierarchicalSubject=family",
+        "-XMP-lr:HierarchicalSubject=DATE:Y~")
+    _details(p, {"date": {"iso": "1944-07", "level": "month", "estimate": True}})
+    md = _md(p)
+    assert L(md["XMP-lr:HierarchicalSubject"]) == ["family"]
+    assert L(md["XMP-dc:Subject"]) == ["family", "DATE: Y!M~"]
+
+
+def test_a_format_left_with_nothing_prints_nothing():
+    from captiontokens.dates import render_date
+    assert render_date("1944:06:14", "'Taken in' yyyy", "Y?M!D!") == ""
+    assert render_date("1944:06:14", "iso", "Y?M!D!") == "--06-14"
+    assert render_date("1944:06:14", "'Taken' mmmm d", "Y?M!D!") == "Taken June 14"
+
+
+@pytest.mark.parametrize("bad", [0, 1, 0.0, 1.0, "true"])
+def test_estimate_must_be_a_json_boolean(bad):
+    with pytest.raises(metaedit.EditError):
+        metaedit.validate({"date": {"iso": "1944", "level": "year", "estimate": bad}})
+
+
+def test_the_date_tokens_help_matches_what_captions_print():
+    from captiontokens import TOKENS
+    info = next(t for t in TOKENS if t.name == "date").description
+    assert "c. July 1944" in info and "leaves out guessed parts" not in info

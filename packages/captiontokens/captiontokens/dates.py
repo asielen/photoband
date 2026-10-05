@@ -262,36 +262,74 @@ def certainty_from_keywords(keywords) -> Optional[str]:
     return None
 
 
-def apply_certainty(d: PartialDate, pattern: Optional[str]):
-    """``(date, approximate)``: ``d`` cut down to what ``pattern`` says is known. Parts rated
-    confident ("!") are kept; the first guessed or unknown part ends the date, so a guessed
-    month or day is left out rather than printed as fact, and a part the pattern does not
-    rate (photokin's mid-point filler) is left out too. A guessed year is kept and marks the
-    date approximate; an unknown year leaves no date (None). No usable pattern: ``(d, False)``."""
-    m = re.fullmatch(r"Y(.)(?:M(.))?(?:D(.))?", (pattern or "").strip().upper())
+_PATTERN_RE = re.compile(r"Y([!?~@])(?:M([!?~@]))?(?:D([!?~@]))?")
+
+
+def certainty_parts(d: PartialDate, pattern: Optional[str]):
+    """``(date, guessed)``: ``d`` cut down to what ``pattern`` (photokin's spec,
+    ``Y[!?~@](M[!?~@])?(D[!?~@])?``) rates, and which of its parts are guesses ("y", "m", "d";
+    "-y": the year is unknown). Each part rated confident ("!") or a best guess ("~"; "@" is an
+    older spelling) is kept while the coarser parts are there (a day needs its month); an unknown
+    ("?") or unrated part is left out (photokin's mid-point filler: a year-only "Y!" date written
+    as June 15). "Y!M~" (summer 1944, written as July): July 1944, month guessed. "Y~M!D!" (the
+    day known, the year a guess): June 14, 1944, year guessed. "Y?M!D!" (a birthday, year unknown):
+    June 14 without a year ("-y"). Nothing known: None. No usable pattern: ``(d, empty)``."""
+    m = _PATTERN_RE.fullmatch((pattern or "").strip().upper())
     if not m:
-        return d, False
+        return d, frozenset()
     y, mo, dd = m.groups()
+    known = ("!", "~", "@")
+    guessed = set()
     if y == "?":
-        return None, False
-    if y != "!":
-        return PartialDate(d.year), True
-    month = d.month if mo == "!" else None
-    day = d.day if month and dd == "!" else None
-    return PartialDate(d.year, month, day), False
+        guessed.add("-y")
+    elif y != "!":
+        guessed.add("y")
+    month = day = None
+    if d.month and mo in known:
+        month = d.month
+        if mo != "!":
+            guessed.add("m")
+        if d.day and dd in known:
+            day = d.day
+            if dd != "!":
+                guessed.add("d")
+    if y == "?" and month is None:
+        return None, frozenset()   # neither the year nor anything finer is known
+    return PartialDate(d.year, month, day), frozenset(guessed)
+
+
+def apply_certainty(d: PartialDate, pattern: Optional[str]):
+    """``(date, approximate)``: as ``certainty_parts``, with whether any part is a guess or the
+    year is unknown."""
+    d2, guessed = certainty_parts(d, pattern)
+    return d2, bool(guessed)
 
 
 def render_date(value, fmt: Optional[str] = None, certainty: Optional[str] = None, circa: str = "c. ") -> str:
     """A date value as a caption prints it. Exact dates use ``fmt``; an approximate one is
     printed as written ("circa 1950" stays "circa 1950"), except that a format of only
     year fields uses the year when that is certain ("Summer 1962" with ``yyyy`` -> 1962).
-    ``certainty`` (a "Y!M~" pattern, see ``apply_certainty``) trims an exact date to its known
-    parts; a guessed year is printed after ``circa`` ("c. 1925")."""
+    ``certainty`` (a "Y!M~" pattern, see ``certainty_parts``) trims an exact date to the parts
+    it rates; when the printed date shows a guessed part it is printed after ``circa``
+    ("c. 1925", "c. July 1944"); a format showing only certain parts has no "c." ("1944")."""
     d = parse_date(value)
     if d is not None:
-        d, approx = apply_certainty(d, certainty)
-        out = format_date(d, fmt)
-        return circa + out if approx and out else out
+        d, guessed = certainty_parts(d, certainty)
+        if d is None:
+            return ""
+        if "-y" in guessed:
+            # the year is unknown (a birthday): the month and day without one
+            out = format_date(d, fmt, no_year=True)
+            guessed = guessed - {"-y"}
+        else:
+            out = format_date(d, fmt)
+        if not out or not guessed:
+            return out
+        if not fmt or fmt in ("auto", "iso"):
+            shown = {"y"} | ({"m"} if d.month else set()) | ({"d"} if d.day else set())
+        else:
+            shown = {_FIELD_PART[v] for k, v in _tokenize(fmt) if k == "field"}
+        return circa + out if guessed & shown else out
     s = approximate_text(value)
     if not s:
         return ""
@@ -420,19 +458,21 @@ def auto_format(d: PartialDate) -> str:
     return "yyyy"
 
 
-def format_date(d: Optional[PartialDate], fmt: Optional[str] = None) -> str:
+def format_date(d: Optional[PartialDate], fmt: Optional[str] = None, no_year: bool = False) -> str:
+    """``d`` in ``fmt``; parts the date doesn't have are left out with their separators.
+    ``no_year``: the year is unknown (a month and day only), so it is left out too."""
     if d is None:
         return ""
     if not fmt or fmt == "auto":
-        fmt = auto_format(d)
+        fmt = auto_format(d) if not no_year else ("mmmm d" if d.day else "mmmm")
     if fmt == "iso":
-        return d.iso()
+        return d.iso() if not no_year else "--" + d.iso()[5:]   # ISO 8601's form without a year
     items = _tokenize(fmt)
     # Resolve fields; mark missing ones.
     resolved = []
     for kind, val in items:
         if kind == "field":
-            resolved.append(["field", val, _field_value(val, d)])
+            resolved.append(["field", val, None if no_year and _FIELD_PART[val] == "y" else _field_value(val, d)])
         else:
             resolved.append(["sep", val, val])
     # Drop each missing field together with the separator that follows it,
@@ -461,6 +501,8 @@ def format_date(d: Optional[PartialDate], fmt: Optional[str] = None) -> str:
                 a, b = resolved[idx - 1], resolved[idx + 1]
                 if a[0] == b[0] == "field" and {_FIELD_PART[a[1]], _FIELD_PART[b[1]]} == {"m", "y"}:
                     it[2] = it[2].replace(",", "") or " "
+    if not any(it[0] == "field" for it in resolved):
+        return ""   # none of the date's parts is printed: no label or separator alone either
     out = "".join(it[2] for it in resolved)
     if len(resolved) != len(items):
         out = _squeeze(_balance_brackets(out))
