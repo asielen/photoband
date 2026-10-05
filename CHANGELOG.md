@@ -2,7 +2,7 @@
 
 All notable changes to Photoband. The version lives in one place: `photoband/__init__.py`.
 
-## Unreleased
+## 1.2.0 - 2026-10-05
 
 ### Estimated dates
 - The date editor has **Day · Month · Year** and an **Estimated** switch: a best-guess day (around
