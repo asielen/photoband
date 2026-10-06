@@ -54,16 +54,25 @@ def date_pattern(d: Dict[str, Any]) -> str:
     return ESTIMATED[d["level"]] if d.get("estimate") else LEVELS[d["level"]]
 
 
-def _pattern_fits(pattern: str, level: str, estimate: bool) -> bool:
-    """Does a photokin pattern describe a date of this level, guessed or not? (its finest kept
-    part is the level; it has a guess exactly when the edit says so; the year is known or guessed)"""
+_RANK = {"year": 1, "month": 2, "day": 3}
+
+
+def _pattern_parts(pattern: str, level: str) -> Optional[frozenset]:
+    """What a photokin pattern keeps of a date of this level: its guessed parts ("y", "m", "d";
+    "-y": the year is unknown), or None when it keeps nothing or keeps a part the date doesn't
+    have. A part rated unknown ("?") is left out, so "Y!M!D?" fits a month ("November 1944", the
+    day stored but unknown) and "Y?M!D!" a day (a birthday, the year unknown)."""
     from captiontokens.dates import certainty_parts
     probe = PartialDate(1944, 6, 14)
     d, guessed = certainty_parts(probe, pattern)
-    if d is None or "-y" in guessed:
-        return False
+    if d is None:
+        return None
     finest = "day" if d.day else "month" if d.month else "year"
-    return finest == level and bool(guessed) == estimate
+    if _RANK[finest] > _RANK[level]:
+        return None
+    # a part finer than the date (its day for a month date) is not kept, so it is not a guess
+    kept = {"y", "-y"} | ({"m"} if _RANK[level] >= 2 else set()) | ({"d"} if level == "day" else set())
+    return frozenset(g for g in guessed if g in kept)
 # photokin's date-certainty keyword, and only that: a keyword like "Date: ask Ann" is the user's own
 DATE_MARKER = re.compile(r"\s*DATE:\s*Y[!?~@](?:M[!?~@])?(?:D[!?~@])?\s*$", re.IGNORECASE)
 
@@ -206,8 +215,11 @@ def _check_date(v: Any) -> Optional[Dict[str, str]]:
         if not isinstance(pattern, str) or not re.fullmatch(r"Y[!?~@](?:M[!?~@])?(?:D[!?~@])?", pattern.strip().upper()):
             raise EditError("a date pattern is written like Y!M~ (photokin's)")
         pattern = pattern.strip().upper()
-        if not _pattern_fits(pattern, level, estimate):
+        guessed = _pattern_parts(pattern, level)
+        if guessed is None:
             pattern = None          # it no longer describes this date: the level's own is written
+        else:
+            estimate = bool(guessed - {"-y"})   # the pattern says what is a guess
     m = re.fullmatch(r"(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?", iso)
     if not m:
         raise EditError("date must be written as YYYY, YYYY-MM or YYYY-MM-DD")
@@ -551,15 +563,17 @@ def _date_updates(w: _Writer, d: Optional[Dict[str, str]]) -> None:
             if k in t:
                 w.delete(k)
         return
-    iso, level = d["iso"], d["level"]
+    iso = d["iso"]
     y, m, dd = fill_date(iso)
     whole = f"{y:04d}:{m:02d}:{dd:02d} 00:00:00"
     partial = iso.replace("-", ":")
     keep_time = False
     cur = None
-    if level == "day" and not d.get("estimate"):
-        # the same day as the file says (a camera's own date): its time of day stays (an estimated
-        # day has no time of day: it is written at midnight, as photokin writes its guesses)
+    if date_pattern(d) == "Y!M!D!":
+        # the same day as the file says (a camera's own date): its time of day stays. Any other
+        # date is written at midnight, as photokin writes its guesses: a date with a time of day is
+        # a clock's, and its DATE: keyword would not be read as rating it (an estimated day, a day
+        # or year marked unknown)
         cur = next((t[k] for k in DATE_TAGS_ORIGINAL if _same_day(t.get(k), (y, m, dd))), None)
         keep_time = cur is not None
     if keep_time:

@@ -23,19 +23,53 @@ export interface DateEdit {
   level: DateLevel | 'circa'
   /** the finest part known is a best guess (summer 1944 -> July, around Thanksgiving -> the 23rd): printed "c." */
   estimate?: boolean
-  /** the file's own photokin pattern, kept while only the values are edited (a known birthday with a
-   *  guessed year stays "Y~M!D!"); none: the level's own (Y!M!D~, Y!M~, Y~ or the exact ones) */
+  /** photokin's pattern when it is not the level's own: the file's, kept while only the values are
+   *  edited (a known birthday with a guessed year stays "Y~M!D!"), one for a date whose year is
+   *  unknown ("Y?M!D!": the year in iso is a placeholder), or one typed under Advanced. It says
+   *  what is a guess (estimate follows it). none: the level's own (Y!M!D~, Y!M~, Y~ or exact ones) */
   pattern?: string
 }
 
 export type NormDate = { iso: string; level: DateLevel; estimate: boolean; pattern?: string }
 
-/** A date edit in today's shape (an older draft's 'circa' is an estimated year; a pattern that is
- *  just the level's own is left out, so equal dates compare equal). */
+const PATTERN_RE = /^Y([!?~@])(?:M([!?~@]))?(?:D([!?~@]))?$/
+const RANK: Record<DateLevel, number> = { year: 1, month: 2, day: 3 }
+
+/** What a photokin pattern keeps of a date of this level: its guessed parts ('y', 'm', 'd'; '-y':
+ *  the year is unknown), or null when it keeps nothing or a part the date doesn't have. As the
+ *  backend's metaedit._pattern_parts (and captiontokens' certainty_parts): a part rated known ("!")
+ *  or a guess ("~", "@") is kept while the coarser ones are; "?" or unrated is left out. */
+export function patternParts(pattern: string | undefined, level: DateLevel): Set<string> | null {
+  const m = PATTERN_RE.exec((pattern || '').trim().toUpperCase())
+  if (!m) return null
+  const known = (c?: string) => c === '!' || c === '~' || c === '@'
+  const guess = (c?: string) => c === '~' || c === '@'
+  const [, y, mo, d] = m
+  const g = new Set<string>()
+  if (y === '?') g.add('-y')
+  else if (guess(y)) g.add('y')
+  const keepM = known(mo)
+  const keepD = keepM && known(d)
+  if (!keepM && y === '?') return null
+  const finest: DateLevel = keepD ? 'day' : keepM ? 'month' : 'year'
+  if (RANK[finest] > RANK[level]) return null
+  if (keepM && level !== 'year' && guess(mo)) g.add('m')
+  if (keepD && level === 'day' && guess(d)) g.add('d')
+  return g
+}
+
+/** A date edit in today's shape (an older draft's 'circa' is an estimated year; a pattern says what
+ *  is a guess; a pattern that is just the level's own, or no longer describes the date, is left
+ *  out), exactly as the backend's validate makes it, so equal dates compare equal. */
 export function normDate(d: DateEdit): NormDate {
-  const n: NormDate = d.level === 'circa' ? { iso: d.iso, level: 'year', estimate: true } : { iso: d.iso, level: d.level, estimate: !!d.estimate }
-  const p = d.pattern?.toUpperCase()
-  if (p && d.level !== 'circa' && p !== datePattern(n.level, n.estimate)) n.pattern = p
+  const level: DateLevel = d.level === 'circa' ? 'year' : d.level
+  const n: NormDate = { iso: d.iso, level, estimate: d.level === 'circa' || !!d.estimate }
+  const p = d.pattern?.trim().toUpperCase()
+  const g = p ? patternParts(p, level) : null
+  if (p && g) {
+    n.estimate = [...g].some((x) => x !== '-y')
+    if (p !== datePattern(n.level, n.estimate)) n.pattern = p
+  }
   return n
 }
 
@@ -45,14 +79,12 @@ export function sameDate(a: DateEdit | null | undefined, b: DateEdit | null | un
   return JSON.stringify(normDate(a)) === JSON.stringify(normDate(b))
 }
 
-/** Which part of a pattern is the guess, in words, when it is not the finest one shown ("the
- *  year" for a known birthday with a guessed year); '' otherwise. */
-export function guessedPart(pattern: string | undefined, level: DateLevel): string {
-  const m = /^Y([!?~@])(?:M([!?~@]))?(?:D([!?~@]))?$/.exec((pattern || '').toUpperCase())
-  if (!m) return ''
-  const g = (c?: string) => c === '~' || c === '@'
-  const parts = [g(m[1]) ? 'year' : '', g(m[2]) ? 'month' : '', g(m[3]) ? 'day' : ''].filter(Boolean)
-  return parts.length && !(parts.length === 1 && parts[0] === level) ? `the ${parts.join(' and ')}` : ''
+/** Which parts of a date are the guess, in words ("the day", "the year and day"); '' for none. */
+export function guessedPart(d: NormDate): string {
+  const g = d.pattern ? patternParts(d.pattern, d.level) : d.estimate ? new Set([d.level[0]]) : null
+  if (!g) return ''
+  const parts = [g.has('y') ? 'year' : '', g.has('m') ? 'month' : '', g.has('d') ? 'day' : ''].filter(Boolean)
+  return parts.length ? `the ${parts.join(' and ')}` : ''
 }
 
 export interface MetaEdits {
@@ -130,14 +162,20 @@ export function newFaceKey(): string {
 
 export type DateState =
   | { kind: 'none' }
-  | { kind: 'date'; iso: string; level: DateLevel; estimate: boolean; pattern?: string }
-  | { kind: 'text'; text: string; year: number | null; month?: number; day?: number }
+  /** stored: the whole date the file holds when it has more than iso keeps (a day marked unknown,
+   *  photokin's filled-in June 15): shown under Advanced */
+  | { kind: 'date'; iso: string; level: DateLevel; estimate: boolean; pattern?: string; stored?: string }
+  | { kind: 'text'; text: string; year: number | null }
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
 const DATE_RE = /^\s*(\d{4})(?:[-:/.](\d{1,2})(?:[-:/.](\d{1,2}))?)?(?=$|[\sT])(.*)$/
 
 function pad(n: number) {
   return String(n).padStart(2, '0')
+}
+
+function isoOf(y: number, mo: number | null, d: number | null): string {
+  return mo ? (d ? `${y}-${pad(mo)}-${pad(d)}` : `${y}-${pad(mo)}`) : `${y}`
 }
 
 /** What the date editor shows for the file's date: a date with its level of detail (from photokin's
@@ -157,10 +195,9 @@ export function dateState(fields: Record<string, any> | null | undefined): DateS
   const mo = m[2] ? +m[2] : 0
   const d = mo && m[3] ? +m[3] : 0
   if (mo > 12 || d > 31) return { kind: 'text', text: raw, year: y }
+  const whole = isoOf(y, mo || null, d || null)
   const pattern = String(fields?.date_certainty ?? '').toUpperCase()
-  let level: DateLevel = d ? 'day' : mo ? 'month' : 'year'
-  let estimate = false
-  const pm = /^Y([!?~@])(?:M([!?~@]))?(?:D([!?~@]))?$/.exec(pattern)
+  const pm = PATTERN_RE.exec(pattern)
   if (pm) {
     // as the backend reads photokin's patterns: each part rated known ("!") or a guess ("~", "@")
     // is kept while the coarser ones are; an unknown ("?") or unrated part is left out
@@ -168,32 +205,98 @@ export function dateState(fields: Record<string, any> | null | undefined): DateS
     const [, py, pmo, pd] = pm
     const monthKept = known(pmo) && !!mo
     const dayKept = monthKept && known(pd) && !!d
-    if (py === '?') {
-      // the year is unknown (a birthday): the editor can't hold that, so it is shown as words
-      if (!monthKept) return { kind: 'none' }
-      return { kind: 'text', text: `${MONTH_NAMES[mo - 1]}${dayKept ? ` ${d}` : ''} (year unknown)`, year: null,
-        month: mo, ...(dayKept ? { day: d } : {}) }
-    }
-    level = dayKept ? 'day' : monthKept ? 'month' : 'year'
-    estimate = py !== '!' || (monthKept && pmo !== '!') || (dayKept && pd !== '!')
-    const iso0 = level === 'day' ? `${y}-${pad(mo)}-${pad(d)}` : level === 'month' ? `${y}-${pad(mo)}` : `${y}`
+    if (py === '?' && !monthKept) return { kind: 'none' }   // nothing is known
+    const level: DateLevel = dayKept ? 'day' : monthKept ? 'month' : 'year'
+    const iso = isoOf(y, monthKept ? mo : null, dayKept ? d : null)
     // the file's own pattern goes along (kept while only the values are edited)
-    return { kind: 'date', ...normDate({ iso: iso0, level, estimate, pattern }) }
+    return { kind: 'date', ...normDate({ iso, level, pattern }), ...(whole !== iso ? { stored: whole } : {}) }
   }
-  const iso = level === 'day' ? `${y}-${pad(mo)}-${pad(d)}` : level === 'month' ? `${y}-${pad(mo || 6)}` : `${y}`
-  return { kind: 'date', iso, level, estimate }
+  const level: DateLevel = d ? 'day' : mo ? 'month' : 'year'
+  return { kind: 'date', iso: whole, level, estimate: false }
 }
 
-/** An ISO date for a level from year / month / day inputs, or null when they don't make one. */
-export function isoFor(level: DateLevel, y: number | null, mo: number | null, d: number | null): string | null {
-  if (!y || !Number.isInteger(y) || y < 1000 || y > new Date().getFullYear() + 1) return null
-  if (level === 'year') return String(y)
-  if (!mo || !Number.isInteger(mo) || mo < 1 || mo > 12) return null
-  if (level === 'month') return `${y}-${pad(mo)}`
-  if (!d || !Number.isInteger(d) || d < 1) return null
-  const last = new Date(y, mo, 0).getDate()
-  if (d > last) return null
-  return `${y}-${pad(mo)}-${pad(d)}`
+/** The Year / Month / Day boxes for a date: a part the pattern doesn't keep (a day marked unknown,
+ *  the year of a birthday) is blank. */
+export function dateBoxes(d: NormDate): { year: number | null; month: number | null; day: number | null } {
+  const [y, mo, dd] = d.iso.split('-').map(Number)
+  const m = d.pattern ? PATTERN_RE.exec(d.pattern) : null
+  const known = (c?: string) => c === '!' || c === '~' || c === '@'
+  const keepM = !m || known(m[2])
+  const keepD = keepM && (!m || known(m[3]))
+  return { year: m?.[1] === '?' ? null : y, month: keepM ? mo || null : null, day: keepD ? dd || null : null }
+}
+
+const YEAR_MAX = () => new Date().getFullYear() + 1
+const leap = (y: number) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0
+
+/** The date the Year / Month / Day boxes make: blank is unknown, Estimated makes the finest part
+ *  filled in a guess. `keep`: the date as shown, whose pattern (a guessed year with a known
+ *  birthday) and placeholder year stay while the same boxes are filled and Estimated is as it was.
+ *  { edit: null }: all blank (no date). { problem }: the boxes don't make a date yet. */
+export function editFromBoxes(year: number | null, month: number | null, day: number | null, estimate: boolean,
+  keep?: NormDate | null): { edit: NormDate | null } | { problem: string } {
+  if (year === null && month === null && day === null) return { edit: null }
+  if (year !== null && (!Number.isInteger(year) || year < 1000 || year > YEAR_MAX())) return { problem: `Enter a year between 1000 and ${YEAR_MAX()}, or leave it blank.` }
+  if (day !== null && month === null) return { problem: 'A day needs its month.' }
+  if (month !== null && (!Number.isInteger(month) || month < 1 || month > 12)) return { problem: 'Pick a month.' }
+  // the year a date without one is stored with (EXIF needs a whole date): the one the date had,
+  // else 1900 (1904 for February 29)
+  let y = year
+  if (y === null) {
+    const had = keep ? +keep.iso.slice(0, 4) : NaN
+    y = Number.isInteger(had) && had >= 1000 ? had : 1900
+    if (month === 2 && day === 29 && !leap(y)) y = 1904
+  }
+  if (day !== null) {
+    const last = new Date(y, month!, 0).getDate()
+    if (!Number.isInteger(day) || day < 1 || day > last) return { problem: `${MONTH_NAMES[month! - 1]} has ${last} days.` }
+  }
+  const level: DateLevel = day !== null ? 'day' : month !== null ? 'month' : 'year'
+  const iso = isoOf(y, month, day)
+  if (keep?.pattern && keep.estimate === estimate) {
+    const kb = dateBoxes(keep)
+    const same = (kb.year === null) === (year === null) && (kb.month !== null) === (month !== null) && (kb.day !== null) === (day !== null)
+    if (same && patternParts(keep.pattern, level)) return { edit: normDate({ iso, level, pattern: keep.pattern }) }
+  }
+  const p = (year === null ? 'Y?' : `Y${estimate && level === 'year' ? '~' : '!'}`) +
+    (month !== null ? `M${estimate && level === 'month' ? '~' : '!'}` : '') + (day !== null ? `D${estimate ? '~' : '!'}` : '')
+  return { edit: normDate({ iso, level, estimate, pattern: p }) }
+}
+
+/** The date typed under Advanced: the stored date (YYYY, YYYY-MM or YYYY-MM-DD) and photokin's
+ *  keyword pattern ("Y!M~", with or without "DATE:"; blank: the stored date known to its last
+ *  part). { edit: null }: both blank. */
+export function parseAdvanced(stored: string, keyword: string): { edit: NormDate | null } | { problem: string; field: 'stored' | 'keyword' } {
+  const st = stored.trim()
+  const kw = keyword.trim().replace(/^date:\s*/i, '').toUpperCase()
+  if (!st && !kw) return { edit: null }
+  const m = /^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$/.exec(st)
+  if (!m) return { problem: 'Write the stored date as YYYY, YYYY-MM or YYYY-MM-DD.', field: 'stored' }
+  const [y, mo, d] = [+m[1], m[2] ? +m[2] : null, m[3] ? +m[3] : null]
+  if (y < 1000 || y > YEAR_MAX()) return { problem: `The stored year must be between 1000 and ${YEAR_MAX()}.`, field: 'stored' }
+  if (mo !== null && (mo < 1 || mo > 12)) return { problem: `${st} is not a date.`, field: 'stored' }
+  if (d !== null && (d < 1 || d > new Date(y, mo!, 0).getDate())) return { problem: `${st} is not a date.`, field: 'stored' }
+  const level: DateLevel = d !== null ? 'day' : mo !== null ? 'month' : 'year'
+  if (!kw) return { edit: normDate({ iso: st, level, estimate: false }) }
+  if (!PATTERN_RE.test(kw)) return { problem: 'Write the keyword like DATE: Y!M~ (Y, M, D, each with ! known, ~ a guess or ? unknown).', field: 'keyword' }
+  if (!patternParts(kw, level)) return { problem: `DATE: ${kw} rates a part the stored date doesn't have (or says nothing is known).`, field: 'keyword' }
+  return { edit: normDate({ iso: st, level, pattern: kw }) }
+}
+
+/** Is this the file's own date, as shown or as stored (the whole date under Advanced, its day
+ *  marked unknown, typed back as it is)? Then it is no edit. */
+export function isFileDate(d: DateEdit, fields: Record<string, any> | null | undefined): boolean {
+  const st = dateState(fields)
+  if (st.kind !== 'date') return false
+  if (sameDate(d, st)) return true
+  if (!st.stored) return false
+  const level: DateLevel = st.stored.length > 7 ? 'day' : st.stored.length > 4 ? 'month' : 'year'
+  return sameDate(d, { iso: st.stored, level, pattern: st.pattern || datePattern(st.level, st.estimate) })
+}
+
+/** The stored date and keyword of a date, as Advanced shows them. */
+export function advancedOf(d: NormDate, stored?: string): { stored: string; keyword: string } {
+  return { stored: stored || d.iso, keyword: `DATE: ${d.pattern || datePattern(d.level, d.estimate)}` }
 }
 
 // ---------------------------------------------------------------------------- keywords

@@ -8,7 +8,7 @@ import { ensureFonts, loadRegistry, resolveFont } from './fonts'
 import { clearMeasureCache, computeLayout, deepAssign, effectiveTemplate } from './layout'
 import { plainText } from './markup'
 import {
-  addKeywords, cleanText, dateState, editsSince, normDate, sameDate, effectiveFaces, hasEdits, isDateMarker, newFaceKey, peopleKeywords, rematchFaces,
+  addKeywords, cleanText, dateState, editsSince, isFileDate, normDate, effectiveFaces, hasEdits, isDateMarker, newFaceKey, peopleKeywords, rematchFaces,
   rememberName, type Box, type DateEdit, type FaceEdit, type MetaEdits, type TextField,
 } from './metaedits'
 import { loadFlag, saveFlag } from './prefs'
@@ -1223,7 +1223,7 @@ class AppStore {
   /** undefined: back to the file's date; null: no date. The file's own date again is no edit. */
   setDate(s: PhotoSession, d: DateEdit | null | undefined) {
     const file = this.detailOf(s.meta, 'date') as DateEdit | null | undefined
-    if (d === undefined || (file !== undefined && (d === null ? file === null : sameDate(d, file)))) this.setMeta(s, {}, ['date'], true)
+    if (d === undefined || (file !== undefined && (d === null ? file === null : isFileDate(d, s.meta?.fields)))) this.setMeta(s, {}, ['date'], true)
     else this.setMeta(s, { date: d ? normDate(d) : null }, [], true)
   }
 
@@ -1382,7 +1382,7 @@ class AppStore {
     const out: MetaEdits = { ...m }
     for (const k of Object.keys(out) as (keyof MetaEdits)[]) {
       const file = this.detailOf(s.meta, k)
-      if (k === 'date' ? (out.date === null ? file === null : !!out.date && sameDate(out.date, file as DateEdit)) :
+      if (k === 'date' ? (out.date === null ? file === null : !!out.date && isFileDate(out.date, s.meta?.fields)) :
         k !== 'faces' && JSON.stringify(out[k]) === JSON.stringify(file)) delete out[k]
     }
     return Object.keys(out).length ? out : undefined

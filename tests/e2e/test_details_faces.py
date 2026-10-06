@@ -105,7 +105,6 @@ def test_edit_details_and_faces_then_save_to_original(page, server):
     pg.click('[role="tab"]:has-text("Metadata")')
     pw.expect(pg.locator("#d-title")).to_have_value("Old title")
     pg.fill("#d-title", "Picnic at the lake")
-    pg.click('[role="radio"]:has-text("Month")')
     pg.fill('input[aria-label="Year"]', "1952")
     pg.select_option('select[aria-label="Month"]', "6")
     pw.expect(pg.locator(".datef .pv")).to_have_text("June 1952")
@@ -157,7 +156,7 @@ def test_a_half_typed_date_blocks_saving_and_a_revert_does_not(page):
     pg.click('[role="tab"]:has-text("Metadata")')
     year = pg.locator('input[aria-label="Year"]')
     pw.expect(year).to_have_value("1952")
-    year.fill("")                                          # cleared: the date shown is not complete
+    year.fill("195")                                       # half typed: not a date yet
     pw.expect(pg.locator(".datef .warnline")).to_be_visible()
     pw.expect(pg.locator("header.tb button.save")).to_be_disabled()
     year.fill("1952")                                      # back to what the file has
@@ -169,6 +168,49 @@ def test_a_half_typed_date_blocks_saving_and_a_revert_does_not(page):
     est.uncheck()                                          # on and off again: no edit is left
     pw.expect(pg.locator(".datef .pv")).to_have_text("June 1952")
     pw.expect(pg.locator(".details .bar")).to_have_count(0)
+
+def test_blank_parts_are_unknown_and_advanced_overrides_the_boxes(page):
+    pg = page
+    pg.click('[role="tab"]:has-text("Metadata")')
+    year = pg.locator('input[aria-label="Year"]')
+    pw.expect(year).to_have_value("1952")
+    pv = pg.locator(".datef .pv")
+    year.fill("")                                          # emptied: applied once the box is left
+    pw.expect(pv).to_have_text("June 1952")
+    year.press("Tab")                                      # the year unknown: June, then June 14
+    pw.expect(pv).to_have_text("June")
+    pg.fill('input[aria-label="Day"]', "14")
+    pw.expect(pv).to_have_text("June 14")
+    pg.click(".datef summary")
+    stored, kw = pg.locator('input[aria-label="Stored date"]'), pg.locator('input[aria-label="Date keyword"]')
+    pw.expect(stored).to_have_value("1952-06-14")          # the file's year, kept as the placeholder
+    pw.expect(kw).to_have_value("DATE: Y?M!D!")
+    kw.fill("DATE: Y!M~D!x")                               # not a keyword: marked, and saving waits
+    pw.expect(pg.locator(".datef .kw.bad")).to_be_visible()
+    pw.expect(pg.locator("header.tb button.save")).to_be_disabled()
+    kw.fill("DATE: ")                                      # half typed: never applied, never rewritten
+    kw.press("Backspace")
+    pw.expect(kw).to_have_value("DATE:")
+    kw.fill("DATE: Y~M!D!")                                # a known birthday, the year a guess
+    kw.press("Enter")
+    pw.expect(year).to_have_value("1952")
+    pw.expect(pv).to_have_text("c. June 14, 1952")
+    pw.expect(pg.locator(".datef input[type=checkbox]")).to_be_checked()
+    pw.expect(pg.locator("header.tb button.save")).to_be_enabled()
+    # the guessed year backspaced and typed again: still the year that is the guess
+    year.fill("")
+    year.press_sequentially("1953")
+    pw.expect(pv).to_have_text("c. June 14, 1953")
+    pw.expect(kw).to_have_value("DATE: Y~M!D!")
+    pg.click('.details button:has-text("Clear")')
+    pw.expect(year).to_have_value("")
+    pw.expect(pv).to_have_count(0)
+    pw.expect(pg.locator(".details .bar")).to_contain_text("1 detail changed")
+    pg.click('button[aria-label="Undo the date edit"]')
+    pw.expect(year).to_have_value("1952")
+    pw.expect(pg.locator(".details .bar")).to_have_count(0)
+    assert not pg.errors, pg.errors
+
 
 def test_faces_toggle_is_remembered(page):
     pg = page
