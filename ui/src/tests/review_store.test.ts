@@ -479,7 +479,7 @@ describe('edited photo details', () => {
     const d = server.drafts['/p/a.tif']
     expect(d.meta).toEqual({ title: 'Picnic' })
     expect(d.blocks).toEqual({})
-    expect(app.toasts.some((t: any) => t.action?.label === 'Save to original')).toBe(true)
+    expect(app.toasts.some((t: any) => t.action?.label === 'Save metadata to original')).toBe(true)
   })
 
   it('save to original writes the details, and nothing is left unsaved when they were all there was', async () => {

@@ -1,5 +1,5 @@
 """Editing a photo's details and faces in the Metadata tab and on the photo, end to end: the edits
-reach the caption, "Save to original" writes them into the file (checked with ExifTool), undo works.
+reach the caption, "Save metadata only" writes them into the file (checked with ExifTool), undo works.
 
 Run:  cd ui && npm run build && cd .. && python -m pytest tests/e2e/test_details_faces.py -q
 """
@@ -108,7 +108,7 @@ def test_edit_details_and_faces_then_save_to_original(page, server):
     pg.fill('input[aria-label="Year"]', "1952")
     pg.select_option('select[aria-label="Month"]', "6")
     pw.expect(pg.locator(".datef .pv")).to_have_text("June 1952")
-    pw.expect(pg.locator(".details .bar")).to_contain_text("2 details changed")
+    pw.expect(pg.locator(".details .bar")).to_contain_text("2 unsaved changes")
 
     # the faces button below the photo, then rename Ann on the photo itself
     pg.click('button[aria-label="Show faces"]')
@@ -137,8 +137,13 @@ def test_edit_details_and_faces_then_save_to_original(page, server):
     pg.keyboard.press("Enter")
     pg.keyboard.press("Control+a")
     pg.keyboard.type("Annie")
-    pg.click('button:has-text("Save to original")')
-    pw.expect(pg.locator(".details .bar")).to_have_count(0, timeout=20000)
+    save_only = pg.locator('button:has-text("Save metadata only")')
+    save_only.click()
+    pw.expect(pg.locator(".details .bar")).to_contain_text("No unsaved metadata changes", timeout=20000)
+    pw.expect(save_only).to_be_disabled()
+    # only the metadata: no captioned copy is made, and the photo shown is still this one
+    assert not [f for f in os.listdir(server["work"]) if "caption" in f.lower()]
+    pw.expect(pg.locator("#d-title")).to_be_visible()
     md = _md(os.path.join(server["work"], "picnic.jpg"))
     assert md["XMP-dc:Title"] == "Picnic at the lake"
     assert md["XMP-photoshop:DateCreated"] == "1952:06"
@@ -167,7 +172,7 @@ def test_a_half_typed_date_blocks_saving_and_a_revert_does_not(page):
     pw.expect(pg.locator(".datef .pv")).to_have_text("c. June 1952")
     est.uncheck()                                          # on and off again: no edit is left
     pw.expect(pg.locator(".datef .pv")).to_have_text("June 1952")
-    pw.expect(pg.locator(".details .bar")).to_have_count(0)
+    pw.expect(pg.locator(".details .bar")).to_contain_text("No unsaved metadata changes")
 
 def test_blank_parts_are_unknown_and_advanced_overrides_the_boxes(page):
     pg = page
@@ -205,10 +210,10 @@ def test_blank_parts_are_unknown_and_advanced_overrides_the_boxes(page):
     pg.click('.details button:has-text("Clear")')
     pw.expect(year).to_have_value("")
     pw.expect(pv).to_have_count(0)
-    pw.expect(pg.locator(".details .bar")).to_contain_text("1 detail changed")
+    pw.expect(pg.locator(".details .bar")).to_contain_text("1 unsaved change")
     pg.click('button[aria-label="Undo the date edit"]')
     pw.expect(year).to_have_value("1952")
-    pw.expect(pg.locator(".details .bar")).to_have_count(0)
+    pw.expect(pg.locator(".details .bar")).to_contain_text("No unsaved metadata changes")
     assert not pg.errors, pg.errors
 
 

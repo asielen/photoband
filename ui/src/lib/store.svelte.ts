@@ -1454,8 +1454,8 @@ class AppStore {
         s.dirty = true
         this.flushDraft(s)
       }
-      const extra = res.backup_path ? ' (original backed up first)' : ''
-      this.toast('success', `Saved the details into the photo${extra}.`, undefined, 4000, s.meta.name)
+      const extra = res.backup_path ? ' The original was backed up first.' : ''
+      this.toast('success', `Saved the metadata into ${s.meta.name}. Nothing else changed.${extra}`, undefined, 4000, s.meta.name)
       return true
     } catch (e: any) {
       this.flushDraft(s)
@@ -1568,7 +1568,7 @@ class AppStore {
           // the copy has the edited details; the original doesn't yet. Keep them for it, so they
           // are not lost when the app closes, and offer to write them now.
           if (!newer) this.keepDetailsDraft(s)   // (newer edits were autosaved whole just above)
-          this.toast('info', 'The edited details went into the copy. The original still has its old details.', { label: 'Save to original', run: () => this.saveDetails(s) }, 12000, s.meta?.name)
+          this.toast('info', 'The edited details went into the copy. The original still has its old details.', { label: 'Save metadata to original', run: () => this.saveDetails(s) }, 12000, s.meta?.name)
         }
         if (newer) this.toast('info', 'Changes made while saving are kept as unsaved edits.')
         if (overwrote) {

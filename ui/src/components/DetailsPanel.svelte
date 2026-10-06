@@ -1,6 +1,7 @@
 <script lang="ts">
   // The photo's details, editable: what captions are made from. Edits go into the photo you save
-  // (a copy or the original); "Save to original" writes them into the photo itself on their own.
+  // (a copy or the original); "Save metadata only" writes them into the photo itself on their own
+  // (no caption band, no move to the next photo, the image data untouched).
   import { app, type PhotoSession } from '../lib/store.svelte'
   import { post } from '../lib/api'
   import { dateRowText } from '../lib/datetext'
@@ -66,7 +67,8 @@
 
   const canWrite = $derived(!app.batchReview && !app.saving && !!s.meta && n > 0)
   const saveTip = $derived(app.batchReview ? 'In batch review, edits are saved with Save all.'
-    : `Write only these details into ${name}; the photo itself is not changed or re-encoded.` + (backupOn ? ' With Backup on, the photo is backed up first if it has no backup yet.' : ''))
+    : n === 0 ? 'Nothing to save: edit a detail below first.'
+    : `Write only these details into ${name}. The image is not changed or re-encoded, no caption band is added, and you stay on this photo.` + (backupOn ? ' With Backup on, the photo is backed up first if it has no backup yet.' : ''))
   function autosize(el: HTMLTextAreaElement, _value?: string) {
     const fit = () => { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight + 2, 220) + 'px' }
     fit()
@@ -76,18 +78,16 @@
 </script>
 
 <div class="details col">
-  {#if n}
-    <div class="bar" role="status">
-      <div class="col grow">
-        <b>{n} detail{n > 1 ? 's' : ''} changed</b>
-        <span class="small">Saved into the photo with your next save, or now into the original on its own.</span>
-      </div>
-      <div class="row acts">
-        <button class="btn sm primary" disabled={!canWrite} data-tip={saveTip} onclick={() => app.saveDetails(s)}>Save to original</button>
-        <button class="btn sm ghost" data-tip="Undo all detail edits for this photo (Ctrl+Z brings them back)" onclick={() => app.discardDetails(s)}>Discard</button>
-      </div>
+  <div class="bar" class:quiet={!n} role="status">
+    <div class="col grow">
+      <b>{n ? `${n} unsaved change${n > 1 ? 's' : ''}` : 'No unsaved metadata changes'}</b>
+      <span class="small">{n ? 'Writes only the metadata into the original. Nothing else changes.' : 'Edits below are saved here, on their own.'}</span>
     </div>
-  {/if}
+    <div class="row acts">
+      <button class="btn sm primary" disabled={!canWrite} data-tip={saveTip} onclick={() => app.saveDetails(s)}>Save metadata only</button>
+      {#if n}<button class="btn sm ghost" data-tip="Undo all detail edits for this photo (Ctrl+Z brings them back)" onclick={() => app.discardDetails(s)}>Discard</button>{/if}
+    </div>
+  </div>
 
   <section class="col form">
     <h3 class="section-h">Details</h3>
@@ -149,6 +149,8 @@
   .details { gap: 20px; }
   .bar { position: sticky; top: 0; z-index: 2; margin: -16px -16px 0; padding: 10px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: var(--info-bg); color: var(--info-fg); border-bottom: 1px solid var(--line); }
   .bar .grow { flex: 1; min-width: 160px; gap: 2px; }
+  .bar.quiet { background: var(--bg-2); color: var(--fg-2); }
+  .bar.quiet b { font-weight: 600; color: var(--fg); }
   .acts { gap: 4px; }
   .form { gap: 10px; }
   .fld { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
