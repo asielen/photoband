@@ -785,3 +785,57 @@ def test_the_date_tokens_help_matches_what_captions_print():
     from captiontokens import TOKENS
     info = next(t for t in TOKENS if t.name == "date").description
     assert "c. July 1944" in info and "leaves out guessed parts" not in info
+
+
+# -- date editor v3: any photokin pattern the date can carry ------------------------------------
+
+@pytest.mark.parametrize("given, want", [
+    # a day stored but marked unknown: a month date that keeps photokin's pattern
+    ({"iso": "1944-11", "level": "month", "pattern": "Y!M!D?"}, {"iso": "1944-11", "level": "month", "estimate": False, "pattern": "Y!M!D?"}),
+    # a birthday, the year unknown (the year stored is a placeholder)
+    ({"iso": "1944-06-14", "level": "day", "pattern": "Y?M!D!"}, {"iso": "1944-06-14", "level": "day", "estimate": False, "pattern": "Y?M!D!"}),
+    ({"iso": "1944-06", "level": "month", "pattern": "Y?M~"}, {"iso": "1944-06", "level": "month", "estimate": True, "pattern": "Y?M~"}),
+    # older drafts' shapes stay valid
+    ({"iso": "1944", "level": "year", "pattern": "Y!M?D!"}, {"iso": "1944", "level": "year", "estimate": False, "pattern": "Y!M?D!"}),
+    ({"iso": "1960", "level": "year", "pattern": "Y!M?"}, {"iso": "1960", "level": "year", "estimate": False, "pattern": "Y!M?"}),
+    ({"iso": "1925", "level": "circa"}, {"iso": "1925", "level": "year", "estimate": True}),
+    # the pattern says what is a guess, whatever "estimate" says; the level's own pattern is left out
+    ({"iso": "1944-06-14", "level": "day", "estimate": False, "pattern": "Y~M!D!"}, {"iso": "1944-06-14", "level": "day", "estimate": True, "pattern": "Y~M!D!"}),
+    ({"iso": "1944-06", "level": "month", "estimate": False, "pattern": "Y!M@"}, {"iso": "1944-06", "level": "month", "estimate": True, "pattern": "Y!M@"}),
+    ({"iso": "1944-06", "level": "month", "estimate": True, "pattern": "Y!M~"}, {"iso": "1944-06", "level": "month", "estimate": True}),
+])
+def test_a_date_keeps_any_pattern_that_describes_it(given, want):
+    assert metaedit.validate({"date": given})["date"] == want
+
+
+def test_a_pattern_keeping_more_than_the_date_has_gives_way():
+    e = metaedit.validate({"date": {"iso": "1944", "level": "year", "pattern": "Y!M!"}})["date"]
+    assert e == {"iso": "1944", "level": "year", "estimate": False}
+    assert metaedit.validate({"date": {"iso": "1944", "level": "year", "pattern": "Y?"}})["date"] == e  # nothing known
+
+
+@pytest.mark.parametrize("edit, shown", [
+    ({"iso": "1944-11-14", "level": "day", "pattern": "Y!M!D?"}, "November 1944"),
+    ({"iso": "1944-11", "level": "month", "pattern": "Y!M!D?"}, "November 1944"),
+    ({"iso": "1944-06-14", "level": "day", "pattern": "Y?M!D!"}, "June 14"),
+    ({"iso": "1944-06", "level": "month", "pattern": "Y?M!"}, "June"),
+    ({"iso": "1944-06-14", "level": "day", "pattern": "Y~M!D!"}, "c. June 14, 1944"),
+])
+def test_a_camera_date_marked_partly_unknown_is_written_at_midnight_and_reads_back(tmp_path, edit, shown):
+    # the camera's own time stays only for a day known for sure: a date with a time of day is a
+    # clock's, and photokin's keyword would not be read as rating it
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-ExifIFD:DateTimeOriginal=1944:06:14 10:03:00" if "06" in edit["iso"] else "-ExifIFD:DateTimeOriginal=1944:11:14 10:03:00")
+    _details(p, {"date": edit})
+    md = _md(p)
+    assert md["ExifIFD:DateTimeOriginal"].endswith("00:00:00")
+    assert _caption(p) == shown
+    if edit["pattern"].startswith("Y?"):
+        assert "1944" not in _caption(p, "{date:yyyy-mm-dd}")   # the placeholder year is never printed
+
+
+def test_a_known_day_keeps_the_camera_time(tmp_path):
+    p = _img(str(tmp_path / "a.jpg"))
+    _et(p, "-ExifIFD:DateTimeOriginal=1944:06:14 10:03:00")
+    _details(p, {"date": {"iso": "1944-06-14", "level": "day"}})
+    assert _md(p)["ExifIFD:DateTimeOriginal"] == "1944:06:14 10:03:00"

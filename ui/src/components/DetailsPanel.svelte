@@ -4,7 +4,7 @@
   import { app, type PhotoSession } from '../lib/store.svelte'
   import { post } from '../lib/api'
   import { dateRowText } from '../lib/datetext'
-  import { detailProblem, editCount, type TextField } from '../lib/metaedits'
+  import { dateState, detailProblem, editCount, type TextField } from '../lib/metaedits'
   import CreatorField from './CreatorField.svelte'
   import DateField from './DateField.svelte'
   import KeywordField from './KeywordField.svelte'
@@ -43,6 +43,8 @@
   ]
 
   const edited = (k: string) => !!s.draft.meta && k in s.draft.meta
+  // a date to clear: the edited one, or the file's (a date in words too)
+  const hasDate = $derived(edited('date') ? !!s.draft.meta!.date : dateState(s.meta?.fields).kind !== 'none')
   const value = (k: TextField) => (edited(k) ? (s.draft.meta as any)[k] ?? '' : app.fileDetail(s, k))
   function tip(k: string, label: string) {
     const from = src[k] ? `Read from the file’s ${src[k]}. ` : ''
@@ -112,7 +114,8 @@
 
     <div class="fld">
       <div class="lab row"><span data-tip={tip('date', 'Date')} data-tip-side="left">Date</span>
-        {#if edited('date')}<button class="dot" aria-label="Undo the date edit" data-tip="Edited. Click to go back to the file’s date." onclick={() => app.setDate(s, undefined)}></button>{/if}</div>
+        {#if edited('date')}<button class="dot" aria-label="Undo the date edit" data-tip="Edited. Click to go back to the file’s date." onclick={() => app.setDate(s, undefined)}></button>{/if}
+        {#if hasDate}<button class="linkbtn clr" data-tip="Remove the date (and its date keyword)" onclick={() => app.setDate(s, null)}>Clear</button>{/if}</div>
       <DateField {s} />
     </div>
 
@@ -151,6 +154,8 @@
   .fld { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
   .lab { gap: 6px; align-items: center; font-size: 12px; color: var(--fg-2); min-height: 16px; }
   .lab label, .lab span { cursor: default; }
+  .clr { margin-left: auto; font-size: 12px; color: var(--accent-link); background: none; border: 0; padding: 0; cursor: pointer; }
+  .clr:hover { text-decoration: underline; }
   .fld .field { width: 100%; }
   textarea.field { resize: none; overflow-y: auto; line-height: 1.4; }
   .place { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
