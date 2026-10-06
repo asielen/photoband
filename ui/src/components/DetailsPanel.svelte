@@ -67,6 +67,7 @@
 
   const canWrite = $derived(!app.batchReview && !app.saving && !!s.meta && n > 0)
   const saveTip = $derived(app.batchReview ? 'In batch review, edits are saved with Save all.'
+    : app.saving ? 'Wait for the save in progress to finish.'
     : n === 0 ? 'Nothing to save: edit a detail below first.'
     : `Write only these details into ${name}. The image is not changed or re-encoded, no caption band is added, and you stay on this photo.` + (backupOn ? ' With Backup on, the photo is backed up first if it has no backup yet.' : ''))
   function autosize(el: HTMLTextAreaElement, _value?: string) {
@@ -78,16 +79,19 @@
 </script>
 
 <div class="details col">
-  <div class="bar" class:quiet={!n} role="status">
+  {#if s.meta}
+  <div class="bar" class:quiet={!n}>
     <div class="col grow">
-      <b>{n ? `${n} unsaved change${n > 1 ? 's' : ''}` : 'No unsaved metadata changes'}</b>
-      <span class="small">{n ? 'Writes only the metadata into the original. Nothing else changes.' : 'Edits below are saved here, on their own.'}</span>
+      <b role="status">{n ? `${n} unsaved change${n > 1 ? 's' : ''}` : 'No unsaved metadata changes'}</b>
+      <span class="small">{n ? 'Save metadata only writes just these into the original; nothing else changes. Your next caption save includes them too.'
+        : 'Edit a detail below to save it on its own.'}</span>
     </div>
     <div class="row acts">
       <button class="btn sm primary" disabled={!canWrite} data-tip={saveTip} onclick={() => app.saveDetails(s)}>Save metadata only</button>
       {#if n}<button class="btn sm ghost" data-tip="Undo all detail edits for this photo (Ctrl+Z brings them back)" onclick={() => app.discardDetails(s)}>Discard</button>{/if}
     </div>
   </div>
+  {/if}
 
   <section class="col form">
     <h3 class="section-h">Details</h3>

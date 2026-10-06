@@ -552,6 +552,18 @@ describe('edited photo details', () => {
     expect(await app.saveDetails(s)).toBe(true)
     expect(server.posts.some((x: any) => x.path === '/api/drafts' && x.body.state === null)).toBe(true)
     expect(s.dirty).toBe(false)
+    // a caption was saved this session: still "Saved"
+    expect(app.photos.find((x) => x.path === '/p/a.tif')?.status).toBe('saved')
+  })
+
+  it('saving only the metadata does not mark an uncaptioned photo "Saved"', async () => {
+    const { app, s } = await open()
+    app.setDetail(s, 'title', 'Picnic')
+    await flush()
+    expect(app.photos.find((x) => x.path === '/p/a.tif')?.status).toBe('draft')
+    expect(await app.saveDetails(s)).toBe(true)
+    expect(s.dirty).toBe(false)
+    expect(app.photos.find((x) => x.path === '/p/a.tif')?.status).toBe('untouched')
   })
 
   it('a keyword the file has on its own is never removed with a face', async () => {

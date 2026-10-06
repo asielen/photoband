@@ -26,6 +26,8 @@ export interface PhotoItem {
   status: Status
   error?: string
   draft?: boolean
+  /** the status before its unsaved edits began ('saved': a caption was saved this session) */
+  settled?: 'untouched' | 'saved'
 }
 
 export interface Toast {
@@ -1080,7 +1082,10 @@ class AppStore {
   setStatus(path: string, status: Status, error?: string) {
     const i = this.photos.findIndex((p) => p.path === path)
     if (i >= 0 && (this.photos[i].status !== status || this.photos[i].error !== error)) {
-      this.photos[i] = { ...this.photos[i], status, error }
+      const was = this.photos[i].status
+      // once a caption is saved it stays "Saved" under later edits; else the status before them
+      const settled = status === 'saved' || this.photos[i].settled === 'saved' ? 'saved' : was === 'untouched' ? was : this.photos[i].settled
+      this.photos[i] = { ...this.photos[i], status, error, settled }
     }
   }
 
@@ -1448,7 +1453,10 @@ class AppStore {
         // the details were all there was: nothing is left unsaved, and no draft either (one may
         // remain from a saved copy, made for the file as it was)
         s.dirty = false
-        this.setStatus(s.path, 'saved')
+        // only the metadata was saved: the photo is as captioned (or not) as before its edits, not
+        // "Saved" as a photo with a caption band is
+        const item = this.photos.find((p) => p.path === s.path)
+        this.setStatus(s.path, item?.settled === 'saved' ? 'saved' : 'untouched')
         post('/api/drafts', { path: s.path, state: null }).catch(() => {})
       } else {
         s.dirty = true
@@ -1550,6 +1558,8 @@ class AppStore {
         // edits typed while the save ran are not in the file: they stay unsaved (and autosaved)
         const newer = this.snap(s) !== snap ? this.snap(s) : null
         if (newer) {
+          // the caption is saved (edits made during the save are not): "Saved" once they are
+          this.setStatus(s.path, 'saved')
           this.setStatus(s.path, 'draft')
           // after an overwrite the old session's photo edge no longer fits the file: the fresh
           // session below takes over the text instead
