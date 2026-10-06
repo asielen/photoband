@@ -566,6 +566,17 @@ describe('edited photo details', () => {
     expect(app.photos.find((x) => x.path === '/p/a.tif')?.status).toBe('untouched')
   })
 
+  it('saving only the metadata keeps a photo’s error (it still can’t be captioned)', async () => {
+    const { app, s } = await open()
+    app.setStatus('/p/a.tif', 'error', 'The folder is read-only.')
+    app.setDetail(s, 'title', 'Picnic')
+    await flush()
+    expect(app.photos.find((x) => x.path === '/p/a.tif')?.status).toBe('draft')
+    expect(await app.saveDetails(s)).toBe(true)
+    const item = app.photos.find((x) => x.path === '/p/a.tif')
+    expect([item?.status, item?.error]).toEqual(['error', 'The folder is read-only.'])
+  })
+
   it('a keyword the file has on its own is never removed with a face', async () => {
     server.faces = { named: [{ name: 'Bob', box: [0.1, 0.1, 0.1, 0.1], source: 'MWG', ids: ['mwg:0'], key: 'mwg:0' }], unnamed: [], unnamed_count: 0, has_positions: true, warnings: [] }
     server.fields = { keywords: ['Bob', 'Ann'] }        // people as keywords; Ann has no face

@@ -26,8 +26,9 @@ export interface PhotoItem {
   status: Status
   error?: string
   draft?: boolean
-  /** the status before its unsaved edits began ('saved': a caption was saved this session) */
-  settled?: 'untouched' | 'saved'
+  /** the status (and error) before its unsaved edits began, or 'saved' once a caption was saved
+   *  this session: what the photo goes back to when only its metadata is saved */
+  settled?: { status: Status; error?: string }
 }
 
 export interface Toast {
@@ -1082,10 +1083,13 @@ class AppStore {
   setStatus(path: string, status: Status, error?: string) {
     const i = this.photos.findIndex((p) => p.path === path)
     if (i >= 0 && (this.photos[i].status !== status || this.photos[i].error !== error)) {
-      const was = this.photos[i].status
-      // once a caption is saved it stays "Saved" under later edits; else the status before them
-      const settled = status === 'saved' || this.photos[i].settled === 'saved' ? 'saved' : was === 'untouched' ? was : this.photos[i].settled
-      this.photos[i] = { ...this.photos[i], status, error, settled }
+      const prev = this.photos[i]
+      // a saved caption, or the state the photo was in when edits began (an error with its
+      // message: it still can't be saved)
+      let settled = prev.settled
+      if (status === 'saved') settled = { status: 'saved' }
+      else if (status === 'draft' && prev.status !== 'draft') settled = { status: prev.status, error: prev.error }
+      this.photos[i] = { ...prev, status, error, settled }
     }
   }
 
@@ -1455,8 +1459,8 @@ class AppStore {
         s.dirty = false
         // only the metadata was saved: the photo is as captioned (or not) as before its edits, not
         // "Saved" as a photo with a caption band is
-        const item = this.photos.find((p) => p.path === s.path)
-        this.setStatus(s.path, item?.settled === 'saved' ? 'saved' : 'untouched')
+        const back = this.photos.find((p) => p.path === s.path)?.settled ?? { status: 'untouched' as Status }
+        this.setStatus(s.path, back.status === 'draft' ? 'untouched' : back.status, back.error)
         post('/api/drafts', { path: s.path, state: null }).catch(() => {})
       } else {
         s.dirty = true
