@@ -2,6 +2,19 @@
 
 All notable changes to Photoband. The version lives in one place: `photoband/__init__.py`.
 
+## 1.3.1 - 2026-10-06
+
+### Save metadata only
+- The Metadata tab has a save bar that is always shown at the top, with a **Save metadata only**
+  button: it writes just the edited details into the original photo. No caption band, no new
+  border, no move to the next photo, and the image data is checked to be unchanged. With nothing
+  to save it reads "No unsaved metadata changes" and the button is disabled. Your next caption save
+  still includes the edits too.
+- Saving only the metadata no longer marks an uncaptioned photo "Saved" in the filmstrip (that
+  check is for a saved caption): the photo keeps the status it had, an error included.
+- Details edited while a copy was being saved no longer leave the photo marked unsaved after they
+  are saved on their own.
+
 ## 1.3.0 - 2026-10-06
 
 ### A clearer date editor
