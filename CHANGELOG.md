@@ -2,6 +2,25 @@
 
 All notable changes to Photoband. The version lives in one place: `photoband/__init__.py`.
 
+## 1.3.0 - 2026-10-06
+
+### A clearer date editor
+- **Year, Month and Day are always shown**, and each is optional: a blank box is unknown. One
+  **Estimated** box makes the last part filled in a best guess. "Prints as" shows the result on
+  the same row, and **Clear** (beside the label) removes the date.
+- **A year left blank** is a date whose year is unknown: a birthday prints "June 14". It is written
+  as photokin's `DATE: Y?M!D!`, stored with the photo's own year (or 1900), which is never printed.
+- **Advanced** (folded away) shows the stored date and the `DATE:` keyword, and takes them as typed,
+  so any photokin pattern can be written (a guessed year with a known birthday, `Y~M!D!`). A day
+  the file stores but marks unknown (`Y!M!D?`) is blank in the boxes and shown here.
+- A box emptied, or an Advanced field, applies when you leave it (or press Enter), so backspacing a
+  year to type another keeps Estimated and which part is the guess.
+- A camera's time of day is kept only for a date known to the day.
+
+### Roomier caption bands
+- The built-in templates leave more space between text blocks, and Classic Polaroid has a taller
+  bottom margin. (Copies of templates you saved yourself are unchanged.)
+
 ## 1.2.0 - 2026-10-05
 
 ### Estimated dates
