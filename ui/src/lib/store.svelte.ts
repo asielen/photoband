@@ -1467,7 +1467,7 @@ class AppStore {
         this.flushDraft(s)
       }
       const extra = res.backup_path ? ' The original was backed up first.' : ''
-      this.toast('success', `Saved the metadata into ${s.meta.name}. Nothing else changed.${extra}`, undefined, 4000, s.meta.name)
+      this.toast('success', `Saved the metadata into the photo. Nothing else changed.${extra}`, undefined, 4000, s.meta.name)
       return true
     } catch (e: any) {
       this.flushDraft(s)
@@ -1562,7 +1562,9 @@ class AppStore {
         // edits typed while the save ran are not in the file: they stay unsaved (and autosaved)
         const newer = this.snap(s) !== snap ? this.snap(s) : null
         if (newer) {
-          // the caption is saved (edits made during the save are not): "Saved" once they are
+          // the caption is saved (edits made during the save are not): "Saved" once they are, and
+          // what was saved is the clean state they are compared with
+          s.cleanSnap = snap
           this.setStatus(s.path, 'saved')
           this.setStatus(s.path, 'draft')
           // after an overwrite the old session's photo edge no longer fits the file: the fresh

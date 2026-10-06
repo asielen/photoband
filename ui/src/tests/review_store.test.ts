@@ -556,6 +556,22 @@ describe('edited photo details', () => {
     expect(app.photos.find((x) => x.path === '/p/a.tif')?.status).toBe('saved')
   })
 
+  it('metadata edited while a copy is saved, then saved on its own: nothing is left unsaved', async () => {
+    server.saveOut = '/p/captioned/a.tif'
+    const { app, s } = await open()
+    app.setDetail(s, 'title', 'Picnic')
+    const p = app.save(s, 'copy')
+    while (!server.saveGate) await sleep(10)
+    app.setDetail(s, 'notes', 'By the lake')         // typed while the copy is written
+    server.saveGate()
+    await p
+    await flush()
+    expect(s.dirty).toBe(true)
+    expect(await app.saveDetails(s)).toBe(true)
+    expect(s.dirty).toBe(false)
+    expect(app.photos.find((x) => x.path === '/p/a.tif')?.status).toBe('saved')
+  })
+
   it('saving only the metadata does not mark an uncaptioned photo "Saved"', async () => {
     const { app, s } = await open()
     app.setDetail(s, 'title', 'Picnic')
