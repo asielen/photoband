@@ -799,6 +799,7 @@ def test_the_date_tokens_help_matches_what_captions_print():
     ({"iso": "1944", "level": "year", "pattern": "Y!M?D!"}, {"iso": "1944", "level": "year", "estimate": False, "pattern": "Y!M?D!"}),
     ({"iso": "1960", "level": "year", "pattern": "Y!M?"}, {"iso": "1960", "level": "year", "estimate": False, "pattern": "Y!M?"}),
     ({"iso": "1925", "level": "circa"}, {"iso": "1925", "level": "year", "estimate": True}),
+    ({"iso": "1925", "level": "circa", "pattern": "Y!"}, {"iso": "1925", "level": "year", "estimate": False}),
     # the pattern says what is a guess, whatever "estimate" says; the level's own pattern is left out
     ({"iso": "1944-06-14", "level": "day", "estimate": False, "pattern": "Y~M!D!"}, {"iso": "1944-06-14", "level": "day", "estimate": True, "pattern": "Y~M!D!"}),
     ({"iso": "1944-06", "level": "month", "estimate": False, "pattern": "Y!M@"}, {"iso": "1944-06", "level": "month", "estimate": True, "pattern": "Y!M@"}),

@@ -28,6 +28,9 @@ describe('date editor state', () => {
     expect(dateBoxes(normDate({ iso: '1944-06-14', level: 'day', pattern: 'Y?M!D!' }))).toEqual({ year: null, month: 6, day: 14 })
     expect(dateBoxes(normDate({ iso: '1944-11', level: 'month', pattern: 'Y!M!D?' }))).toEqual({ year: 1944, month: 11, day: null })
     expect(dateBoxes(normDate({ iso: '1925', level: 'year', estimate: true }))).toEqual({ year: 1925, month: null, day: null })
+    // a whole date typed under Advanced with a coarser keyword: the boxes agree with what prints
+    expect(dateBoxes(normDate({ iso: '1944-06-14', level: 'day', pattern: 'Y!M!D?' }))).toEqual({ year: 1944, month: 6, day: null })
+    expect(dateBoxes(normDate({ iso: '1944-06-14', level: 'day', pattern: 'Y!' }))).toEqual({ year: 1944, month: null, day: null })
   })
   it('which parts are the guess', () => {
     expect(guessedPart(normDate({ iso: '1944-06-14', level: 'day', pattern: 'Y~M!D!' }))).toBe('the year')
@@ -40,6 +43,8 @@ describe('date editor state', () => {
   })
   it('normalises as the backend does: the pattern says what is a guess', () => {
     expect(normDate({ iso: '1925', level: 'circa' })).toEqual({ iso: '1925', level: 'year', estimate: true })
+    // as the backend: circa is an estimated year, and a pattern still says what is a guess
+    expect(normDate({ iso: '1925', level: 'circa', pattern: 'Y!' })).toEqual({ iso: '1925', level: 'year', estimate: false })
     expect(['day', 'month', 'year'].map((l) => datePattern(l as any, true))).toEqual(['Y!M!D~', 'Y!M~', 'Y~'])
     expect(['day', 'month', 'year'].map((l) => datePattern(l as any, false))).toEqual(['Y!M!D!', 'Y!M!', 'Y!'])
     // the same table as tests/test_metaedit.py::test_a_date_keeps_any_pattern_that_describes_it

@@ -62,10 +62,10 @@ export function patternParts(pattern: string | undefined, level: DateLevel): Set
  *  is a guess; a pattern that is just the level's own, or no longer describes the date, is left
  *  out), exactly as the backend's validate makes it, so equal dates compare equal. */
 export function normDate(d: DateEdit): NormDate {
-  if (d.level === 'circa') return { iso: d.iso, level: 'year', estimate: true }
-  const n: NormDate = { iso: d.iso, level: d.level, estimate: !!d.estimate }
+  const level: DateLevel = d.level === 'circa' ? 'year' : d.level
+  const n: NormDate = { iso: d.iso, level, estimate: d.level === 'circa' || !!d.estimate }
   const p = d.pattern?.trim().toUpperCase()
-  const g = p ? patternParts(p, d.level) : null
+  const g = p ? patternParts(p, level) : null
   if (p && g) {
     n.estimate = [...g].some((x) => x !== '-y')
     if (p !== datePattern(n.level, n.estimate)) n.pattern = p
@@ -219,8 +219,11 @@ export function dateState(fields: Record<string, any> | null | undefined): DateS
  *  the year of a birthday) is blank. */
 export function dateBoxes(d: NormDate): { year: number | null; month: number | null; day: number | null } {
   const [y, mo, dd] = d.iso.split('-').map(Number)
-  const g = d.pattern ? patternParts(d.pattern, d.level) : null
-  return { year: g?.has('-y') ? null : y, month: mo || null, day: dd || null }
+  const m = d.pattern ? PATTERN_RE.exec(d.pattern) : null
+  const known = (c?: string) => c === '!' || c === '~' || c === '@'
+  const keepM = !m || known(m[2])
+  const keepD = keepM && (!m || known(m[3]))
+  return { year: m?.[1] === '?' ? null : y, month: keepM ? mo || null : null, day: keepD ? dd || null : null }
 }
 
 const YEAR_MAX = () => new Date().getFullYear() + 1

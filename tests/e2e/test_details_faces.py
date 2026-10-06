@@ -175,7 +175,9 @@ def test_blank_parts_are_unknown_and_advanced_overrides_the_boxes(page):
     year = pg.locator('input[aria-label="Year"]')
     pw.expect(year).to_have_value("1952")
     pv = pg.locator(".datef .pv")
-    year.fill("")                                          # the year unknown: June, then June 14
+    year.fill("")                                          # emptied: applied once the box is left
+    pw.expect(pv).to_have_text("June 1952")
+    year.press("Tab")                                      # the year unknown: June, then June 14
     pw.expect(pv).to_have_text("June")
     pg.fill('input[aria-label="Day"]', "14")
     pw.expect(pv).to_have_text("June 14")
@@ -186,11 +188,20 @@ def test_blank_parts_are_unknown_and_advanced_overrides_the_boxes(page):
     kw.fill("DATE: Y!M~D!x")                               # not a keyword: marked, and saving waits
     pw.expect(pg.locator(".datef .kw.bad")).to_be_visible()
     pw.expect(pg.locator("header.tb button.save")).to_be_disabled()
+    kw.fill("DATE: ")                                      # half typed: never applied, never rewritten
+    kw.press("Backspace")
+    pw.expect(kw).to_have_value("DATE:")
     kw.fill("DATE: Y~M!D!")                                # a known birthday, the year a guess
+    kw.press("Enter")
     pw.expect(year).to_have_value("1952")
     pw.expect(pv).to_have_text("c. June 14, 1952")
     pw.expect(pg.locator(".datef input[type=checkbox]")).to_be_checked()
     pw.expect(pg.locator("header.tb button.save")).to_be_enabled()
+    # the guessed year backspaced and typed again: still the year that is the guess
+    year.fill("")
+    year.press_sequentially("1953")
+    pw.expect(pv).to_have_text("c. June 14, 1953")
+    pw.expect(kw).to_have_value("DATE: Y~M!D!")
     pg.click('.details button:has-text("Clear")')
     pw.expect(year).to_have_value("")
     pw.expect(pv).to_have_count(0)

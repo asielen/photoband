@@ -33,6 +33,11 @@
   // under way); going back to what was shown is never one
   let shownBoxes = $state('')
   let shownAdv = $state('')
+  // which boxes were filled as the date was shown: typing applies as it goes, but a box emptied
+  // applies once it is left (or on Enter), so a year backspaced to type another is not a
+  // year-unknown date for a moment (its Estimated and its guessed part are kept)
+  let shownShape = $state('')
+  const shape = (y: number | null, m: number | null, d: number | null) => [y, m, d].map((v) => (v === null ? 0 : 1)).join('')
   const boxes = $derived(JSON.stringify([year, month, day, estimate]))
   const adv = $derived(JSON.stringify([advStored, advKeyword]))
   let lastKey = ''
@@ -54,16 +59,21 @@
     }
     shownBoxes = JSON.stringify([year, month, day, estimate])
     shownAdv = JSON.stringify([advStored, advKeyword])
+    shownShape = shape(year, month, day)
   })
 
   // the date the boxes keep a pattern of: the one shown, or the file's own when Estimated is back
   // to what the file says (a guessed year with a known birthday comes back after a toggle)
-  const keep = $derived([shownDate, fileDate].find((k) => k?.pattern && k.estimate === estimate) ?? shownDate ?? fileDate)
+  // (after Clear the file's date is gone: a new date is a new statement)
+  const cleared = $derived(edited && s.draft.meta!.date === null)
+  const keepFile = $derived(cleared ? null : fileDate)
+  const keep = $derived([shownDate, keepFile].find((k) => k?.pattern && k.estimate === estimate) ?? shownDate ?? keepFile)
   const fromBoxes = $derived(editFromBoxes(year, month, day, estimate, keep))
   const fromAdv = $derived(parseAdvanced(advStored, advKeyword))
-  const problem = $derived(
-    adv !== shownAdv && 'problem' in fromAdv ? fromAdv.problem :
-    boxes !== shownBoxes && 'problem' in fromBoxes ? fromBoxes.problem : '')
+  // all boxes emptied is not "no date" (Clear is): the date is still being typed
+  const boxProblem = $derived(boxes === shownBoxes ? '' : 'problem' in fromBoxes ? fromBoxes.problem :
+    fromBoxes.edit === null && shown.kind !== 'none' ? 'Enter a date, or use Clear to remove it.' : '')
+  const problem = $derived(adv !== shownAdv && 'problem' in fromAdv ? fromAdv.problem : boxProblem)
   const badAdv = $derived(adv !== shownAdv && 'problem' in fromAdv ? fromAdv.field : '')
   // a date that isn't one yet is not what a save would write: saving waits until it is (or cleared)
   $effect(() => {
@@ -72,13 +82,19 @@
     return () => { session.invalidDetail = null }
   })
 
-  function applyBoxes() {
-    if ('edit' in fromBoxes && boxes !== shownBoxes) app.setDate(s, fromBoxes.edit)
+  /** live: while typing (applied only when the same boxes are filled as shown) */
+  function applyBoxes(live = false) {
+    if (boxes === shownBoxes || !('edit' in fromBoxes) || !fromBoxes.edit) return
+    // (a box emptied waits: it may be a year backspaced to type another)
+    if (live && [...shape(year, month, day)].some((c, i) => c === '0' && shownShape[i] === '1')) return
+    app.setDate(s, fromBoxes.edit)
   }
+  // Advanced applies when a field is left (or on Enter): a keyword half typed is never applied
   function applyAdv() {
-    if ('edit' in fromAdv && adv !== shownAdv) app.setDate(s, fromAdv.edit)
+    if ('edit' in fromAdv && fromAdv.edit && adv !== shownAdv) app.setDate(s, fromAdv.edit)
   }
-  const num = (v: string) => (v.trim() === '' ? null : +v)
+  // a number box: blank is unknown; what isn't a number yet ("-", "1e") is a problem, not blank
+  const num = (el: HTMLInputElement) => (el.validity.badInput ? NaN : el.value.trim() === '' ? null : +el.value)
 
   const guessNote = $derived(estimate && 'edit' in fromBoxes && fromBoxes.edit ? guessedPart(fromBoxes.edit) : '')
   // what Advanced says about parts that are stored but not shown
@@ -114,16 +130,16 @@
   <div class="parts">
     <label class="part"><span>Year</span>
       <input class="field" type="number" min="1000" max={new Date().getFullYear() + 1} step="1" placeholder="unknown" aria-label="Year" value={year ?? ''}
-        oninput={(e) => { year = num((e.target as HTMLInputElement).value); applyBoxes() }} /></label>
+        oninput={(e) => { year = num(e.target as HTMLInputElement); applyBoxes(true) }} onchange={() => applyBoxes()} /></label>
     <label class="part"><span>Month</span>
       <select class="field" class:blank={month === null} aria-label="Month" value={month ?? ''}
-        onchange={(e) => { month = num((e.target as HTMLSelectElement).value); applyBoxes() }}>
+        onchange={(e) => { const v = (e.target as HTMLSelectElement).value; month = v ? +v : null; applyBoxes() }}>
         <option value="">unknown</option>
         {#each MONTHS as m, i}<option value={i + 1}>{m}</option>{/each}
       </select></label>
     <label class="part"><span>Day</span>
       <input class="field" type="number" min="1" max={daysIn} step="1" placeholder="unknown" aria-label="Day" value={day ?? ''}
-        oninput={(e) => { day = num((e.target as HTMLInputElement).value); applyBoxes() }} /></label>
+        oninput={(e) => { day = num(e.target as HTMLInputElement); applyBoxes(true) }} onchange={() => applyBoxes()} /></label>
   </div>
   <div class="row est-row">
     <label class="row est" data-tip="The last part filled in is a best guess: around Thanksgiving (the 23rd), the summer of 1944 (July), the 1920s (1925). Printed with “c.”.">
@@ -143,10 +159,10 @@
         <span class="faint small">Stored</span>
         <input class="field mono st" class:bad={badAdv === 'stored'} aria-label="Stored date" placeholder="YYYY-MM-DD" spellcheck="false" value={advStored}
           data-tip="The date as stored: YYYY, YYYY-MM or YYYY-MM-DD"
-          oninput={(e) => { advStored = (e.target as HTMLInputElement).value; applyAdv() }} />
+          oninput={(e) => { advStored = (e.target as HTMLInputElement).value }} onchange={applyAdv} />
         <input class="field mono kw" class:bad={badAdv === 'keyword'} aria-label="Date keyword" placeholder="DATE: Y!M!D!" spellcheck="false" value={advKeyword}
           data-tip="photokin’s date keyword: Y, M and D, each with ! known, ~ a best guess or ? unknown (DATE: Y~M!D! is a known birthday in a guessed year)"
-          oninput={(e) => { advKeyword = (e.target as HTMLInputElement).value; applyAdv() }} />
+          oninput={(e) => { advKeyword = (e.target as HTMLInputElement).value }} onchange={applyAdv} />
       </div>
       {#if advNote}<p class="small faint">{advNote}</p>{/if}
     </div>
