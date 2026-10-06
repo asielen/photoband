@@ -217,7 +217,7 @@ export interface PhotoDraft {
   brushRemove?: string | null
   /** case A: the user chose "Add a new band" (keep the old Photoband band as part of the photo) */
   keepBand?: boolean
-  /** photo details edited here (written with the next save, or with "Save to original") */
+  /** photo details edited here (written with the next save, or with "Save metadata only") */
   meta?: MetaEdits
   /** this photo's row count for {names:rows}; none or null: automatic */
   faceRows?: number | null

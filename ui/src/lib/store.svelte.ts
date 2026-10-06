@@ -26,6 +26,9 @@ export interface PhotoItem {
   status: Status
   error?: string
   draft?: boolean
+  /** the status (and error) before its unsaved edits began, or 'saved' once a caption was saved
+   *  this session: what the photo goes back to when only its metadata is saved */
+  settled?: { status: Status; error?: string }
 }
 
 export interface Toast {
@@ -1080,7 +1083,13 @@ class AppStore {
   setStatus(path: string, status: Status, error?: string) {
     const i = this.photos.findIndex((p) => p.path === path)
     if (i >= 0 && (this.photos[i].status !== status || this.photos[i].error !== error)) {
-      this.photos[i] = { ...this.photos[i], status, error }
+      const prev = this.photos[i]
+      // a saved caption, or the state the photo was in when edits began (an error with its
+      // message: it still can't be saved)
+      let settled = prev.settled
+      if (status === 'saved') settled = { status: 'saved' }
+      else if (status === 'draft' && prev.status !== 'draft') settled = { status: prev.status, error: prev.error }
+      this.photos[i] = { ...prev, status, error, settled }
     }
   }
 
@@ -1448,14 +1457,17 @@ class AppStore {
         // the details were all there was: nothing is left unsaved, and no draft either (one may
         // remain from a saved copy, made for the file as it was)
         s.dirty = false
-        this.setStatus(s.path, 'saved')
+        // only the metadata was saved: the photo is as captioned (or not) as before its edits, not
+        // "Saved" as a photo with a caption band is
+        const back = this.photos.find((p) => p.path === s.path)?.settled ?? { status: 'untouched' as Status }
+        this.setStatus(s.path, back.status === 'draft' ? 'untouched' : back.status, back.error)
         post('/api/drafts', { path: s.path, state: null }).catch(() => {})
       } else {
         s.dirty = true
         this.flushDraft(s)
       }
-      const extra = res.backup_path ? ' (original backed up first)' : ''
-      this.toast('success', `Saved the details into the photo${extra}.`, undefined, 4000, s.meta.name)
+      const extra = res.backup_path ? ' The original was backed up first.' : ''
+      this.toast('success', `Saved the metadata into the photo. Nothing else changed.${extra}`, undefined, 4000, s.meta.name)
       return true
     } catch (e: any) {
       this.flushDraft(s)
@@ -1550,6 +1562,10 @@ class AppStore {
         // edits typed while the save ran are not in the file: they stay unsaved (and autosaved)
         const newer = this.snap(s) !== snap ? this.snap(s) : null
         if (newer) {
+          // the caption is saved (edits made during the save are not): "Saved" once they are, and
+          // what was saved is the clean state they are compared with
+          s.cleanSnap = snap
+          this.setStatus(s.path, 'saved')
           this.setStatus(s.path, 'draft')
           // after an overwrite the old session's photo edge no longer fits the file: the fresh
           // session below takes over the text instead
@@ -1568,7 +1584,7 @@ class AppStore {
           // the copy has the edited details; the original doesn't yet. Keep them for it, so they
           // are not lost when the app closes, and offer to write them now.
           if (!newer) this.keepDetailsDraft(s)   // (newer edits were autosaved whole just above)
-          this.toast('info', 'The edited details went into the copy. The original still has its old details.', { label: 'Save to original', run: () => this.saveDetails(s) }, 12000, s.meta?.name)
+          this.toast('info', 'The edited details went into the copy. The original still has its old details.', { label: 'Save metadata to original', run: () => this.saveDetails(s) }, 12000, s.meta?.name)
         }
         if (newer) this.toast('info', 'Changes made while saving are kept as unsaved edits.')
         if (overwrote) {

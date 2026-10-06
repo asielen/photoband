@@ -479,7 +479,7 @@ describe('edited photo details', () => {
     const d = server.drafts['/p/a.tif']
     expect(d.meta).toEqual({ title: 'Picnic' })
     expect(d.blocks).toEqual({})
-    expect(app.toasts.some((t: any) => t.action?.label === 'Save to original')).toBe(true)
+    expect(app.toasts.some((t: any) => t.action?.label === 'Save metadata to original')).toBe(true)
   })
 
   it('save to original writes the details, and nothing is left unsaved when they were all there was', async () => {
@@ -552,6 +552,45 @@ describe('edited photo details', () => {
     expect(await app.saveDetails(s)).toBe(true)
     expect(server.posts.some((x: any) => x.path === '/api/drafts' && x.body.state === null)).toBe(true)
     expect(s.dirty).toBe(false)
+    // a caption was saved this session: still "Saved"
+    expect(app.photos.find((x) => x.path === '/p/a.tif')?.status).toBe('saved')
+  })
+
+  it('metadata edited while a copy is saved, then saved on its own: nothing is left unsaved', async () => {
+    server.saveOut = '/p/captioned/a.tif'
+    const { app, s } = await open()
+    app.setDetail(s, 'title', 'Picnic')
+    const p = app.save(s, 'copy')
+    while (!server.saveGate) await sleep(10)
+    app.setDetail(s, 'notes', 'By the lake')         // typed while the copy is written
+    server.saveGate()
+    await p
+    await flush()
+    expect(s.dirty).toBe(true)
+    expect(await app.saveDetails(s)).toBe(true)
+    expect(s.dirty).toBe(false)
+    expect(app.photos.find((x) => x.path === '/p/a.tif')?.status).toBe('saved')
+  })
+
+  it('saving only the metadata does not mark an uncaptioned photo "Saved"', async () => {
+    const { app, s } = await open()
+    app.setDetail(s, 'title', 'Picnic')
+    await flush()
+    expect(app.photos.find((x) => x.path === '/p/a.tif')?.status).toBe('draft')
+    expect(await app.saveDetails(s)).toBe(true)
+    expect(s.dirty).toBe(false)
+    expect(app.photos.find((x) => x.path === '/p/a.tif')?.status).toBe('untouched')
+  })
+
+  it('saving only the metadata keeps a photo’s error (it still can’t be captioned)', async () => {
+    const { app, s } = await open()
+    app.setStatus('/p/a.tif', 'error', 'The folder is read-only.')
+    app.setDetail(s, 'title', 'Picnic')
+    await flush()
+    expect(app.photos.find((x) => x.path === '/p/a.tif')?.status).toBe('draft')
+    expect(await app.saveDetails(s)).toBe(true)
+    const item = app.photos.find((x) => x.path === '/p/a.tif')
+    expect([item?.status, item?.error]).toEqual(['error', 'The folder is read-only.'])
   })
 
   it('a keyword the file has on its own is never removed with a face', async () => {
